@@ -1,0 +1,66 @@
+{
+  "version": "rust-v0.163.0",
+  "sourceSHA256": {
+    "protocol/src/error.rs": "ed7438fc5dbe1d72ef26d0c10afc2165657d59248869e9e4d5f35e17b86c04bc",
+    "codex-api/src/sse/responses_error.rs": "c5236fe61f2a75e79b94b28565d69b7d1c00d208a6955ce173e799659a321f05",
+    "codex-api/src/api_bridge.rs": "fe77e6d628a20d0f00b667e7a0e8fd454067d6b0fa9983f4e383828941925243"
+  },
+  "fixtures": [
+    {
+      "input": {
+        "body": {
+          "error": {
+            "code": "subscription_sharing_user_not_eligible",
+            "message": "Invented eligibility denial"
+          }
+        },
+        "kind": "http",
+        "status": 403
+      },
+      "native": {
+        "codexErrorInfo": {
+          "httpConnectionFailed": {
+            "httpStatusCode": 403
+          }
+        },
+        "message": "unexpected status 403 Forbidden: Invented eligibility denial"
+      }
+    },
+    {
+      "input": {
+        "body": {
+          "response": {
+            "error": {
+              "code": "subscription_sharing_usage_limit_exceeded",
+              "message": "Invented usage denial"
+            }
+          },
+          "type": "response.failed"
+        },
+        "kind": "sse"
+      },
+      "native": {
+        "codexErrorInfo": "other",
+        "message": "stream disconnected before completion: Invented usage denial"
+      }
+    },
+    {
+      "input": {
+        "body": {
+          "response": {
+            "error": {
+              "code": "subscription_sharing_usage_unavailable",
+              "message": "Invented usage unavailable"
+            }
+          },
+          "type": "response.failed"
+        },
+        "kind": "sse"
+      },
+      "native": {
+        "codexErrorInfo": "other",
+        "message": "stream disconnected before completion: Invented usage unavailable"
+      }
+    }
+  ]
+}
