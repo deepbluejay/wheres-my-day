@@ -16,7 +16,7 @@ extension CollectionRecord {
   // Decode and admission share semantic validation. Policy/SQL failures happen
   // outside the decoder's damage catch, so retryable work is never quarantined.
   func validate() throws {
-    if let storageVersion, !(10...SQLiteConnection.schemaVersion).contains(storageVersion) {
+    if let storageVersion, !(13...SQLiteConnection.schemaVersion).contains(storageVersion) {
       throw StorageError("Unsupported collection envelope version")
     }
     guard (observation != nil) != (screen != nil), time < Int.max else {

@@ -88,11 +88,18 @@ final class AdapterTests: XCTestCase {
       XCTAssertEqual(FileManager.default.fileExists(atPath: personalClaude.appendingPathComponent("cli-owned-state").path), provider == .claude)
       XCTAssertFalse(FileManager.default.fileExists(atPath: config.appDataDirectory.appendingPathComponent("claude").path))
       XCTAssertEqual(captured["home"] as? String, provider == .claude ? config.userHome.path : captured["codex_home"] as? String)
+      let registry = AgentLogFiles.ownSources(appDataDirectory: config.appDataDirectory)
       if provider == .codex {
         let isolated = try XCTUnwrap(captured["codex_home"] as? String)
         XCTAssertTrue(isolated.hasPrefix(config.codexHome.path + "/app-server/"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: isolated))
-      } else { XCTAssertNil(captured["codex_home"] as? String) }
+        XCTAssertTrue(try registry.contains(path: isolated + "/sessions/invented.jsonl", tool: .codex))
+      } else {
+        XCTAssertNil(captured["codex_home"] as? String)
+        let arguments = try XCTUnwrap(captured["args"] as? [String])
+        let flag = try XCTUnwrap(arguments.firstIndex(of: "--session-id"))
+        XCTAssertTrue(try registry.containsSession(AgentLogIdentity.decoded(arguments[flag + 1]), tool: .claude))
+      }
       XCTAssertTrue(captured["claude_home"] is NSNull, "no Claude child gets an app or inherited CLAUDE_CONFIG_DIR")
       XCTAssertTrue(AgentWindowIdentity.containsWorkingFolder(captured["cwd"] as! String))
       XCTAssertFalse(FileManager.default.fileExists(atPath: captured["cwd"] as! String))
@@ -651,7 +658,7 @@ final class AdapterTests: XCTestCase {
         let agentStartup = [".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout", ".bashrc", ".bash_profile", ".bash_login", ".profile",
           ".gitconfig", "xdg_config_home/git"].map { config.agentHome.appendingPathComponent($0).path }
         let login = config.appDataDirectory.appendingPathComponent("claude-login").path
-        for path in [folder, work.path + "/.claude", login] + startup + agentStartup {
+        for path in [folder, work.path + "/.claude", login, config.appDataDirectory.appendingPathComponent(AgentLogOwnSources.folderName).path] + startup + agentStartup {
           for rule in ["Edit(/\(path))", "Edit(/\(path)/**)"] { XCTAssertTrue(deny.contains(rule), rule) }
           XCTAssertFalse(deny.contains("Read(/\(path))"), path)
           XCTAssertTrue(files["denyWrite"]?.contains(path) == true, path); XCTAssertFalse(files["denyRead"]?.contains(path) == true, path)
@@ -702,7 +709,8 @@ final class AdapterTests: XCTestCase {
       for path in ConversationConfiguration.spellings(config.userHome.appendingPathComponent("Library/Keychains")) {
         XCTAssertEqual(filesystem[path], "deny", path)
       }
-      for path in [codexHome, config.appDataDirectory.appendingPathComponent("claude-login").path] + startup {
+      for path in [codexHome, config.appDataDirectory.appendingPathComponent("claude-login").path,
+        config.appDataDirectory.appendingPathComponent(AgentLogOwnSources.folderName).path] + startup {
         XCTAssertEqual(filesystem[path], "read", path)
       }
       XCTAssertEqual(filesystem[":root"], skip ? "write" : nil)
@@ -841,7 +849,7 @@ if provider == 'claude':
         assert all(tool + '(/' + denied + tail + ')' in deny for tool in ['Read', 'Edit'] for tail in ['', '/**']), denied
         assert denied in sandbox['filesystem']['denyRead'] and denied in sandbox['filesystem']['denyWrite']
     codex_shell = app + '/agent-home'
-    for closed in [home + '/.claude', cwd + '/.claude', app + '/claude-login', home + '/.zshenv', home + '/.zshrc', home + '/.profile', home + '/.gitconfig', home + '/.config/git',
+    for closed in [home + '/.claude', cwd + '/.claude', app + '/claude-login', app + '/own-agent-log-sources', home + '/.zshenv', home + '/.zshrc', home + '/.profile', home + '/.gitconfig', home + '/.config/git',
                    codex_shell + '/.zshenv', codex_shell + '/.zshrc', codex_shell + '/.profile', codex_shell + '/.gitconfig', codex_shell + '/xdg_config_home/git']:
         assert all('Edit(/' + closed + tail + ')' in deny for tail in ['', '/**']) and closed in sandbox['filesystem']['denyWrite'], closed
         assert 'Read(/' + closed + ')' not in deny and closed not in sandbox['filesystem']['denyRead'], closed
@@ -965,7 +973,7 @@ else:
                            home + '/Library/Keychains', home + '/.claude.json', home + '/.codex/config.toml']:
                 assert json.dumps(denied) + '="deny"' in fence
             shell_home = os.environ['ZDOTDIR']
-            for closed in [os.path.dirname(os.path.dirname(os.environ['CODEX_HOME'])), os.path.dirname(os.path.dirname(os.path.dirname(os.environ['CODEX_HOME']))) + '/claude-login']:
+            for closed in [os.path.dirname(os.path.dirname(os.environ['CODEX_HOME'])), os.path.dirname(os.path.dirname(os.path.dirname(os.environ['CODEX_HOME']))) + '/claude-login', os.path.dirname(os.path.dirname(os.path.dirname(os.environ['CODEX_HOME']))) + '/own-agent-log-sources']:
                 assert json.dumps(closed) + '="read"' in fence
             assert os.environ['XDG_CONFIG_HOME'] == shell_home == os.environ['HOME'] == os.environ['CODEX_HOME']
             assert_git_ceiling()

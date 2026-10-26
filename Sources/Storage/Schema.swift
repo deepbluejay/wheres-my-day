@@ -1,12 +1,15 @@
 import Foundation
 
 extension SQLiteConnection {
-  static let schemaVersion = 14
+  static let schemaVersion = 15
   static let applicationID = 0x4150_5342
 
   /// Later schema changes go in this function, before the version is advanced.
   func createSchema() throws {
     let version = try integer("PRAGMA user_version")
+    guard version != 10 && version != 11 && version != 12 else {
+      throw StorageError("Unsupported undeployed agent-log schema")
+    }
     let application = try integer("PRAGMA application_id")
     guard version <= Self.schemaVersion else { throw StorageError("Database version is newer than this storage") }
     let tableCount = try integer("SELECT count(*) FROM sqlite_master WHERE type='table'")
@@ -21,6 +24,19 @@ extension SQLiteConnection {
           AND instr(sql,'general.axProbe.reviewLease')=0
         UNION ALL SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM pragma_table_info('ax_probe_pid') WHERE name='failure_policy'))
         """) > 0 { try transaction { try createAXProbeSchema() } }
+      collectionAccountingEnabled = true
+      return
+    }
+    if version == 14 {
+      // Main 14 already installed collection capabilities atomically. Agent-log adoption
+      // adds receipts and tables only, without revisiting historical collection rows.
+      try transaction {
+        try createAgentLogSchema()
+        try createAgentLogBaselineSchema()
+        try legacyLogAdapter.createSchema()
+        try legacyLogAdapter.adoptNativeIdentities()
+        try run("PRAGMA user_version=\(Self.schemaVersion)")
+      }
       collectionAccountingEnabled = true
       return
     }
@@ -116,6 +132,10 @@ extension SQLiteConnection {
       }
       try createCollectionAccounting()
       try createAXProbeSchema()
+      try createAgentLogSchema()
+      try createAgentLogBaselineSchema()
+      try legacyLogAdapter.createSchema()
+      if version > 0 && version < 15 { try legacyLogAdapter.adoptNativeIdentities() }
       var hasTableFacts = false
       try rows("PRAGMA table_info(model_calls)") { row in
         if Self.optionalText(row, 1) == "table_facts" { hasTableFacts = true }

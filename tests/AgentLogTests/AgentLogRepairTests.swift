@@ -38,21 +38,23 @@ extension AgentLogTests {
       "prompt": "Invented repeated queue words", "timestamp": stamp(time),
     ]
     for (key, value) in fields { attachment[key] = value }
-    return try json(["type": "attachment", "timestamp": stamp(time), "attachment": attachment])
+    return try json(["type": "attachment", "timestamp": stamp(time), "cwd": "/invented/project", "attachment": attachment])
   }
   func enqueue(_ id: String, at time: Int) throws -> String {
     try json([
-      "type": "queue-operation", "operation": "enqueue", "commandUuid": id,
+      "type": "queue-operation", "operation": "enqueue", "commandUuid": id, "cwd": "/invented/project",
       "content": "Invented repeated queue words", "timestamp": stamp(time),
     ])
   }
-  func queuedCopy(_ id: String, at time: Int) throws -> String {
-    try claudeRow([
+  func queuedCopy(_ id: String, at time: Int, commandID: String? = nil) throws -> String {
+    var fields: [String: Any] = [
       "uuid": id, "promptSource": "queued",
       "message": ["content": "Invented repeated queue words"],
-    ], at: time)
+    ]
+    if let commandID { fields["commandUuid"] = commandID }
+    return try claudeRow(fields, at: time)
   }
-  func testQueuedDeliveryPairsOnceAcrossCheckpointAndDatesAtEnqueue() throws {
+  func testQueuedOccurrencesNeverPairByTextOrChangeArrival() throws {
     for shape in ["pair", "attachment", "copy", "repeat", "consumed"] {
       let url = try file(.claude, name: "invented-queue-" + shape + ".jsonl")
       let id = "invented-" + shape
@@ -77,10 +79,10 @@ extension AgentLogTests {
       }
       try AgentLogTask(reader: reader(.claude), storage: store).scan(at: 300)
       let rows = try store.evidence(in: all).filter { $0.source == "invented-queue-" + shape }
-      XCTAssertEqual(rows.count, shape == "repeat" || shape == "consumed" ? 2 : 1, shape)
-      XCTAssertEqual(rows.first?.ts, shape == "copy" ? 96 : 90, shape)
+      XCTAssertEqual(rows.count, shape == "repeat" ? 4 : shape == "consumed" ? 3 : shape == "pair" ? 2 : 1, shape)
+      XCTAssertEqual(rows.first?.ts, shape == "copy" ? 96 : 95, shape)
       XCTAssertEqual(rows.first?.sourceID, "claude:" + id, shape)
-      if shape == "repeat" { XCTAssertEqual(rows.last?.ts, 110) }
+      if shape == "repeat" { XCTAssertEqual(rows.last?.ts, 116) }
     }
   }
   func testClaudeToolMarksEachRefuseAndCountOnlyTheirKind() throws {
@@ -105,6 +107,7 @@ extension AgentLogTests {
       let batch = try AgentLogFiles.read(try XCTUnwrap(reader(.claude).files().first { $0.path == url.path }),
         tool: .claude, position: nil, at: 200)
       XCTAssertEqual(batch.evidence, [], "mark \(index)")
+      XCTAssertEqual(batch.events.count, 1, "marked records remain local events")
       XCTAssertEqual(batch.ignored, [entry.1: 1], "mark \(index)")
     }
     let task = AgentLogTask(reader: reader(.claude), storage: store)
@@ -156,6 +159,7 @@ extension AgentLogTests {
       let grown = try XCTUnwrap(reader(.codex).files().first { $0.path == url.path })
       let batch = try AgentLogFiles.read(grown, tool: .codex, position: header.position, at: 300)
       XCTAssertEqual(batch.evidence, [], "session mark \(index)")
+      XCTAssertEqual(batch.events.count, 1, "delegated sessions remain local events")
       XCTAssertEqual(batch.ignored, [entry.1: 1], "session mark \(index)")
     }
     for level in ["line", "payload", "item"] {
@@ -183,12 +187,12 @@ extension AgentLogTests {
     XCTAssertEqual(task.health.stored, 1)
     XCTAssertEqual(task.health.ignored.values.reduce(0, +), marks.count)
   }
-  func testConnectionRevokedByListingPreventsEvenFirstRead() throws {
+  func testRecordingTurnedOffByListingPreventsEvenFirstRead() throws {
     let url = try file(.claude)
     try write([prompt(.claude, id: "invented-one")], to: url)
     let reader = ControlledLogReader()
     reader.listed = try AgentLogFiles.enumerate([url.deletingLastPathComponent().path])
-    reader.beforeListing = { try self.store.saveFixtureSettings(StorageSettings(), at: 150) }
+    reader.beforeListing = { try self.store.saveFixtureSettings(StorageSettings(recordingEnabled: false), at: 150) }
     let task = AgentLogTask(reader: reader, storage: store)
     try task.scan(at: 200)
     XCTAssertEqual(reader.reads, [])

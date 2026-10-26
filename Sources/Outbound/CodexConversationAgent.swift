@@ -94,7 +94,8 @@ public final class CodexConversationAgent: ConversationAgent {
       let args = try ["app-server", "--listen", "stdio://"] + ConversationEncoding.overrides(settings)
       var wire = CodexConversationWire(selection: selection, work: runtime.canonicalPath,
         expectedServers: [QueryToolContract.serverName], transcript: transcript, skipApprovals: configuration.skipApprovals,
-        permissions: permissions.profile, permissionsBase: permissions.extends)
+        permissions: permissions.profile, permissionsBase: permissions.extends,
+        ownSources: OwnLogSources.registry(appDataDirectory: configuration.appDataDirectory))
       var answerBytes = 0
       let turnTimeout = min(CodexProcessHome.maximumRunTime, configuration.timeout, max(0, Double(token.validUntil) - Date().timeIntervalSince1970))
       do {
@@ -157,6 +158,7 @@ struct CodexConversationWire {
   let skipApprovals: Bool
   let permissions: String
   let permissionsBase: String?
+  var ownSources: AgentLogOwnSources? = nil
   var stage = 0
   var thread = ""
   struct ThreadState {
@@ -166,7 +168,7 @@ struct CodexConversationWire {
     var tools = Set<String>()
     var items: [String: [String: Any]] = [:]
   }
-  var threads: [String: ThreadState] = [:]
+  var threads: ConversationIdentityMap<ThreadState> = [:]
   func requestContext(for object: [String: Any]) throws -> (thread: String, turn: String) {
     guard let params = object["params"] as? [String: Any], let id = params["threadId"] as? String,
       let state = threads[id] else { throw ConversationError.incompatible }
@@ -210,7 +212,7 @@ struct CodexConversationWire {
     var events = try receiveVerified(object, approvals: approvals, send: send)
     try emit?(events.filter { $0 != .completed })
     // Registration can verify a whole spawn chain. Each thread keeps its original wire order.
-    while let id = provisional.firstReady(verified: Set(threads.keys)) {
+    while let id = provisional.firstReady(verified: threads.identities) {
       let held = provisional.take(id)
       if threads[id] == nil {
         guard let parent = held.compactMap({ value -> String? in
@@ -232,12 +234,15 @@ struct CodexConversationWire {
     return events
   }
   private mutating func register(_ child: String, parent: String) throws {
-    guard !child.isEmpty, child != thread, child != parent, !provisional.isRejected(child), threads[parent] != nil else {
+    guard let subject = AgentLogIdentity.decoded(child).session.subject, conversationIdentity(child) != conversationIdentity(thread), conversationIdentity(child) != conversationIdentity(parent), !provisional.isRejected(child), threads[parent] != nil else {
       throw ConversationError.incompatible
     }
     if let known = threads[child] {
-      guard known.parent == parent else { throw ConversationError.incompatible }
-    } else { threads[child] = ThreadState(parent: parent) }
+      guard known.parent.map(conversationIdentity) == conversationIdentity(parent) else { throw ConversationError.incompatible }
+    } else {
+      try ownSources?.registerSession(subject, tool: .codex)
+      threads[child] = ThreadState(parent: parent)
+    }
   }
   private mutating func receiveVerified(_ object: [String: Any], approvals: ConversationApprovals,
     send: ([String: Any]) throws -> Void) throws -> [ConversationEvent] {
@@ -287,7 +292,8 @@ struct CodexConversationWire {
             "project_doc_max_bytes": 0]]])
         return [.billing(.subscription)]
       case (1, "ap-thread"):
-        guard let value = result["thread"] as? [String: Any], let id = value["id"] as? String, !id.isEmpty, !provisional.isRejected(id),
+        guard let value = result["thread"] as? [String: Any], let id = value["id"] as? String,
+          let subject = AgentLogIdentity.decoded(id).session.subject, !provisional.isRejected(id),
           value["originator"] as? String == AgentWindowIdentity.codexPlanOriginator,
           value["ephemeral"] as? Bool == true, result["modelProvider"] as? String == CodexPlanProcess.provider,
           result["model"] as? String == selection.model, result["reasoningEffort"] as? String == selection.reasoning,
@@ -295,6 +301,7 @@ struct CodexConversationWire {
           // The legacy sandbox field cannot describe path denials; the named profile is the proof.
           let profile = result["activePermissionProfile"] as? [String: Any], profile["id"] as? String == permissions,
           profile["extends"] as? String == permissionsBase else { throw ConversationError.incompatible }
+        try ownSources?.registerSession(subject, tool: .codex)
         stage = 2; thread = id; threads[id] = ThreadState()
         try send(["id": "ap-tools", "method": "mcpServerStatus/list", "params": ["threadId": thread, "limit": 100]])
       case (2, "ap-tools"):
@@ -327,7 +334,7 @@ struct CodexConversationWire {
       if threads[id] == nil {
         guard let parent = child["parentThreadId"] as? String else { throw ConversationError.incompatible }
         try register(id, parent: parent)
-      } else if let parent = child["parentThreadId"] as? String, threads[id]?.parent != parent {
+      } else if let parent = child["parentThreadId"] as? String, threads[id]?.parent.map(conversationIdentity) != conversationIdentity(parent) {
         throw ConversationError.incompatible
       }
       return []
@@ -360,8 +367,8 @@ struct CodexConversationWire {
       if !["agentMessage", "reasoning", "userMessage", "contextCompaction", "plan"].contains(type) {
         guard let id = item["id"] as? String, !id.isEmpty else { throw ConversationError.incompatible }
         if type == "collabAgentToolCall", item["tool"] as? String == "spawnAgent" {
-          guard item["senderThreadId"] as? String == current, let children = item["receiverThreadIds"] as? [String],
-            children.allSatisfy({ !$0.isEmpty && $0 != thread && $0 != current }) else { throw ConversationError.incompatible }
+          guard (item["senderThreadId"] as? String).map(conversationIdentity) == conversationIdentity(current), let children = item["receiverThreadIds"] as? [String],
+            children.allSatisfy({ !$0.isEmpty && conversationIdentity($0) != conversationIdentity(thread) && conversationIdentity($0) != conversationIdentity(current) }) else { throw ConversationError.incompatible }
           for child in children { try register(child, parent: current) }
         }
         if method == "item/started" { threads[current]?.items[id] = item } else { threads[current]?.items.removeValue(forKey: id) }
@@ -381,7 +388,7 @@ struct CodexConversationWire {
       }
       approvals.resolve(thread: current, turn: activeTurn)
       let terminal = threads[current]!.terminal || status != "completed"
-      if current == thread, terminal {
+      if conversationIdentity(current) == conversationIdentity(thread), terminal {
         if let error = result["error"] as? [String: Any], let failure = CodexPlanFailure.parse(error) { throw failure }
         throw ConversationError.unavailable
       }
@@ -389,13 +396,13 @@ struct CodexConversationWire {
       let unfinished = threads[current]!.tools.sorted().map { ConversationEvent.toolFinished(id: toolID(thread: current, item: $0), failed: true) }
       threads[current]?.turn = ""; threads[current]?.tools.removeAll(); threads[current]?.items.removeAll()
       threads[current]?.terminal = false
-      return current == thread ? [.completed] : unfinished
+      return conversationIdentity(current) == conversationIdentity(thread) ? [.completed] : unfinished
     case "error":
       guard let current, !activeTurn.isEmpty, params["turnId"] as? String == activeTurn,
         let retry = params["willRetry"] as? Bool else { throw ConversationError.incompatible }
       if retry { return [] }
       approvals.resolve(thread: current, turn: activeTurn)
-      if current == thread {
+      if conversationIdentity(current) == conversationIdentity(thread) {
         if let error = params["error"] as? [String: Any], let failure = CodexPlanFailure.parse(error) { throw failure }
         throw ConversationError.unavailable
       }

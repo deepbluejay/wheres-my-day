@@ -241,6 +241,38 @@ final class CollectionRecoveryTests: XCTestCase {
     loop.stop()
     XCTAssertGreaterThan(try store.observations(in: all).count, 0)
   }
+  func testBusyRetriesDoNotCountAsPersistenceFailuresAndOldHealthStillDecodes() throws {
+    let leaf = store.url.appendingPathExtension("collection-health")
+    try Data(#"{"acquisition":2,"staging":3,"persistence":4,"initialization":5}"#.utf8).write(to: leaf)
+    XCTAssertEqual(try CollectionOperationalHealth.read(database: store.url).busyRetries, 0)
+    let busyInitialization = CollectionPipeline(database: store.url) { throw StorageError.busy("Invented busy initialization") }
+    busyInitialization.drain()
+    XCTAssertEqual(busyInitialization.takeDiagnostics().initializationFailures, 0)
+    XCTAssertEqual(try CollectionOperationalHealth.read(database: store.url).initialization, 5)
+    XCTAssertGreaterThan(busyInitialization.takeCompletions().3, 0)
+    let pipeline = store.makeCollectionPipeline()
+    try store.connection.run("BEGIN IMMEDIATE")
+    XCTAssertTrue(pipeline.offer(observation(100)))
+    pipeline.drain()
+    XCTAssertEqual(pipeline.takeDiagnostics().persistenceFailures, 0)
+    let completions = pipeline.takeCompletions()
+    XCTAssertEqual(completions.1, 0)
+    XCTAssertGreaterThan(completions.3, 0)
+    let health = try CollectionOperationalHealth.read(database: store.url)
+    XCTAssertGreaterThan(health.busyRetries, 0)
+    XCTAssertEqual(health.persistence, 4)
+    XCTAssertTrue(try store.collectionStatus().contains("collection_busy_retries=\(health.busyRetries)"))
+    try store.connection.run("ROLLBACK")
+    pipeline.drain()
+    XCTAssertEqual(try store.observations(in: all).count, 1)
+    XCTAssertEqual(try store.collectionFiles().count, 0)
+    try store.connection.run("CREATE TRIGGER invented_fail BEFORE INSERT ON sample_observations BEGIN SELECT RAISE(ABORT,'Invented failure'); END")
+    XCTAssertTrue(pipeline.offer(observation(101)))
+    pipeline.drain()
+    XCTAssertGreaterThan(pipeline.takeDiagnostics().persistenceFailures, 0)
+    XCTAssertGreaterThan(try CollectionOperationalHealth.read(database: store.url).persistence, 4)
+  }
+
   func testRecorderWriterInitializationFailureIsVisibleAndRetried() throws {
     var fail = true
     store.collectionWriterFactory = {

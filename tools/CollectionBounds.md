@@ -391,3 +391,42 @@ Each latency offer measures one allowed record's progress. It does not measure
 sustained throughput or establish a universal latency guarantee. In particular,
 metadata with independent component clocks exercises a different preservation
 branch from the equal-clock month seed and has separate concurrent regressions.
+
+## Agent-log adoption and preparation
+
+Schema 15 adds local agent-log occurrence, payload and privacy receipt tables on
+main's collection schema. Actual main 9 and 14 fixtures retain every original
+column value and SQLite type during adoption. Main 13's version-aware ready
+replay remains supported. Undeployed schemas 10, 11 and 12 are rejected before
+migration writes. Ready envelopes keep their writing version across 14 to 15.
+
+Agent-log payload re-masking, hashing, flag encoding and evidence preparation run
+before the writer transaction. Prepared bytes grant no admission authority:
+recording permission, historical barriers, fresh ownership receipts and the final
+content decision remain inside the transaction. The planner selects prepared
+records by their input index, so equal physical offsets cannot substitute a
+refused record's payload.
+
+The resource regression measures complete reader processes at 1, 4 and 16 MiB.
+The original dense/prose/base64/Unicode cases retain the cold-baseline + 3 times
+input + 24 MiB RSS guard. Selected content, flag values and long keys have a
+separate cold-baseline + 5 times input + 24 MiB guard, accounting for simultaneous
+raw, selected, serialized flag and masked representations. The end-to-end writer
+uses baseline + 9 times input + 32 MiB, including SQLite copies. These measured
+linear envelopes retain full permitted content; they are not allocator-independent
+RSS ceilings. Token autorelease pools release Foundation masking temporaries
+before processing the next token. Flags are encoded and their selected copy
+released before allocating the re-masked payload.
+
+Reader CPU at 4 and 16 MiB must stay below 7 times the 1 MiB CPU + 1 second and
+24 times the 1 MiB CPU + 2 seconds, respectively. CPU measurements avoid conflating
+concurrent build scheduling with algorithmic scaling; each process also has a
+180-second wall deadline. Writer measurements cover dense/prose/selected/flag/key
+records at all three sizes. The measured BEGIN-through-return span must remain
+under 2 seconds and half the append duration + 0.1 second, so preparation cannot
+silently return to the writer transaction.
+
+Operational health stores `busyRetries` separately from `persistence` and exposes
+`collection_busy_retries` in status. Busy attempts keep their existing retry
+behavior and no longer increment persistence failures. Old health files decode
+with zero busy retries; their historical failure counts are retained.

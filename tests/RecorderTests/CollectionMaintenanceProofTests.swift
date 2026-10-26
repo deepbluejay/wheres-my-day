@@ -266,7 +266,9 @@ final class CollectionMaintenanceProofTests: XCTestCase {
     let directory = root.appendingPathComponent("Sources/Storage")
     let reviewed: [String: [String: Int]] = [
       "CollectionObservations.swift": ["collection_legacy_times": 2, "screen_payloads": 4, "collection_blobs": 2, "sample_observations": 4, "samples": 1, "input_batches": 1],
-      "ActivityStorage.swift": ["samples": 2, "evidence": 3, "screen_payloads": 1, "collection_retention": 1, "collection_metadata": 1, "sample_observations": 1, "input_batches": 1, "collection_legacy_times": 1],
+      "ActivityStorage.swift": ["samples": 2, "evidence": 2, "screen_payloads": 1, "collection_retention": 1, "collection_metadata": 1, "sample_observations": 1, "input_batches": 1, "collection_legacy_times": 1],
+      "AgentLogAdmission.swift": ["evidence": 1],
+      "AgentLogEvents.swift": ["evidence": 2],
       "CollectionAccounting.swift": ["collection_ingestion_pending": 3, "collection_ingestion": 2],
       "CollectionPolicy.swift": ["collection_policy_refusals": 1, "collection_metadata": 1, "collection_metadata_erasure_proof": 3, "sample_observations": 1],
       "CollectionMaintenanceProof.swift": ["collection_blobs": 1],

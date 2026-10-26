@@ -10,6 +10,33 @@ final class OperatorConversionTests: XCTestCase {
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
   }
   override func tearDownWithError() throws { try FileManager.default.removeItem(at: folder) }
+  func testManifestKeepsByteDistinctNativeAndSourceIdentities() throws {
+    for tool in ["claude", "codex"] {
+      let oldURL = folder.appendingPathComponent("invented-\(tool).sqlite")
+      let old = try SQLiteConnection(url: oldURL, scope: .directory(folder))
+      try old.run("CREATE TABLE samples(ts INTEGER,bundle_id TEXT,app TEXT,title TEXT,doc_key TEXT,keys INTEGER,clicks INTEGER,scrolls INTEGER,moved INTEGER,synth INTEGER)")
+      try old.run("CREATE TABLE activities(id INTEGER PRIMARY KEY,start_ts INTEGER,end_ts INTEGER,title TEXT,summary TEXT)")
+      try old.run("CREATE TABLE evidence(ts INTEGER,bundle_id TEXT,doc_key TEXT,kind TEXT,text TEXT,source_id TEXT,project TEXT)")
+      try old.run("CREATE TABLE forgotten_session_rows(bundle_id TEXT,source_id TEXT)")
+      let forms = ["é", "e\u{301}", "Å", "\u{212B}", "a", "b", "legacy:invented", "occurrence:invented", "native:invented"]
+      for (index, suffix) in forms.enumerated() {
+        let id = tool + ":" + suffix
+        try old.run("INSERT INTO evidence VALUES(?,'invented','','prompt','Invented',?,'')", [.integer(200 + index), .key(id)])
+      }
+      for source in ["invented-é", "invented-e\u{301}"] {
+        try old.run("INSERT INTO evidence VALUES(220,?,'','prompt','Invented',?,'')", [.key(source), .key(tool + ":legacy:source")])
+        try old.run("INSERT INTO forgotten_session_rows VALUES(?,?)", [.key(source), .key(tool + ":invented-forgotten")])
+      }
+      try old.run("INSERT INTO evidence VALUES(221,'invented-other','','prompt','Invented',?,'')", [.key(tool + ":invented-forgotten")])
+      try old.run("PRAGMA user_version=9")
+      let destination = try ActivityStorage(url: folder.appendingPathComponent("new-\(tool).sqlite"), appDataDirectory: folder, databaseScope: .directory(folder))
+      XCTAssertTrue(try destination.convertOldDatabase(at: oldURL).finished)
+      XCTAssertEqual(try destination.evidence(in: TimeRange(0,1000)).count, forms.count + 2)
+      let manifest = try destination.conversionManifest(source: oldURL)
+      XCTAssertTrue(manifest.passed, manifest.lines.filter { !$0.passed }.map(\.text).joined(separator: "\n"))
+    }
+  }
+
   func source() throws -> URL {
     let url = folder.appendingPathComponent("old.sqlite"), db = try SQLiteConnection(url: url, scope: .directory(folder))
     for sql in [
@@ -68,7 +95,7 @@ final class OperatorConversionTests: XCTestCase {
     let position = try XCTUnwrap(store.logPosition(path:"invented-log"))
     XCTAssertEqual(position.offset,13)
     let state = try AgentLogState.decode(position.state)
-    XCTAssertEqual(state.session,"invented-session"); XCTAssertTrue(state.metadataRead)
+    XCTAssertEqual(state.session?.storedKey,"invented-session"); XCTAssertTrue(state.metadataRead)
     XCTAssertEqual(state.project,"invented-project")
     XCTAssertEqual(try store.evidence(in: all).count, 3)
     XCTAssertEqual(try store.intervals(in: all).map { $0.range.end - $0.range.start }, [120,120,120,180])
@@ -101,6 +128,46 @@ final class OperatorConversionTests: XCTestCase {
     _ = try store.appendEvidence([EvidenceText(ts: 300000,kind:.prompt,source:"other",sourceID:"claude:invented-deleted",text:"invented")])
     XCTAssertEqual(try store.evidence(in: all).count, 3)
     try store.finishConversion()
+  }
+  func testConvertedCheckpointsMaskEveryStringAndKeepManifestDefaults() throws {
+    let source = try source()
+    let secret = "sk-" + String(repeating: "Invented", count: 5)
+    let escaped = secret.map { String(format: "\\u%04x", $0.asciiValue!) }.joined()
+    func json(_ value: [String: Any]) throws -> String {
+      String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
+    }
+    let path = "invented-" + escaped
+    let state = try json(["session": escaped, "project": "/invented/" + AgentWindowIdentity.relativeFolder + "/" + escaped,
+      "metadataRead": true, "queued": [["hash": escaped, "id": escaped, "ts": 100, "delivered": true]],
+      escaped: escaped])
+    let unknown = try json(["alternate": escaped, escaped: escaped])
+    do {
+      let old = try SQLiteConnection(url: source, scope: .directory(folder))
+      try old.run("UPDATE log_cursors SET path=?", [.maskedText(path)])
+      try old.run("UPDATE log_cursors SET state=? WHERE rowid=1", [.maskedText(state)])
+      try old.run("INSERT INTO log_cursors VALUES('invented-unknown',3,4,25,?,86400)", [.maskedText(unknown)])
+    }
+    let original = try Data(contentsOf: source)
+    let destination = try store()
+    XCTAssertTrue(try destination.convertOldDatabase(at: source, verifyFrozenContent: true).finished)
+    let manifest = try destination.conversionManifest(source: source, calendar: utc())
+    XCTAssertTrue(manifest.passed, manifest.lines.filter { !$0.passed }.map(\.text).joined(separator: "\n"))
+    let position = try XCTUnwrap(destination.logPosition(path: path))
+    XCTAssertEqual(position.offset, 13)
+    let decoded = try AgentLogState.decode(position.state)
+    XCTAssertEqual(decoded.session?.storedKey, "[secret]")
+    XCTAssertEqual(decoded.ownershipScanOffset, 0)
+    // A stored project display cannot prove ownership; the next reader recovers raw metadata.
+    XCTAssertNil(decoded.ownWorkingFolder)
+    XCTAssertEqual(decoded.metadataVersion, 0)
+    XCTAssertTrue(decoded.metadataRead)
+    XCTAssertEqual(try Data(contentsOf: source), original)
+    for suffix in ["", "-wal"] {
+      let bytes = (try? Data(contentsOf: folder.appendingPathComponent("new.sqlite" + suffix))) ?? Data()
+      for unsafe in [secret, escaped, escaped.replacingOccurrences(of: "\\", with: "\\\\")] {
+        XCTAssertNil(bytes.range(of: Data(unsafe.utf8)))
+      }
+    }
   }
   func testManifestDetectsWrongValuesWithUnchangedCounts() throws {
     let source = try source(), store = try store()

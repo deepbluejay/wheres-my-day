@@ -98,7 +98,6 @@ public struct AppComposition {
     let client = try factories.storage(paths, .client, nil)
     let tokens = factories.chatGPTTokens(paths)
     let logTasks = includesPassiveLogs ? factories.logs(paths, client, processes) : []
-    for task in logTasks { task.planUseSignedIn = { tokens.signedInForPlanUse } }
     let connections = RecorderConnections(recorder: recorder, client: client, logTasks: logTasks, fileVault: fileVault)
     try connections.configureSummary(caller: factories.summary(paths, tokens), from: from, dayStart: dayStart, locale: locale)
     return connections

@@ -15,7 +15,7 @@ final class CollectionAdoptionRecoveryTests: XCTestCase {
     if point == "before-commit" {
       sqlite3_set_authorizer(connection.handle, { _, action, name, value, _, _ in
         if action == SQLITE_PRAGMA, let name, let value,
-          String(cString: name) == "user_version", String(cString: value) == "14" { _exit(73) }
+          String(cString: name) == "user_version", String(cString: value) == String(SQLiteConnection.schemaVersion) { _exit(73) }
         return SQLITE_OK
       }, nil)
     }
@@ -50,12 +50,12 @@ final class CollectionAdoptionRecoveryTests: XCTestCase {
       try child.run(); child.waitUntilExit(); XCTAssertEqual(child.terminationStatus, 73)
       do {
         let check = try SQLiteConnection(url: url, scope: .directory(root))
-        XCTAssertEqual(try check.integer("PRAGMA user_version"), point == "before-commit" ? 9 : 14)
+        XCTAssertEqual(try check.integer("PRAGMA user_version"), point == "before-commit" ? 9 : SQLiteConnection.schemaVersion)
         XCTAssertEqual(try check.integer("SELECT count(*) FROM sqlite_master WHERE name='sample_observations'"), point == "before-commit" ? 0 : 1)
         XCTAssertEqual(try check.integer("SELECT count(*) FROM samples WHERE ts=50"), 1)
       }
       let adopted = try ActivityStorage(url: url, appDataDirectory: root, databaseScope: .directory(root))
-      XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), 14)
+      XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), SQLiteConnection.schemaVersion)
       let clock = FakeClock(), sources = FakeSources(); sources.clock = clock; clock.now = 100
       let loop = RecorderLoop(clock: clock, input: sources, front: sources, secure: sources, awake: sources,
         screen: sources, storage: adopted, maintenanceStorage: adopted, ownBundleID: "invented.own")

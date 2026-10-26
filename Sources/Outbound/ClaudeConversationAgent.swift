@@ -31,7 +31,9 @@ public final class ClaudeConversationAgent: ConversationAgent {
       let settings = try ConversationEncoding.json(configuration.claudeConversationSettings(work: runtime.folder, personal: launch.personal))
       // No setting source, no slash commands, only our MCP server and no saved session: the person's own
       // settings, hooks, plugins, skills, agents, output style, MCP servers and history stay out of it.
-      var arguments = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+      let ownSession = UUID().uuidString
+      try OwnLogSources.registry(appDataDirectory: configuration.appDataDirectory).registerSession(AgentLogIdentity.decoded(ownSession), tool: .claude)
+      var arguments = ["--session-id", ownSession, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
         "--include-partial-messages", "--no-session-persistence", "--setting-sources", "", "--disable-slash-commands",
         "--strict-mcp-config", "--mcp-config",
         String(decoding: config, as: UTF8.self), "--permission-mode", "manual", "--permission-prompts", "host",
@@ -73,7 +75,7 @@ struct ClaudeConversationWire {
     var generation = 0
     var streamedMessage: String?
     var streamed = false
-    var tools = Set<String>()
+    var tools = ConversationIdentitySet()
     var finished = false
   }
   struct TaskState {
@@ -84,14 +86,15 @@ struct ClaudeConversationWire {
   }
   // A spawn proves ancestry once. A native task keeps that proof across runs.
   // Only run state (including approval scope) changes on task_started.
-  var tasks: [String: TaskState] = ["": TaskState(parent: nil, activeSpawn: "")]
-  var spawns: [String: String] = [:]
-  var spawnGenerations: [String: Int] = [:]
-  var agents: [String: String] = [:]
+  var tasks: ConversationIdentityMap<TaskState> = ["": TaskState(parent: nil, activeSpawn: "")]
+  var spawns: ConversationIdentityMap<String> = [:]
+  var spawnGenerations: ConversationIdentityMap<Int> = [:]
+  var agents: ConversationIdentityMap<String> = [:]
   var provisional = ConversationProvisionalThreads()
 
-  private var aliases: [String: String] {
-    var result = Dictionary(uniqueKeysWithValues: spawns.map { ("parent:" + $0.key, $0.value) })
+  private var aliases: ConversationIdentityMap<String> {
+    var result: ConversationIdentityMap<String> = [:]
+    for (spawn, scope) in spawns { result["parent:" + spawn] = scope }
     for (agent, scope) in agents {
       result["agent:" + agent] = scope
       if tasks[scope]?.run.finished == false { result["next:" + agent] = scope }
@@ -141,10 +144,10 @@ struct ClaudeConversationWire {
       // may identify SendMessage, the original spawn, or nothing at all.
       if let agent = line["task_id"] as? String, let scope = agents[agent] {
         if let current = tasks[scope]?.run.id {
-          guard let id = line["run_id"] as? String, id >= current else { return [] }
+          guard let id = line["run_id"] as? String, conversationIdentity(id) >= conversationIdentity(current) else { return [] }
         }
         if line["subtype"] as? String == "task_started", let tool = line["tool_use_id"] as? String,
-          let spawned = spawns[tool], spawned != scope { try bind(agent, scope: spawned) }
+          let spawned = spawns[tool], conversationIdentity(spawned) != conversationIdentity(scope) { try bind(agent, scope: spawned) }
         key = "agent:" + agent
       }
       else if let tool = line["tool_use_id"] as? String {
@@ -153,17 +156,17 @@ struct ClaudeConversationWire {
       } else if let agent = line["task_id"] as? String { key = "agent:" + agent }
     }
     if let scope = key.flatMap({ aliases[$0] }), !scope.isEmpty {
-      if let parent = line["parent_tool_use_id"] as? String, parent != tasks[scope]?.activeSpawn {
+      if let parent = line["parent_tool_use_id"] as? String, conversationIdentity(parent) != tasks[scope].map({ conversationIdentity($0.activeSpawn) }) {
         try refuse(line, send: send); return []
       }
       if let id = line["run_id"] as? String, let current = tasks[scope]?.run.id,
-        id < current { return [] }
+        conversationIdentity(id) < conversationIdentity(current) { return [] }
       // Requests and complete child messages have no native run ID. Between
       // runs, hold them until an explicit start admits the next generation.
       if !isTaskFrame(line), tasks[scope]?.run.finished == true,
         let agent = tasks[scope]?.agent { key = "next:" + agent }
       if line["subtype"] as? String != "task_started",
-        let id = line["run_id"] as? String, id != tasks[scope]?.run.id {
+        let id = line["run_id"] as? String, conversationIdentity(id) != tasks[scope]?.run.id.map(conversationIdentity) {
         key = runKey(scope, id)
       }
     }
@@ -195,11 +198,11 @@ struct ClaudeConversationWire {
   private mutating func bind(_ agent: String, scope: String) throws {
     guard !agent.isEmpty, !scope.isEmpty, tasks[scope] != nil,
       !provisional.isRejected("agent:" + agent),
-      tasks[scope]?.agent == nil || tasks[scope]?.agent == agent else { throw ConversationError.incompatible }
-    if let previous = agents[agent], previous != scope {
+      tasks[scope]?.agent == nil || tasks[scope]?.agent.map(conversationIdentity) == conversationIdentity(agent) else { throw ConversationError.incompatible }
+    if let previous = agents[agent], conversationIdentity(previous) != conversationIdentity(scope) {
       // Older producers may announce another verified spawn for the same task.
       // Keep the original ancestry and retire the old spawn's message channel.
-      guard tasks[previous]?.run.finished == true, tasks[previous]?.parent == tasks[scope]?.parent,
+      guard tasks[previous]?.run.finished == true, tasks[previous]?.parent.map(conversationIdentity) == tasks[scope]?.parent.map(conversationIdentity),
         tasks[scope]!.run.tools.isEmpty else { throw ConversationError.incompatible }
       tasks[previous]?.activeSpawn = scope
       tasks.removeValue(forKey: scope)
@@ -213,7 +216,7 @@ struct ClaudeConversationWire {
   private mutating func verifyAlias(_ line: [String: Any], scope: String) throws {
     guard !scope.isEmpty else { return }
     if let agent = line["task_id"] as? String, let known = agents[agent],
-      let id = line["run_id"] as? String, let current = tasks[known]?.run.id, id < current { return }
+      let id = line["run_id"] as? String, let current = tasks[known]?.run.id, conversationIdentity(id) < conversationIdentity(current) { return }
     if ["assistant", "user"].contains(line["type"] as? String ?? ""),
       tasks[scope]?.run.finished == false, let agent = line["agent_id"] as? String { try bind(agent, scope: scope) }
     if isTaskFrame(line), let agent = line["task_id"] as? String { try bind(agent, scope: scope) }
@@ -226,7 +229,7 @@ struct ClaudeConversationWire {
     // Once numbered runs are available, unnumbered task frames cannot reset
     // or end them. Legacy producers use explicit starts in arrival order.
     if let current = run.id {
-      guard let id, id > current else { return [] }
+      guard let id, conversationIdentity(id) > conversationIdentity(current) else { return [] }
     } else if !run.finished {
       tasks[scope]?.run.id = id
       return []
@@ -251,7 +254,7 @@ struct ClaudeConversationWire {
           }
         }
       }
-      guard let (_, value) = provisional.takeFirst(verified: Set(aliases.keys)) else { break }
+      guard let (_, value) = provisional.takeFirst(verified: aliases.identities) else { break }
       // Use the same admission and run guards for replayed and live frames.
       let next = try receiveFrame(value, approvals: approvals, send: send, emit: emit, replaying: true)
       events += next
@@ -330,7 +333,7 @@ struct ClaudeConversationWire {
           throw ConversationError.incompatible
         }
         result.append(.toolFinished(id: toolID(scope: scope, item: id), failed: block["is_error"] as? Bool == true))
-        if let child = spawns[id], tasks[child]?.parent == scope, tasks[child]?.activeSpawn == id,
+        if let child = spawns[id], tasks[child]?.parent.map(conversationIdentity) == conversationIdentity(scope), tasks[child].map({ conversationIdentity($0.activeSpawn) }) == conversationIdentity(id),
           spawnGenerations[id] == tasks[child]?.run.generation,
           block["is_error"] as? Bool == true || (line["tool_use_result"] as? [String: Any])?["status"] as? String == "completed" {
           result += finish(child, approvals: approvals)
@@ -340,7 +343,7 @@ struct ClaudeConversationWire {
     case "system":
       let subtype = line["subtype"] as? String
       if isTaskFrame(line), !scope.isEmpty {
-        if let current = tasks[scope]?.run.id, line["run_id"] as? String != current { return [] }
+        if let current = tasks[scope]?.run.id, (line["run_id"] as? String).map(conversationIdentity) != conversationIdentity(current) { return [] }
         if subtype == "task_notification", let status = line["status"] as? String,
           ["completed", "failed", "stopped"].contains(status) {
           return finish(scope, approvals: approvals)

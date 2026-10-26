@@ -1,0 +1,11 @@
+{
+  "origin": "8038586, branch-only serialized shapes; never deployed",
+  "archived_metadata_versions": [1, 2, 3, 4],
+  "examples": [
+    {"metadataVersion": 2, "tool": "claude", "session": "invented-recovery-session", "ownedSession": "invented-recovery-session", "ownWorkingFolder": true},
+    {"metadataVersion": 4, "tool": "codex", "session": "invented-foreign-A", "ownershipSession": "invented-foreign-A", "ownershipScanOffset": 100},
+    {"metadataVersion": 5, "tool": "codex", "metadataRecoveryOffset": 10, "metadataRecoveryScanner": {"version": 6, "token": "aW52ZW50ZWQ="}},
+    {"metadataVersion": 5, "tool": "claude", "session": "invented-late", "ownershipScanOffset": 100}
+  ],
+  "conversion": "Active recovery fixtures now use main metadataVersion 0 or intact current version 5 / scanner 6; malformed/obsolete scanner checkpoints are refused. Main's unversioned queue formats remain supported."
+}

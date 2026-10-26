@@ -174,10 +174,16 @@ final class CollectionMaintenanceProof {
         let whereRange = sql.range(of: " WHERE ", options: [.caseInsensitive])
         let predicate = whereRange.map { String(sql[$0.upperBound...]) } ?? "1"
         var ids: [Int64] = []
-        try source.rows(args + "SELECT rowid FROM \(table) WHERE \(predicate)", values) { ids.append(sqlite3_column_int64($0, 0)) }
+        let header = String(sql[..<(whereRange?.lowerBound ?? sql.endIndex)])
+        let indexHint = header.range(of: #"(?i)\s+INDEXED BY\s+[a-z_]+"#, options: .regularExpression)
+          .map { String(header[$0]) } ?? ""
+        try source.rows(args + "SELECT rowid FROM \(table)\(indexHint) WHERE \(predicate)", values) { ids.append(sqlite3_column_int64($0, 0)) }
         if !ids.isEmpty { try seed(source, table: table, predicate: "rowid IN (" + ids.map(String.init).joined(separator: ",") + ")") }
         let keepBindings = values.isEmpty ? "" : " AND (SELECT count(*) FROM (SELECT " + (1...values.count).map { "?\($0)" }.joined(separator: ",") + "))=1"
         sql = String(sql[..<(whereRange?.lowerBound ?? sql.endIndex)]) + " WHERE rowid IN (" + (ids.isEmpty ? "NULL" : ids.map(String.init).joined(separator: ",")) + ")" + keepBindings
+        // The live predicate may justify a partial index. The expectation uses
+        // selected rowids instead, so it must let SQLite choose its own index.
+        sql = sql.replacingOccurrences(of: #"(?i)\s+INDEXED BY\s+[a-z_]+"#, with: "", options: .regularExpression)
       } else {
         let insert = try NSRegularExpression(pattern: #"(?is)^\s*INSERT(?: OR (?:IGNORE|REPLACE))? INTO\s+[a-z_]+\s*(?:\(([^)]*)\))?\s*VALUES\s*\(([^)]*)\)"#)
         guard let found = insert.firstMatch(in: sql, range: NSRange(sql.startIndex..., in: sql)), let valueRange = Range(found.range(at: 2), in: sql) else { throw StorageError("Collection INSERT requires a scoped VALUES plan") }

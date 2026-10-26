@@ -187,6 +187,7 @@ public final class CollectionPipeline {
     if let writer { return writer }
     do { let value = try openWriter(); writer = value; return value }
     catch {
+      if case StorageError.busy = error { throw error }
       lock.lock(); diagnostics.initializationFailures += 1; lock.unlock()
       persistHealth(phase: 3); throw error
     }
@@ -231,12 +232,17 @@ public final class CollectionPipeline {
   }
   private func record(_ error: Error, phase: Int) {
     lock.lock()
-    if phase == 0 { diagnostics.acquisitionFailures += 1 }
-    if phase == 1 { diagnostics.stagingFailures += 1 }
-    if phase == 2 { diagnostics.persistenceFailures += 1 }
-    if case StorageError.busy = error { busyRetries += 1 } else { failures += 1 }
+    let busy: Bool
+    if case StorageError.busy = error { busy = true } else { busy = false }
+    if busy { busyRetries += 1 }
+    else {
+      if phase == 0 { diagnostics.acquisitionFailures += 1 }
+      if phase == 1 { diagnostics.stagingFailures += 1 }
+      if phase == 2 { diagnostics.persistenceFailures += 1 }
+      failures += 1
+    }
     lock.unlock()
-    persistHealth(phase: phase)
+    persistHealth(phase: busy ? 4 : phase)
   }
   private func persistHealth(phase: Int) {
     guard let database else { return }

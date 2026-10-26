@@ -81,7 +81,7 @@ final class SettingsTests: XCTestCase {
     await fulfillment(of: [started], timeout: 10)
     task.cancel()
     await task.value
-    XCTAssertFalse(try store.settings().agentLogReadingAllowed)
+    XCTAssertFalse(try store.settings().subscriptionConnected)
     XCTAssertEqual(controller.error, .cancelled)
   }
 
@@ -116,7 +116,7 @@ final class SettingsTests: XCTestCase {
     let store = try storage(), controller = try SettingsController(store: storage(), connector: connector, ownBundleID: "org.example.self")
     let task = Task { await controller.connect() }
     await fulfillment(of: [started], timeout: 10)
-    XCTAssertFalse(try store.settings().agentLogReadingAllowed)
+    XCTAssertFalse(try store.settings().subscriptionConnected)
     controller.edit(.recording(false))
     controller.cancelConnection()
     await task.value

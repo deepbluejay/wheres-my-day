@@ -14,8 +14,6 @@ public extension TimelineNoticeKind {
   }
 }
 public extension StorageSettings {
-  /// Connection is the single consent for both subscription summaries and agent-log reading.
-  var agentLogReadingAllowed: Bool { subscriptionConnected }
   var dayStartHour: Int {
     general["dayStartHour"].flatMap(Int.init).flatMap { (0...23).contains($0) ? $0 : nil } ?? TimelineDay.defaultDayStartHour
   }

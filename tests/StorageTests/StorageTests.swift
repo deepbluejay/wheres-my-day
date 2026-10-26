@@ -52,7 +52,7 @@ final class StorageTests: XCTestCase {
       tableFacts: SummaryCallFacts(through: 1200, sentRanges: [TimeRange(600, 900)], endsAtRest: false))
     try adopted.appendModelCall(call)
     XCTAssertEqual(try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder)).modelCalls(in: all), [old, call])
-    XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), 14)
+    XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), SQLiteConnection.schemaVersion)
   }
   func testDeletingObservationsErasesMinuteFactsButKeepsBillingAndOtherMinutes() throws {
     let store = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))
@@ -126,7 +126,14 @@ final class StorageTests: XCTestCase {
     XCTAssertEqual(settings.pausedUntil, 300); XCTAssertEqual(settings.screenRetentionDays, 2); XCTAssertEqual(settings.promptRetentionDays, 3)
     try store.saveLogPosition(LogPosition(path: secret, device: 1, inode: 2, offset: 8, state: secret, seenAt: 70))
     let position = try XCTUnwrap(store.logPosition(path: secret))
-    XCTAssertEqual(position.path, "[secret]"); XCTAssertEqual(position.state, "[secret]"); XCTAssertEqual(position.offset, 8)
+    // The returned path is caller context; the persisted cursor key is one-way.
+    XCTAssertEqual(position.path, secret)
+    let pathKey = AgentLogEventParser.pathIdentity(secret)
+    try store.connection.namedRows("SELECT path FROM log_positions") {
+      XCTAssertEqual(try $0.text("path"), pathKey)
+      XCTAssertFalse(try $0.text("path").contains(secret))
+    }
+    XCTAssertEqual(position.state, "[secret]"); XCTAssertEqual(position.offset, 8)
     try store.appendModelCall(ModelCall(ts: 130, range: TimeRange(60, 120), model: secret, inputTokens: 10, cachedTokens: 2, outputTokens: 5, succeeded: true))
     let call = try XCTUnwrap(store.modelCalls(in: all).first)
     XCTAssertEqual(call.model, "[secret]"); XCTAssertEqual(call.inputTokens, 10); XCTAssertTrue(call.succeeded)
@@ -178,7 +185,7 @@ final class StorageTests: XCTestCase {
     try store.appendModelCall(ModelCall(ts: 500, range: TimeRange(0, 120), model: "invented", succeeded: false))
     let range = TimeRange(60, 120), preview = try store.previewDeletion(in: range)
     XCTAssertEqual(preview.intervalExtent, TimeRange(0, 120))
-    XCTAssertEqual(preview.counts, ["samples": 1, "sample_observations": 1, "evidence": 1, "intervals": 1, "ax_probe_attempts": 0, "ax_probe_review": 0, "input_batches": 0, "collection_legacy_times": 0, "staged_collection": 0, "screen_metadata": 0, "sample_metadata": 0, "collection_metadata": 0])
+    XCTAssertEqual(preview.counts, ["samples": 1, "sample_observations": 1, "evidence": 1, "intervals": 1, "ax_probe_attempts": 0, "ax_probe_review": 0, "input_batches": 0, "collection_legacy_times": 0, "staged_collection": 0, "screen_metadata": 0, "sample_metadata": 0, "collection_metadata": 0, "agent_log_events": 0])
     XCTAssertEqual(try store.samples(in: all).count, 2)
     try store.appendFixtureEvidence([EvidenceText(ts: 62, kind: .screen, source: "invented", text: "changed snapshot")])
     XCTAssertThrowsError(try store.deleteRecords(in: range, confirmation: preview.confirmation))

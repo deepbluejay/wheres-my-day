@@ -67,8 +67,19 @@ public struct EvidenceText: Equatable {
   public var kind: EvidenceKind
   public var source: String
   public var sourceID: String?
-  // Transient paired copy ids, consumed with the batch rather than stored as prompt text.
+  // Explicit copy ids are lineage metadata, never prompt text.
   public var sourceAliases: [String]
+  /// Agent-log code enters/leaves the generic evidence envelope only through these typed keys.
+  public var agentLogIdentity: AgentLogInstructionIdentity? {
+    get { sourceID.map(AgentLogIdentityCodec.instruction) }
+    set { sourceID = newValue?.storedKey }
+  }
+  public var agentLogAliases: [AgentLogInstructionIdentity] {
+    get { sourceAliases.map(AgentLogIdentityCodec.instruction) }
+    set { sourceAliases = newValue.map(\.storedKey) }
+  }
+
+  public var legacyRefusal = AgentLogLegacyRefusal()
   public var documentKey: String
   public var project: String
   public var text: String
@@ -278,6 +289,8 @@ public protocol ForgottenRangeReader { func forgottenRanges(in range: TimeRange)
 public protocol EvidenceRetention { @discardableResult func cleanRetention(at now: Int) throws -> Int }
 
 public protocol LogBatchWriter {
+  /// Events, the narrow prompt projection, and the cursor must commit together.
+  @discardableResult func appendLogEvents(_ events: [AgentLogEvent], evidence: [EvidenceText], position: LogPosition) throws -> AppendResult
   /// Evidence and the next reading position must commit together.
   @discardableResult func appendLogBatch(_ evidence: [EvidenceText], position: LogPosition) throws -> AppendResult
 }
@@ -285,7 +298,20 @@ public protocol LogBatchWriter {
 public struct AppendResult: Equatable {
   public var stored: Int
   public var refused: Int
+  public var logGrowth = AgentLogGrowth()
   public init(stored: Int = 0, refused: Int = 0) { self.stored = stored; self.refused = refused }
+}
+
+/// Durable local-event growth, independent of the human-prompt projection.
+public struct AgentLogGrowth: Equatable {
+  public var events = 0
+  public var payloads = 0
+  public var refusalOccurrences = 0
+  /// Source record bytes exclude newline separators; payload bytes count unique UTF-8 text.
+  /// Neither counter includes SQLite indexes, free pages, or WAL overhead.
+  public var sourceBytes = 0
+  public var payloadBytes = 0
+  public init() {}
 }
 
 extension EvidenceReader {

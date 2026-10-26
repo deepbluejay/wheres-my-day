@@ -18,6 +18,7 @@ final class CodexPlanProcess {
     ownedHome = try CodexProcessHome(root: root)
     let home = ownedHome.url
     do {
+      try OwnLogSources.registry(appDataDirectory: configuration.appDataDirectory).registerHome(home, tool: .codex)
       // Global AGENTS.md has no off switch. This home has neither global instructions nor personal settings.
       try Data("project_root_markers = []\n".utf8).write(to: home.appendingPathComponent("config.toml"), options: .withoutOverwriting)
       let launch = try configuration.launch()

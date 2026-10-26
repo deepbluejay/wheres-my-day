@@ -11,6 +11,7 @@ public struct ClaudeAgentLogReader: AgentLogReader {
   public func files() throws -> [AgentLogFile] { try listing().files }
   public func listing() throws -> AgentLogListing { try filesSource.listing() }
   public func read(_ file: AgentLogFile, position: LogPosition?, at time: Int) throws -> AgentLogBatch {
-    try AgentLogFiles.read(file, tool: .claude, position: position, at: time)
+    try AgentLogFiles.read(file, tool: .claude, position: position, at: time, ownSources: AgentLogFiles.ownSources(
+      appDataDirectory: filesSource.appDataDirectory ?? AppDataPaths.directory(in: URL(fileURLWithPath: filesSource.userHome))))
   }
 }

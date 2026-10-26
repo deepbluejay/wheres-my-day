@@ -20,7 +20,7 @@ extension StorageTests {
     for table in ["ax_probe_parts", "ax_probe_refs", "ax_probe_chunks", "ax_probe_blobs"] { try store.connection.run("DROP TABLE \(table)") }
     try store.connection.run("PRAGMA user_version=8")
     let upgraded = try ActivityStorage(url: url, appDataDirectory: folder, databaseScope: .directory(folder))
-    XCTAssertEqual(try upgraded.connection.integer("PRAGMA user_version"), 14)
+    XCTAssertEqual(try upgraded.connection.integer("PRAGMA user_version"), SQLiteConnection.schemaVersion)
     XCTAssertEqual(try upgraded.connection.integer("SELECT probe_version FROM ax_probe_runs"), 2)
     try upgraded.connection.rows("SELECT payload FROM ax_probe_attempts") { XCTAssertEqual(SQLiteConnection.text($0, 0), legacy) }
     XCTAssertEqual(try upgraded.connection.integer("SELECT count(*) FROM ax_probe_blobs"), 0)

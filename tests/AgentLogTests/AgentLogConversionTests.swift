@@ -34,7 +34,7 @@ extension AgentLogTests {
     try FileManager.default.removeItem(at: url)
     try FileManager.default.moveItem(at: replacement, to: url)
   }
-  func testConvertedOldIdentitiesSurviveEveryFileReplacementWithZeroDuplicates() throws {
+  func testConvertedNativeIdentitiesStayCanonicalAndMissingIDsKeepOccurrences() throws {
     let oldURL = try oldLogsDatabase("invented-old-identities")
     var logs: [URL] = []
     do {
@@ -100,10 +100,10 @@ extension AgentLogTests {
     for tool in AgentLogTool.allCases {
       let task = AgentLogTask(reader: reader(tool), storage: converted)
       try task.scan(at: 500)
-      XCTAssertEqual(task.health.stored, 0, tool.rawValue)
-      XCTAssertEqual(task.health.refused, tool == .claude ? 4 : 3)
+      XCTAssertEqual(task.health.stored, tool == .claude ? 2 : 1, tool.rawValue)
+      XCTAssertEqual(task.health.refused, 2)
     }
-    XCTAssertEqual(try converted.evidence(in: all).count, 6)
+    XCTAssertEqual(try converted.evidence(in: all).count, 9)
     // A different parent path retains the old session-file identity as well.
     let alias = root.appendingPathComponent("invented-moved")
     try FileManager.default.createDirectory(at: alias, withIntermediateDirectories: true)
@@ -111,14 +111,14 @@ extension AgentLogTests {
     try FileManager.default.copyItem(at: logs[0], to: moved)
     let file = try XCTUnwrap(AgentLogFiles.enumerate([alias.path]).first)
     let batch = try AgentLogFiles.read(file, tool: .claude, position: nil, at: 700)
-    XCTAssertEqual(try converted.appendLogBatch(batch.evidence, position: batch.position).stored, 0)
+    XCTAssertEqual(try converted.appendLogBatch(batch.evidence, position: batch.position).stored, 1)
   }
   func testOldDeletedQueueStaysDeletedAfterConversionAndReplacement() throws {
     for protection in ["range", "identity", "both"] {
       let oldURL = try oldLogsDatabase("invented-old-deleted-queue-" + protection)
       let url = try file(.claude, name: "invented-deleted-queue-" + protection + ".jsonl")
       try write([enqueue("invented-forgotten", at: 90), queued("invented-forgotten", at: 95),
-        queuedCopy("invented-forgotten-copy", at: 96)], to: url)
+        queuedCopy("invented-forgotten-copy", at: 96, commandID: "invented-forgotten")], to: url)
       do {
         let old = try SQLiteConnection(url: oldURL, scope: .directory(root))
         if protection != "identity" { try old.run("INSERT INTO forgotten VALUES(90,91)") }
@@ -147,7 +147,7 @@ extension AgentLogTests {
       XCTAssertEqual(try converted.logPosition(path: url.path)?.offset, (try Data(contentsOf: url)).count)
     }
   }
-  func testOldPendingQueueCheckpointPreservesArrivalTimeWithoutText() throws {
+  func testOldPendingCheckpointDoesNotRewriteDeliveryTime() throws {
     let url = try file(.claude)
     try write([queued("invented-pending", at: 95)], to: url)
     let listed = try XCTUnwrap(reader(.claude).files().first)
@@ -159,12 +159,12 @@ extension AgentLogTests {
     let position = LogPosition(path: listed.path, device: listed.device, inode: listed.inode,
       offset: 0, state: oldState, seenAt: 100)
     let batch = try AgentLogFiles.read(listed, tool: .claude, position: position, at: 200)
-    XCTAssertEqual(batch.evidence.first?.ts, 90)
+    XCTAssertEqual(batch.evidence.first?.ts, 95)
     XCTAssertEqual(batch.evidence.first?.sourceID, "claude:invented-pending")
     XCTAssertFalse(batch.position.state.contains("Invented repeated queue words"))
   }
 
-  func testOldAbsorbedQueueIDAndClockReversalKeepTheirIdentityAndArrival() throws {
+  func testOldHashReceiptsNeverRewriteIdentityOrArrival() throws {
     var state = AgentLogState()
     let arrival = try json([
       "type": "queue-operation", "operation": "enqueue", "timestamp": stamp(90),
@@ -181,19 +181,19 @@ extension AgentLogTests {
     guard case .prompt(let row) = AgentLogParser.parse(try queuedCopy("invented-copy", at: 96),
       tool: .claude, file: "/invented/session.jsonl", state: &state, fingerprint: AgentLogFiles.fingerprint)
     else { return XCTFail("absorbed queue must be delivered") }
-    XCTAssertEqual(row.sourceID, "claude:invented-absorbed")
-    XCTAssertEqual(row.ts, 90)
+    XCTAssertEqual(row.sourceID, "claude:invented-copy")
+    XCTAssertEqual(row.ts, 96)
     _ = AgentLogParser.parse(try enqueue("invented-reversal", at: 110), tool: .claude,
       file: "/invented/session.jsonl", state: &state, fingerprint: AgentLogFiles.fingerprint)
     guard case .prompt(let reversed) = AgentLogParser.parse(try queued("invented-reversal", at: 105),
       tool: .claude, file: "/invented/session.jsonl", state: &state, fingerprint: AgentLogFiles.fingerprint)
     else { return XCTFail("identified delivery must survive a backward clock") }
-    XCTAssertEqual(reversed.ts, 110)
+    XCTAssertEqual(reversed.ts, 105)
     guard case .prompt(let copy) = AgentLogParser.parse(try queuedCopy("invented-reversal-copy", at: 106),
       tool: .claude, file: "/invented/session.jsonl", state: &state, fingerprint: AgentLogFiles.fingerprint)
     else { return XCTFail("queued copy must pair even after a backward clock") }
-    XCTAssertEqual(copy.sourceID, reversed.sourceID)
-    XCTAssertEqual(copy.ts, 110)
+    XCTAssertEqual(copy.sourceID, "claude:invented-reversal-copy")
+    XCTAssertEqual(copy.ts, 106)
   }
 
 }

@@ -32,8 +32,8 @@ private final class SignedInTokens: ChatGPTAccessTokens {
 }
 
 final class AppCompositionTests: XCTestCase {
-  // Ideal: agent logs are read only with consent and a ChatGPT sign-in with plan use, since they are read to be summarized.
-  func testAgentLogsWaitForConsentAndAChatGPTSignIn() throws {
+  // Local log collection follows recording controls independently of the summary account.
+  func testAgentLogsCollectBeforeSignInAndKeepRecordingControls() throws {
     let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["ACTIVITYPROBE_TEST_ROOT"] ?? NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root.appendingPathComponent("data"), withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -48,16 +48,22 @@ final class AppCompositionTests: XCTestCase {
       from: 0, dayStart: { $0 }, locale: { "en" })
     let task = try XCTUnwrap(connections.logTasks.first)
     try task.scan(at: 10)
-    XCTAssertEqual(reader.listings, 0)
+    XCTAssertEqual(reader.listings, 1)
     try connections.client.saveFixtureSettings(StorageSettings(subscriptionConnected: true), at: 0)
     try task.scan(at: 20)
-    XCTAssertEqual(reader.listings, 0)
+    XCTAssertEqual(reader.listings, 2)
     tokens.signedInForPlanUse = true
     try task.scan(at: 30)
-    XCTAssertEqual(reader.listings, 1)
+    XCTAssertEqual(reader.listings, 3)
     try connections.client.saveFixtureSettings(StorageSettings(subscriptionConnected: false), at: 40)
     try task.scan(at: 50)
-    XCTAssertEqual(reader.listings, 1)
+    XCTAssertEqual(reader.listings, 4)
+    try connections.client.saveSettings(StorageSettings(recordingEnabled: false), at: 60)
+    try task.scan(at: 70)
+    XCTAssertEqual(reader.listings, 4)
+    try connections.client.saveSettings(StorageSettings(pausedUntil: 100), at: 80)
+    try task.scan(at: 90)
+    XCTAssertEqual(reader.listings, 4)
   }
 
   // Ideal: each context remains independent; a DB override never becomes an app home.

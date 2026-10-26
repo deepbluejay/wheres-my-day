@@ -11,6 +11,7 @@ import tempfile
 
 REPO = Path(__file__).resolve().parent.parent
 PREVIOUS = "8a575902e45808c96d2a25190820af66c0451ac6"
+MAIN14 = "3bca053"
 BROKEN = "bbd9d5267cd4cdea5498579813109c8cde43b8cb"
 TABLES = ("evidence", "sample_observations", "screen_payloads", "collection_blobs", "input_batches", "collection_metadata")
 
@@ -82,6 +83,7 @@ def main():
         scratch = Path(temp)
         old_source = export(PREVIOUS, scratch / "schema13")
         broken_source = export(BROKEN, scratch / "schema14-before")
+        main14_source = export(MAIN14, scratch / "main14")
         # Copy the current sources, including uncommitted fixes, without a worktree/branch switch.
         current = export("HEAD", scratch / "current")
         for directory in ("Sources", "Plugins"):
@@ -89,7 +91,7 @@ def main():
         future = scratch / "future"
         shutil.copytree(current, future)
         schema = future / "Sources/Storage/Schema.swift"
-        text = schema.read_text().replace("static let schemaVersion = 14", "static let schemaVersion = 15")
+        text = schema.read_text().replace("static let schemaVersion = 15", "static let schemaVersion = 16")
         marker = "      if version < 11 { try backfillCollectionNovelty() }"
         assert marker in text
         text = text.replace(marker, '''      for table in ["evidence", "input_batches", "collection_metadata"] {
@@ -97,6 +99,7 @@ def main():
       }
 ''' + marker)
         schema.write_text(text)
+        main14 = build(main14_source, scratch / "build-main14", scratch)
         old = build(old_source, scratch / "build13", scratch)
         broken = build(broken_source, scratch / "build14before", scratch)
         fixed = build(current, scratch / "build14fixed", scratch)
@@ -111,17 +114,18 @@ def main():
                 result = json.loads(run([broken, "recover", negative, kind]))
                 assert result["ready"] >= 2 and result["failures"] > 0
                 print(f"BEFORE {kind} ready={result['ready']} failures={result['failures']}", flush=True)
-            recover(fixed, root, kind, 14, before)
+            recover(fixed, root, kind, 15, before)
             cases += 1
             for label, writer in (("historical-excluded", old), ("current-excluded", fixed)):
                 control = scratch / (label + "-" + kind)
                 original = crash(writer, control, kind)
-                recover(fixed, control, kind, 14, original, excluded=True)
+                recover(fixed, control, kind, 15, original, excluded=True)
                 cases += 1
             for label, writer, reader, version in (("13-to-13", old, old, 13),
-                                                   ("old14-to-fixed14", broken, fixed, 14),
-                                                   ("14-to-14", fixed, fixed, 14),
-                                                   ("14-to-15", fixed, next_version, 15)):
+                                                   ("old14-to-fixed15", broken, fixed, 15),
+                                                   ("15-to-15", fixed, fixed, 15),
+                                                   ("14-to-15", main14, fixed, 15),
+                                                   ("15-to-16", fixed, next_version, 16)):
                 control = scratch / (label + "-" + kind)
                 original = crash(writer, control, kind)
                 recover(reader, control, kind, version, original)

@@ -1,0 +1,269 @@
+// Archived undeployed fixtures, original 8038586. Runtime regressions remain in main/current-origin tests.
+
+// AgentLogFixTests.swift
+  func testPayloadCleanupIndexMigrationAndRetainedPopulation() throws {
+    let original = EvidenceText(ts: 100, kind: .prompt, source: "invented", sourceID: "claude:migration", text: "Invented original")
+    try store.appendEvidence([original])
+    let position = LogPosition(path: "invented-migration", device: 1, inode: 2, offset: 50, state: "{}", seenAt: 200)
+    try store.saveLogPosition(position)
+    let before = try store.evidence(in: all)
+    let beforeSettings = try store.settings()
+    let beforeHistory = try store.logRecordingHistory()
+    try store.connection.run("DROP INDEX agent_log_events_payload")
+    try store.connection.run("PRAGMA user_version=10")
+    store = nil
+    store = try ActivityStorage(url: root.appendingPathComponent("invented.sqlite"), appDataDirectory: root, databaseScope: .directory(root))
+    XCTAssertEqual(try store.evidence(in: all), before)
+    XCTAssertEqual(try store.settings(), beforeSettings)
+    XCTAssertEqual(try store.logRecordingHistory(), beforeHistory)
+    XCTAssertEqual(try store.logPosition(path: position.path)?.offset, position.offset)
+    XCTAssertEqual(try eventCount(), 0)
+    var plan = ""
+    try store.connection.namedRows("EXPLAIN QUERY PLAN SELECT 1 FROM agent_log_events WHERE payload_id=1") { plan += try $0.text("detail") }
+    XCTAssertTrue(plan.contains("agent_log_events_payload"))
+    XCTAssertFalse(plan.contains("SCAN"))
+    try store.connection.transaction {
+      for index in 0..<2000 {
+        try store.connection.run("INSERT INTO agent_log_payloads(id,digest,payload) VALUES(?,?,?)", [.integer(index + 1), .key("invented-\(index)"), .maskedText(String(repeating: "x", count: 4096))])
+        try store.connection.run("""
+          INSERT INTO agent_log_events(tool,source,device,inode,byte_offset,ts,timestamp_known,observed_ts,project,record_type,role,flags,parse_status,byte_count,payload_id)
+          VALUES('claude','invented',1,1,?,?,1,3000000,'','assistant','assistant','[]','parsed',4096,?)
+          """, [.integer(index), .integer(index < 1000 ? 100 : 3000000), .integer(index + 1)])
+      }
+    }
+    _ = try store.cleanRetention(at: 31 * 86400)
+    XCTAssertEqual(try eventCount(), 1000)
+    XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM agent_log_payloads"), 1000)
+  }
+// AgentLogSecondRepairTests.swift
+  func testVersionElevenAdoptsEdgesWithoutRewritingHistoricalRows() throws {
+    try store.appendEvidence([EvidenceText(ts: 100, kind: .prompt, source: "invented-legacy",
+      sourceID: "claude:legacy-b", text: "Invented legacy instruction")])
+    try store.connection.run("INSERT INTO agent_prompt_aliases VALUES('claude:legacy-a','claude:legacy-b')")
+    let position = LogPosition(path: "invented-legacy", device: 10, inode: 20, offset: 30, state: "{}", seenAt: 200)
+    try store.saveLogPosition(position)
+    let evidence = try store.evidence(in: all)
+    let history = try store.logRecordingHistory()
+    let settings = try store.settings()
+    try store.connection.run("DROP VIEW agent_prompt_lineage")
+    try store.connection.run("DROP TABLE agent_prompt_edges")
+    try store.connection.run("DROP TRIGGER agent_log_source_evidence_cleanup")
+    try store.connection.run("DROP TABLE agent_log_source_evidence")
+    try store.connection.run("DROP TABLE agent_log_own_sources")
+    try store.connection.run("PRAGMA user_version=11")
+    store = nil
+    store = try ActivityStorage(url: root.appendingPathComponent("invented.sqlite"), appDataDirectory: root, databaseScope: .directory(root))
+    XCTAssertEqual(try store.connection.integer("PRAGMA user_version"), 12)
+    XCTAssertEqual(try store.evidence(in: all), evidence)
+    XCTAssertEqual(try store.logRecordingHistory(), history)
+    XCTAssertEqual(try store.settings(), settings)
+    XCTAssertEqual(try store.logPosition(path: position.path)?.offset, position.offset)
+    XCTAssertEqual(try eventCount(), 0)
+    XCTAssertEqual(try store.appendEvidence([EvidenceText(ts: 300, kind: .prompt, source: "invented-new",
+      sourceID: "claude:legacy-c", sourceAliases: ["claude:legacy-a"], text: "Invented legacy instruction")]).stored, 0)
+    XCTAssertEqual(try store.evidence(in: all), evidence)
+    XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM agent_prompt_lineage WHERE alias='claude:legacy-a'"), 2)
+  }
+// AgentLogFourthRepairTests.swift
+  func testLookaheadDoesNotReassignEarlierRecordIdentityAndUpgradesLegacyScan() throws {
+    for tool in AgentLogTool.allCases {
+      let url = try file(tool, name: "invented-independent-cursors-\(tool).jsonl")
+      try write([fourthRecord(tool, "user", "invented-early"), fourthMetadata(tool, "invented-late")], to: url)
+      let batch = try fourthRead(url, tool)
+      XCTAssertNil(batch.events.first?.session)
+      XCTAssertEqual(try AgentLogState.decode(batch.position.state).ownershipSession?.storedKey, "invented-late")
+      if tool == .codex { XCTAssertTrue(batch.evidence.first?.sourceID?.contains("invented-fourth-thread") == true) }
+      try fourthCommit(batch)
+      // Old checkpoints may have scanned past a session without preserving it. Rewalk only
+      // their ownership cursor; the ordinary collection cursor stays at its committed offset.
+      let saved = try XCTUnwrap(store.logPosition(path: url.path))
+      try store.connection.run("UPDATE log_positions SET state=json_remove(state,'$.ownershipSession') WHERE path=?", [.key(AgentLogEventParser.pathIdentity(url.path))])
+      let recovered = try fourthRead(url, tool)
+      XCTAssertEqual(recovered.position.offset, saved.offset)
+      XCTAssertTrue(recovered.events.isEmpty)
+      XCTAssertEqual(try AgentLogState.decode(recovered.position.state).ownershipSession?.storedKey, "invented-late")
+      var state = AgentLogState()
+      state.ownershipSession = AgentLogIdentityCodec.session("sk-inventedABCDEFGHIJKLMNOPQRSTUV123456789")
+      XCTAssertFalse(try state.encoded().contains("sk-invented"))
+    }
+  }
+
+// AgentLogFourthRepairTests.swift
+  func testLegacyCanonicalOriginStaysUnknownAfterNewOwnDedupBothToolsAndAdoptions() throws {
+    for tool in AgentLogTool.allCases {
+      for version in [11, 12] {
+        let tag = "invented-legacy-fourth-\(tool)-\(version)"
+        let foreign = try file(tool, home: root.appendingPathComponent(tag + "-foreign"), name: tag + ".jsonl")
+        let own = try file(tool, home: root.appendingPathComponent(tag + "-own"), name: tag + ".jsonl")
+        let record = try fourthRecord(tool, "user", tag)
+        try write([fourthMetadata(tool, tag + "-foreign"), record], to: foreign)
+        try fourthCommit(fourthRead(foreign, tool))
+        // Remove only newer additive objects to reproduce pre-origin schema 12 as well as 11.
+        for sql in ["DROP TRIGGER agent_log_evidence_origin_cleanup", "DROP TABLE agent_log_evidence_origins",
+          "DROP TABLE agent_log_revoked_sessions", "DROP INDEX agent_log_events_session", "DROP INDEX agent_log_events_tool_source",
+          "DROP INDEX log_positions_session", "DROP INDEX log_positions_ownership_session"] { try store.connection.run(sql) }
+        if version == 11 {
+          for sql in ["DROP VIEW agent_prompt_lineage", "DROP TABLE agent_prompt_edges",
+            "DROP TRIGGER agent_log_source_evidence_cleanup", "DROP TABLE agent_log_source_evidence",
+            "DROP TABLE agent_log_own_sources"] { try store.connection.run(sql) }
+        } else {
+          try store.connection.run("DELETE FROM agent_log_source_evidence")
+        }
+        try store.connection.run("UPDATE log_positions SET state=json_remove(state,'$.tool','$.ownershipSession')")
+        try store.connection.run("PRAGMA user_version=\(version)")
+        let tables = ["evidence", "settings", "log_recording_history", "log_positions", "forgotten_ranges",
+          "forgotten_sources", "agent_log_events", "agent_log_payloads", "agent_log_event_identities", "agent_prompt_aliases"]
+        let snapshots = try tables.map { try fourthSnapshot($0) }
+        try fourthReopen()
+        XCTAssertEqual(try tables.map { try fourthSnapshot($0) }, snapshots)
+        XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM agent_log_evidence_origins"), 0)
+        let evidence = try fourthSnapshot("evidence")
+        let foreignEvents = try fourthSnapshot("agent_log_events", where: "source='\(AgentLogEventParser.pathIdentity(foreign.path))'")
+        let payloads = try fourthSnapshot("agent_log_payloads")
+        var cursor = try fourthSnapshot("log_positions", where: "path='\(AgentLogEventParser.pathIdentity(foreign.path))'")
+        try write([fourthMetadata(tool, tag + "-own"), record], to: own)
+        try fourthCommit(fourthRead(own, tool))
+        XCTAssertEqual(try fourthSnapshot("evidence"), evidence)
+        XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM agent_log_source_evidence WHERE source=?", [.key(AgentLogEventParser.pathIdentity(own.path))]), 1)
+        XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM agent_log_evidence_origins"), 0)
+        try fourthReopen()
+        try append(Data((try fourthMarker() + "\n").utf8), to: own)
+        let batch = try fourthRead(own, tool)
+        try store.connection.run("CREATE TRIGGER invented_fourth_failure BEFORE INSERT ON log_positions BEGIN SELECT RAISE(ABORT,'invented failure'); END")
+        XCTAssertThrowsError(try fourthCommit(batch))
+        XCTAssertEqual(try fourthSnapshot("evidence"), evidence)
+        XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM agent_log_source_evidence WHERE source=?", [.key(AgentLogEventParser.pathIdentity(own.path))]), 1)
+        try store.connection.run("DROP TRIGGER invented_fourth_failure")
+        try fourthReopen()
+        try fourthCommit(fourthRead(own, tool))
+        for _ in 0..<2 {
+          try fourthReopen()
+          try fourthCommit(fourthRead(own, tool))
+          XCTAssertEqual(try fourthSnapshot("evidence"), evidence)
+          XCTAssertEqual(try fourthSnapshot("agent_log_events", where: "source='\(AgentLogEventParser.pathIdentity(foreign.path))'"), foreignEvents)
+          XCTAssertEqual(try fourthSnapshot("agent_log_payloads"), payloads)
+          XCTAssertEqual(try fourthSnapshot("log_positions", where: "path='\(AgentLogEventParser.pathIdentity(foreign.path))'"), cursor)
+          XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM agent_log_source_evidence WHERE source=?", [.key(AgentLogEventParser.pathIdentity(own.path))]), 0)
+          let resumed = try fourthRead(foreign, tool)
+          XCTAssertTrue(resumed.events.isEmpty)
+          let oldPosition = try XCTUnwrap(store.logPosition(path: foreign.path))
+          XCTAssertEqual(resumed.position.offset, oldPosition.offset)
+          XCTAssertEqual(resumed.position.device, oldPosition.device)
+          XCTAssertEqual(resumed.position.inode, oldPosition.inode)
+          try fourthCommit(resumed)
+          cursor = try fourthSnapshot("log_positions", where: "path='\(AgentLogEventParser.pathIdentity(foreign.path))'")
+        }
+      }
+    }
+  }
+
+// AgentLogThirdRepairTests.swift
+  func testReadOnlyDeletionPreviewAcrossSchemasNineThroughTwelveLeavesDatabaseBytesUnchanged() throws {
+    for version in 9...12 {
+      let directory = root.appendingPathComponent("invented-schema-\(version)")
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      let url = directory.appendingPathComponent("invented.sqlite")
+      var fixture: ActivityStorage? = try ActivityStorage(url: url, appDataDirectory: directory, databaseScope: .directory(directory))
+      try fixture!.appendEvidence([EvidenceText(ts: 100, kind: .prompt, source: "invented-legacy",
+        sourceID: "claude:invented-canonical", text: "Invented legacy instruction")])
+      if version < 12 {
+        for sql in ["DROP VIEW agent_prompt_lineage", "DROP TABLE agent_prompt_edges",
+          "DROP TRIGGER agent_log_source_evidence_cleanup", "DROP TABLE agent_log_source_evidence", "DROP TABLE agent_log_own_sources"] {
+          try fixture!.connection.run(sql)
+        }
+      }
+      if version == 9 {
+        for sql in ["DROP TABLE agent_prompt_aliases", "DROP TRIGGER agent_log_payload_cleanup",
+          "DROP TABLE agent_log_event_identities", "DROP TABLE agent_log_events", "DROP TABLE agent_log_payloads", "DROP TABLE agent_log_refusals"] {
+          try fixture!.connection.run(sql)
+        }
+      } else {
+        try fixture!.connection.run("INSERT INTO agent_prompt_aliases VALUES('claude:invented-alias','claude:invented-canonical')")
+      }
+      try fixture!.connection.run("PRAGMA user_version=\(version)")
+      fixture = nil
+      let before = try Data(contentsOf: url)
+      let wal = try? Data(contentsOf: URL(fileURLWithPath: url.path + "-wal"))
+      let readOnly = try ActivityStorage(url: url, appDataDirectory: directory, readOnly: true, databaseScope: .directory(directory))
+      let preview = try readOnly.previewDeletion(in: TimeRange(100, 101))
+      XCTAssertEqual(preview.counts["evidence"], 1)
+      XCTAssertEqual(try readOnly.previewDeletion(in: TimeRange(100, 101)).confirmation, preview.confirmation)
+      XCTAssertEqual(try readOnly.connection.integer("PRAGMA user_version"), version)
+      XCTAssertEqual(try readOnly.connection.integer("SELECT count(*) FROM log_identity_component"), version == 9 ? 1 : 2)
+      XCTAssertEqual(try Data(contentsOf: url), before)
+      XCTAssertEqual(try? Data(contentsOf: URL(fileURLWithPath: url.path + "-wal")), wal)
+    }
+  }
+// AgentLogTwelfthRepairTests.swift
+  func testTwelfthExistingVersionTwelveAddsPhysicalOriginCapabilities() throws {
+    let url = try file(.claude)
+    try write([twelfthRecord(.claude, session: "invented-session", item: "invented-item")], to: url)
+    try twelfthCommit(AgentLogFiles.read(twelfthSource(url), tool: .claude, position: nil, at: 300), storage: store)
+    let before = try twelfthSnapshot(store, "evidence")
+    try store.connection.run("DROP INDEX agent_log_evidence_origins_source")
+    try store.connection.run("DROP TRIGGER agent_log_owned_evidence_origin_cleanup")
+    try store.connection.run("DROP TABLE agent_log_owned_evidence_origins")
+    XCTAssertEqual(try store.connection.integer("PRAGMA user_version"), 12)
+    store = nil
+    store = try ActivityStorage(url: root.appendingPathComponent("invented.sqlite"), appDataDirectory: root, databaseScope: .directory(root))
+    XCTAssertEqual(try twelfthSnapshot(store, "evidence"), before)
+    XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM sqlite_master WHERE name IN ('agent_log_evidence_origins_source','agent_log_owned_evidence_origins','agent_log_owned_evidence_origin_cleanup')"), 3)
+    var plans: [String] = []
+    try store.connection.namedRows("EXPLAIN QUERY PLAN SELECT evidence_id FROM agent_log_evidence_origins WHERE tool=? AND device=? AND inode=? AND source=?",
+      [.key("claude"), .integer(1), .integer(2), .key("invented")]) { plans.append(try $0.text("detail")) }
+    XCTAssertTrue(plans.contains { $0.contains("COVERING INDEX agent_log_evidence_origins_source") })
+  }
+// AgentLogSixthRepairTests.swift
+  func testExplicitSessionMaskingAdoptionCleanupAndPreviewFreshness() throws {
+    let url = try file(.codex, name: "invented-sixth-attribution.jsonl")
+    try write([sixthRecord(.codex, "invented-sixth-attribution", "user", "invented-attribution")], to: url)
+    var batch = try sixthRead(url, .codex)
+    batch.events[0].explicitSession = AgentLogIdentityCodec.session("sk-inventedABCDEFGHIJKLMNOPQRSTUV123456789")
+    try sixthCommit(batch)
+    XCTAssertFalse(try sixthSnapshot("agent_log_event_sessions").joined().contains("sk-invented"))
+    let preview = try store.previewDeletion(in: TimeRange(100, 101))
+    try store.connection.run("UPDATE agent_log_event_sessions SET session_id='invented-changed'")
+    XCTAssertNotEqual(try store.previewDeletion(in: preview.range).confirmation, preview.confirmation)
+    XCTAssertThrowsError(try store.deleteRecords(in: preview.range, confirmation: preview.confirmation))
+    let cursor = try sixthSnapshot("log_positions")
+    for sql in ["DROP TRIGGER agent_log_event_session_cleanup", "DROP TABLE agent_log_event_sessions", "DROP TABLE agent_log_tool_own_sources"] { try store.connection.run(sql) }
+    try sixthReopen()
+    XCTAssertEqual(try sixthSnapshot("log_positions"), cursor)
+    XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM sqlite_master WHERE name IN ('agent_log_event_sessions','agent_log_event_session','agent_log_event_session_cleanup','agent_log_tool_own_sources')"), 4)
+    let current = try store.previewDeletion(in: TimeRange(100, 101))
+    try store.deleteRecords(in: current.range, confirmation: current.confirmation)
+    XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM agent_log_event_sessions"), 0)
+  }
+}
+
+// AgentLogFourthRepairTests.swift
+  func testFullLegacySessionRevocationUnionUsesPhysicalSourceIndex() throws {
+    for tool in AgentLogTool.allCases {
+      let tag = "invented-legacy-plan-\(tool)"
+      let url = try file(tool, name: tag + ".jsonl")
+      try write([fourthMetadata(tool, tag), fourthRecord(tool, "user", tag)], to: url)
+      try fourthCommit(fourthRead(url, tool))
+      try store.connection.run("UPDATE log_positions SET state=json_remove(state,'$.tool') WHERE path=?", [.key(AgentLogEventParser.pathIdentity(url.path))])
+      let args = ActivityStorage.ownLogSessionSourceValues(AgentLogIdentityCodec.session(tag), tool: tool)
+      var plans: [String] = []
+      try store.connection.namedRows("EXPLAIN QUERY PLAN " + ActivityStorage.ownLogSessionSourcesSQL, args) { plans.append(try $0.text("detail")) }
+      let details = plans.joined(separator: "; ")
+      XCTAssertTrue(plans.contains { $0.contains("agent_log_inherited_session (tool=? AND session_id=?)") }, details)
+      XCTAssertTrue(plans.contains { $0.contains("agent_log_event_session (tool=? AND session_id=?)") }, details)
+      XCTAssertTrue(plans.contains { $0.contains("log_positions_session") }, details)
+      XCTAssertTrue(plans.contains { $0.contains("log_positions_ownership_session") }, details)
+      XCTAssertEqual(plans.filter { $0.contains("COVERING INDEX agent_log_events_tool_source (tool=? AND device=? AND inode=? AND source=?)") }.count, 4, details)
+      XCTAssertFalse(plans.contains { $0.contains("SCAN e") || $0.contains("agent_log_events_session") }, details)
+      try store.purgeOwnLogSession(AgentLogIdentityCodec.session(tag), tool: tool)
+      XCTAssertEqual(try eventCount("source='\(AgentLogEventParser.pathIdentity(url.path))'"), 0)
+      // Schema-12 adoption must also install the index without rewriting content.
+      try store.connection.run("DROP INDEX agent_log_events_tool_source")
+      let before = try fourthSnapshot("log_positions")
+      try fourthReopen()
+      XCTAssertEqual(try fourthSnapshot("log_positions"), before)
+      XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM sqlite_master WHERE name='agent_log_events_tool_source'"), 1)
+    }
+  }
+}
+
+extension AgentLogTests {

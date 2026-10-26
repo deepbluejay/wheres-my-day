@@ -96,14 +96,15 @@ extension ConversationConfiguration {
   /// still starts in the agent home, so its start-up files and git configuration stay closed to Claude too,
   /// and so does the login script Terminal runs.
   func claudeWriteProtectedPaths(work: URL, personal: ClaudePersonalHome) -> [String] {
-    unique((personalClaudeHomes(personal).map(\.configDirectory) + [work.appendingPathComponent(".claude"), claudeLoginFolder]
+    unique((personalClaudeHomes(personal).map(\.configDirectory) + [work.appendingPathComponent(".claude"), claudeLoginFolder,
+        appDataDirectory.appendingPathComponent(AgentLogOwnSources.folderName)]
       + personalStartupFiles(personal)
       + agentStartupFiles + agentGitConfiguration).flatMap(Self.spellings))
   }
   /// A later Codex process starts what its home's configuration names outside the sandbox, and Terminal
   /// runs the login script with the person's rights.
   var codexWriteProtectedPaths: [String] {
-    ([codexHome, claudeLoginFolder] + agentStartupFiles + agentGitConfiguration).flatMap(Self.spellings)
+    ([codexHome, claudeLoginFolder, appDataDirectory.appendingPathComponent(AgentLogOwnSources.folderName)] + agentStartupFiles + agentGitConfiguration).flatMap(Self.spellings)
   }
   /// Prefix rules only: a command that starts the tool another way passes them. The keychain files are
   /// closed in the sandbox as well; the keychain service itself is not a file the sandbox can close.

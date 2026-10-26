@@ -204,20 +204,14 @@ final class CollectionPolicyTests: XCTestCase {
     XCTAssertTrue(try store.collectionStatus().contains("collection_unrecoverable_total=1"))
     XCTAssertGreaterThan(pipeline.takeDiagnostics().persistenceFailures, 0)
   }
-  func testVersionTwelveMigrationAddsPolicyStateWithoutRewritingHistoricalContent() throws {
+  func testUndeployedVersionTwelveIsRefusedWithoutRewritingHistoricalContent() throws {
     let value = observation(observed: 100.5)
     try store.appendObservations([value])
     let before = try store.observations(in: all)
-    for table in ["collection_retention", "collection_policy_refusals", "collection_metadata"] { try store.connection.run("DROP TABLE \(table)") }
     try store.connection.run("PRAGMA user_version=12")
-    let upgraded = try ActivityStorage(url: store.url, appDataDirectory: folder, databaseScope: .directory(folder))
-    XCTAssertEqual(try upgraded.connection.integer("PRAGMA user_version"), 14)
-    XCTAssertEqual(try upgraded.observations(in: all), before)
-    XCTAssertEqual(try upgraded.connection.integer("SELECT count(*) FROM collection_retention"), 0)
-    _ = try upgraded.cleanRetention(at: 31*86400)
-    let reopened = try ActivityStorage(url: store.url, appDataDirectory: folder, databaseScope: .directory(folder))
-    XCTAssertEqual(try reopened.connection.integer("SELECT screen_cutoff FROM collection_retention"), 86400)
-    XCTAssertEqual(try reopened.appendObservations([value]).refused, 1)
+    XCTAssertThrowsError(try ActivityStorage(url: store.url, appDataDirectory: folder, databaseScope: .directory(folder)))
+    XCTAssertEqual(try store.connection.integer("PRAGMA user_version"), 12)
+    XCTAssertEqual(try store.observations(in: all), before)
   }
   func testStoredParentForgetPreservesLaterMetadataAndMetadataForgetPreservesParent() throws {
     try checkStoredComponentErasure(retention: false)

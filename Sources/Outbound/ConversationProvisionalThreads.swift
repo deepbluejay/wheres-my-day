@@ -18,9 +18,9 @@ struct ConversationProvisionalThreads {
     var events: [Event] = []
     var bytes = 0
   }
-  private var pending: [String: Pending] = [:]
+  private var pending: ConversationIdentityMap<Pending> = [:]
   private var order: [String] = []
-  private var rejected = Set<String>()
+  private var rejected = Set<AgentLogNativeComponent>()
   private var bytes = 0
   private var count = 0
   private var sequence = 0
@@ -28,7 +28,7 @@ struct ConversationProvisionalThreads {
   var identities: [String] { order }
   func events(for thread: String) -> [[String: Any]] { pending[thread]?.events.map(\.value) ?? [] }
 
-  func isRejected(_ thread: String) -> Bool { rejected.contains(thread) }
+  func isRejected(_ thread: String) -> Bool { rejected.contains(conversationIdentity(thread)) }
 
   func thread(containing predicate: ([String: Any]) -> Bool) -> String? {
     order.first { pending[$0]!.events.contains { predicate($0.value) } }
@@ -37,7 +37,7 @@ struct ConversationProvisionalThreads {
   mutating func hold(_ object: [String: Any], thread: String,
     now: TimeInterval = ProcessInfo.processInfo.systemUptime) throws -> Bool {
     guard !thread.isEmpty else { throw ConversationError.incompatible }
-    if rejected.contains(thread) { return false }
+    if rejected.contains(conversationIdentity(thread)) { return false }
     let size = try ConversationEncoding.json(object).count
     guard count < eventLimit, size <= byteLimit - bytes,
       pending[thread] != nil || pending.count < threadLimit else { throw ConversationError.outputLimit }
@@ -50,32 +50,32 @@ struct ConversationProvisionalThreads {
     return true
   }
 
-  func firstReady(verified: Set<String>, parent: ([String: Any]) -> String? = { value in
+  func firstReady(verified: Set<AgentLogNativeComponent>, parent: ([String: Any]) -> String? = { value in
     guard value["method"] as? String == "thread/started" else { return nil }
     return ((value["params"] as? [String: Any])?["thread"] as? [String: Any])?["parentThreadId"] as? String
   }) -> String? {
     order.first { id in
-      verified.contains(id) || pending[id]!.events.contains { value in
-        parent(value.value).map { verified.contains($0) } ?? false
+      verified.contains(conversationIdentity(id)) || pending[id]!.events.contains { value in
+        parent(value.value).map { verified.contains(conversationIdentity($0)) } ?? false
       }
     }
   }
 
   mutating func take(_ thread: String) -> [[String: Any]] {
     guard let value = pending.removeValue(forKey: thread) else { return [] }
-    order.removeAll { $0 == thread }; bytes -= value.bytes; count -= value.events.count
+    order.removeAll { conversationIdentity($0) == conversationIdentity(thread) }; bytes -= value.bytes; count -= value.events.count
     return value.events.map(\.value)
   }
 
   // Different native aliases may later prove to be one thread. Keep their
   // original order when the ancestry join makes several queues readable.
-  mutating func takeFirst(verified: Set<String>) -> (String, [String: Any])? {
-    guard let id = order.filter({ verified.contains($0) }).min(by: {
+  mutating func takeFirst(verified: Set<AgentLogNativeComponent>) -> (String, [String: Any])? {
+    guard let id = order.filter({ verified.contains(conversationIdentity($0)) }).min(by: {
       pending[$0]!.events[0].sequence < pending[$1]!.events[0].sequence
     }) else { return nil }
     let event = pending[id]!.events.removeFirst()
     pending[id]!.bytes -= event.bytes; bytes -= event.bytes; count -= 1
-    if pending[id]!.events.isEmpty { pending.removeValue(forKey: id); order.removeAll { $0 == id } }
+    if pending[id]!.events.isEmpty { pending.removeValue(forKey: id); order.removeAll { conversationIdentity($0) == conversationIdentity(id) } }
     return (id, event.value)
   }
 
@@ -95,6 +95,6 @@ struct ConversationProvisionalThreads {
 
   private mutating func reject(_ id: String) throws {
     guard rejected.count < 128 else { throw ConversationError.outputLimit }
-    rejected.insert(id)
+    rejected.insert(conversationIdentity(id))
   }
 }

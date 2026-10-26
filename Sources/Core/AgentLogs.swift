@@ -23,6 +23,8 @@ public struct AgentLogFile {
 }
 
 public struct AgentLogBatch {
+  public var events: [AgentLogEvent] = []
+  public var ownershipDeferred = false
   public var evidence: [EvidenceText]
   public var position: LogPosition
   public var malformedLines: Int
@@ -45,9 +47,11 @@ public protocol AgentLogReader {
 public struct AgentLogListing {
   public let files: [AgentLogFile]
   public let folderFailures: Int
-  public init(files: [AgentLogFile], folderFailures: Int = 0) {
+  public let discoveryFailures: Int
+  public init(files: [AgentLogFile], folderFailures: Int = 0, discoveryFailures: Int = 0) {
     self.files = files
     self.folderFailures = folderFailures
+    self.discoveryFailures = discoveryFailures
   }
 }
 
@@ -64,9 +68,12 @@ public enum AgentLogIgnore: String, Codable, CaseIterable {
 public enum AgentLogPolicy {
   public static func folders(tool: AgentLogTool, userHome: String, foundHomes: [String]) -> [String] {
     let defaultHome = URL(fileURLWithPath: userHome).appendingPathComponent(tool.defaultHomeName).path
-    return Array(Set(([defaultHome] + foundHomes).filter { $0.hasPrefix("/") }.map {
-      URL(fileURLWithPath: $0).appendingPathComponent(tool.logsFolder).standardizedFileURL.path
-    })).sorted()
+    var folders: [AgentLogPhysicalSource: String] = [:]
+    for home in [defaultHome] + foundHomes where home.hasPrefix("/") {
+      let path = URL(fileURLWithPath: home).appendingPathComponent(tool.logsFolder).standardizedFileURL.path
+      folders[AgentLogIdentity.decodedPath(path)] = path
+    }
+    return folders.values.sorted()
   }
   public static func continues(_ position: LogPosition?, file: AgentLogFile) -> Bool {
     guard let position else { return false }
@@ -76,65 +83,96 @@ public enum AgentLogPolicy {
   }
 }
 
-/// Checkpoints contain metadata and bounded queue hashes/ids/times, never prompt text or environment blocks.
+/// Checkpoints contain session metadata and old bounded receipts, never prompt text or environment blocks.
+/// New queue receipts are durable log events; old content hashes no longer establish identity.
 public struct AgentLogState: Codable, Equatable {
-  public var session: String?
+  public var metadataVersion = 5
+  public var unusableMetadataValues = 0
+  public var tool: String?
+  public var session: AgentLogSessionSubject?
+  public var sessionExact: Bool?
+  // Main-format content/refusal proof only; never a session ownership subject.
+  public var legacySession: AgentLogLegacyProof?
   public var ownWorkingFolder: Bool?
   public var project = ""
   public var ignoredSession: AgentLogIgnore?
   public var metadataRead = false
+  public var ownershipScanOffset = 0
+  public var ownershipSession: AgentLogSessionSubject?
+  // Positive ownership proof, independent of metadata at either cursor.
+  public var ownedSession: AgentLogSessionSubject?
+  // Separate resumable metadata work; the committed collection cursor never moves backwards.
+  public var metadataRecoveryOffset: Int?
+  public var metadataRecoveryScanner: AgentLogMetadata?
   var queued: [QueuedInstruction] = []
-  // Chosen memory bound, not measured. Each delivered hash can pair with one later user copy.
+  var legacyRefusalQueue: [AgentLogLegacyQueueReceipt] = []
+  // Identity receipts remain decode-only; refusal receipts use the same legacy bound.
   static let queueLimit = 32
   struct QueuedInstruction: Codable, Equatable {
-    let hash: String
-    var id: String?
+    let hash: AgentLogLegacyProof
+    var id: AgentLogLegacyProof?
     let ts: Int
     var delivered: Bool
   }
-  private struct OldQueuedInstruction: Decodable {
-    let hash: String
-    let id: String?
-    let ts: Int
-    let delivered: Bool?
-    let sourceID: String?
-  }
   public init() {}
+  /// Metadata recovery must not discard main's content-free refusal receipts.
+  public mutating func resetMetadataForRecovery() {
+    let refusals = legacyRefusalQueue
+    self = AgentLogState()
+    legacyRefusalQueue = refusals
+    metadataRecoveryOffset = 0
+    metadataRecoveryScanner = AgentLogMetadata()
+  }
   private enum CodingKeys: String, CodingKey {
-    case session, project, folder, threadID, queued, ignoredSession, metadataRead, ownWorkingFolder
+    case metadataVersion, unusableMetadataValues, tool, session, sessionExact, legacySession, project, folder, threadID, queued, legacyRefusalQueue, ignoredSession, metadataRead, ownWorkingFolder, ownershipScanOffset, ownershipSession, ownedSession, metadataRecoveryOffset, metadataRecoveryScanner
   }
   public init(from decoder: Decoder) throws {
     let values = try decoder.container(keyedBy: CodingKeys.self)
-    session = try values.decodeIfPresent(String.self, forKey: .session)
-      ?? values.decodeIfPresent(String.self, forKey: .threadID)
+    metadataVersion = try values.decodeIfPresent(Int.self, forKey: .metadataVersion) ?? 0
+    guard metadataVersion == 0 || metadataVersion == 5 else {
+      throw DecodingError.dataCorruptedError(forKey: .metadataVersion, in: values,
+        debugDescription: "Unsupported undeployed agent-log checkpoint")
+    }
+    unusableMetadataValues = try values.decodeIfPresent(Int.self, forKey: .unusableMetadataValues) ?? 0
+    tool = try values.decodeIfPresent(String.self, forKey: .tool)
+    session = try values.decodeIfPresent(AgentLogSessionSubject.self, forKey: .session)
+      ?? values.decodeIfPresent(AgentLogSessionSubject.self, forKey: .threadID)
+    sessionExact = try values.decodeIfPresent(Bool.self, forKey: .sessionExact)
+    legacySession = try values.decodeIfPresent(AgentLogLegacyProof.self, forKey: .legacySession)
     project = try values.decodeIfPresent(String.self, forKey: .project)
       ?? values.decodeIfPresent(String.self, forKey: .folder) ?? ""
     ownWorkingFolder = try values.decodeIfPresent(Bool.self, forKey: .ownWorkingFolder)
-    if ownWorkingFolder == nil, !project.isEmpty {
-      ownWorkingFolder = AgentWindowIdentity.containsWorkingFolder(project)
-    }
-    // Keep only hash/id/time from old queue entries, so a resumed delivery retains its enqueue timestamp.
-    if values.contains(.metadataRead) {
-      queued = Array((try values.decodeIfPresent([QueuedInstruction].self, forKey: .queued) ?? [])
-        .suffix(Self.queueLimit))
-    } else {
-      let old = try values.decodeIfPresent([OldQueuedInstruction].self, forKey: .queued) ?? []
-      queued = old.suffix(Self.queueLimit).map {
-        QueuedInstruction(hash: $0.hash, id: $0.delivered == true
-          ? $0.sourceID ?? $0.id.map { "claude:" + $0 } : $0.id, ts: $0.ts, delivered: $0.delivered ?? false)
-      }
-    }
+    let legacy = try AgentLogLegacyQueueState(from: decoder)
+    queued = legacy.queued
+    legacyRefusalQueue = legacy.receipts
     ignoredSession = try values.decodeIfPresent(AgentLogIgnore.self, forKey: .ignoredSession)
     metadataRead = try values.decodeIfPresent(Bool.self, forKey: .metadataRead) ?? false
+    ownershipScanOffset = try values.decodeIfPresent(Int.self, forKey: .ownershipScanOffset) ?? 0
+    ownershipSession = try values.decodeIfPresent(AgentLogSessionSubject.self, forKey: .ownershipSession)
+    ownedSession = try values.decodeIfPresent(AgentLogSessionSubject.self, forKey: .ownedSession)
+    metadataRecoveryOffset = try values.decodeIfPresent(Int.self, forKey: .metadataRecoveryOffset)
+    metadataRecoveryScanner = try values.decodeIfPresent(AgentLogMetadata.self, forKey: .metadataRecoveryScanner)
   }
   public func encode(to encoder: Encoder) throws {
     var values = encoder.container(keyedBy: CodingKeys.self)
+    try values.encode(metadataVersion, forKey: .metadataVersion)
+    try values.encode(unusableMetadataValues, forKey: .unusableMetadataValues)
+    try values.encodeIfPresent(tool.map { AgentLogIdentityCodec.component($0).storedKey }, forKey: .tool)
     try values.encodeIfPresent(session, forKey: .session)
-    try values.encode(project, forKey: .project)
+    try values.encodeIfPresent(sessionExact, forKey: .sessionExact)
+    try values.encodeIfPresent(legacySession, forKey: .legacySession)
+    try values.encode(AgentLogEventParser.safeString(project), forKey: .project)
     try values.encodeIfPresent(ownWorkingFolder, forKey: .ownWorkingFolder)
-    try values.encode(queued, forKey: .queued)
+    try values.encode(queued.map { QueuedInstruction(hash: $0.hash,
+      id: $0.id, ts: $0.ts, delivered: $0.delivered) }, forKey: .queued)
+    try values.encode(legacyRefusalQueue, forKey: .legacyRefusalQueue)
     try values.encodeIfPresent(ignoredSession, forKey: .ignoredSession)
     try values.encode(metadataRead, forKey: .metadataRead)
+    try values.encode(ownershipScanOffset, forKey: .ownershipScanOffset)
+    try values.encode(ownershipSession, forKey: .ownershipSession)
+    try values.encode(ownedSession, forKey: .ownedSession)
+    try values.encodeIfPresent(metadataRecoveryOffset, forKey: .metadataRecoveryOffset)
+    try values.encodeIfPresent(metadataRecoveryScanner?.checkpoint(), forKey: .metadataRecoveryScanner)
   }
   public static func decode(_ string: String) throws -> AgentLogState {
     if string.isEmpty { return AgentLogState() }
@@ -152,27 +190,25 @@ public enum AgentLogLine {
   case prompt(EvidenceText)
 }
 
+/// The existing human-prompt projection, not an acquisition filter. Other roles and marked records
+/// remain in AgentLogEventParser's local relation even when this projection returns excluded/ignored.
 public enum AgentLogParser {
   /// The adapter supplies SHA-256, keeping Core independent of platform crypto modules.
   public static func parse(
     _ text: String, tool: AgentLogTool, file: String, state: inout AgentLogState,
     logsRelativePath: String? = nil, fingerprint: (String) -> String
   ) -> AgentLogLine {
-    guard let line = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
-      let type = line["type"] as? String
-    else { return .malformed }
+    var metadata = AgentLogMetadata()
+    for byte in text.utf8 { metadata.consume(byte) }
+    AgentLogTransitionReducer.apply(metadata.facts(tool: tool), tool: tool, state: &state)
+    guard metadata.complete else { return .malformed }
+    return project(AgentLogRecord.decode(Data(text.utf8)).line, tool: tool, file: file, state: &state, logsRelativePath: logsRelativePath, fingerprint: fingerprint)
+  }
+  static func project(_ line: [String: Any], tool: AgentLogTool, file: String, state: inout AgentLogState,
+    logsRelativePath: String?, fingerprint: (String) -> String) -> AgentLogLine {
+    guard let type = line["type"] as? String else { return .malformed }
     let payload = line["payload"] as? [String: Any] ?? [:]
-    if tool == .codex, type == "session_meta" {
-      state.session = payload["id"] as? String ?? payload["session_id"] as? String ?? state.session
-      setProject(payload["cwd"], state: &state)
-      state.ignoredSession = codexMark(payload)
-      state.metadataRead = true
-      return .ignored
-    }
-    if tool == .claude {
-      state.session = line["sessionId"] as? String ?? state.session
-      setProject(line["cwd"], state: &state)
-    }
+    if tool == .codex && type == "session_meta" { return .ignored }
     let attachment = line["attachment"] as? [String: Any] ?? [:]
     let queuedAttachment = type == "attachment" && attachment["type"] as? String == "queued_command"
     let userItem = type == "event_msg" && payload["type"] as? String == "item_completed"
@@ -182,10 +218,8 @@ public enum AgentLogParser {
         file: file, logsRelativePath: logsRelativePath, state: state)
       {
         if type == "user", let message = line["message"] as? [String: Any],
-          let body = content(message["content"]), let time = epoch(line["timestamp"])
-        {
-          let hash = fingerprint(body)
-          state.queued.removeAll { $0.hash == hash && !$0.delivered && $0.ts <= time }
+          let body = content(message["content"]), let time = epoch(line["timestamp"]) {
+          AgentLogLegacyRefusal.discardQueued(body: body, at: time, state: &state, fingerprint: fingerprint)
         }
         return .excluded(mark)
       }
@@ -199,84 +233,68 @@ public enum AgentLogParser {
       if let mark = codexMark(line) ?? codexMark(payload) ?? codexMark(item) { return .excluded(mark) }
     }
     if tool == .claude, type == "queue-operation" {
-      // Enqueue bookkeeping is not a prompt candidate; only a delivery contributes ignore counts.
-      if claudeMark(line) != nil || wrapperMark(line["content"] as? String ?? "") != nil { return .ignored }
-      if let body = line["content"] as? String, let time = epoch(line["timestamp"]) {
-        let hash = fingerprint(body)
-        if line["operation"] as? String == "enqueue" {
-          state.queued.removeAll { $0.hash == hash && !$0.delivered }
-          state.queued.append(.init(hash: hash, id: line["commandUuid"] as? String, ts: time, delivered: false))
-        } else if line["operation"] as? String == "remove" {
-          if line["reason"] as? String == "absorbed_mid_turn" {
-            if let index = state.queued.lastIndex(where: { $0.hash == hash && !$0.delivered }),
-              let commandID = line["commandUuid"] as? String
-            {
-              state.queued[index].id = commandID
-            }
-          } else {
-            state.queued.removeAll { $0.hash == hash && !$0.delivered }
-          }
-        }
-        state.queued = Array(state.queued.suffix(AgentLogState.queueLimit))
+      if claudeMark(line) == nil, wrapperMark(line["content"] as? String ?? "") == nil,
+        let body = line["content"] as? String, let time = epoch(line["timestamp"]) {
+        AgentLogLegacyRefusal.observeQueue(line, body: body, at: time, state: &state, fingerprint: fingerprint)
       }
       return .ignored
     }
     let body: String?
-    var id: String?
-    var aliases: [String] = []
+    var id: AgentLogInstructionIdentity?
+    var aliases: [AgentLogInstructionIdentity] = []
+    var legacyRefusal = AgentLogLegacyRefusal()
     let stamp: Any?
     if tool == .claude, type == "user" {
       guard let message = line["message"] as? [String: Any] else { return .malformed }
       body = content(message["content"])
-      id = (line["uuid"] as? String).map { "claude:" + $0 }
+      id = (line["uuid"] as? String).map(AgentLogIdentity.claude)
+      if let raw = line["uuid"] as? String { legacyRefusal.claude(raw) }
       stamp = line["timestamp"]
     } else if tool == .claude, queuedAttachment {
       body = attachment["prompt"] as? String
-      id = (attachment["source_uuid"] as? String ?? line["uuid"] as? String).map { "claude:" + $0 }
-      stamp = attachment["timestamp"] ?? line["timestamp"]
+      id = (attachment["source_uuid"] as? String ?? line["uuid"] as? String).map(AgentLogIdentity.claude)
+      if let raw = attachment["source_uuid"] as? String ?? line["uuid"] as? String { legacyRefusal.claude(raw) }
+      stamp = line["timestamp"] ?? attachment["timestamp"]
     } else if tool == .codex, userItem, let item = payload["item"] as? [String: Any] {
       body = content(item["content"])
       stamp = line["timestamp"]
       let source = URL(fileURLWithPath: file).deletingPathExtension().lastPathComponent
-      let thread = payload["thread_id"] as? String ?? state.session ?? source
+      let thread = (payload["thread_id"] as? String).map { AgentLogIdentity.decoded($0).component } ?? state.session?.nativeComponent
+        ?? AgentLogIdentity.decoded(source).component
       let turn = payload["turn_id"] as? String ?? epoch(stamp).map(String.init) ?? ""
-      id = (item["id"] as? String).map { "codex:" + thread + ":" + turn + ":" + $0 }
+      id = (item["id"] as? String).map { AgentLogIdentity.codex(thread: thread, turn: turn, item: $0) }
+      if let raw = item["id"] as? String {
+        legacyRefusal.codex(thread: thread, explicitThread: payload["thread_id"] as? String,
+          state: state, fallbackSource: source, turn: turn, item: raw)
+      }
     } else {
       return .ignored
     }
     guard let body else { return .malformed }
     guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .excluded(.empty) }
-    guard var time = epoch(stamp) else { return .malformed }
-    let hash = fingerprint(body)
-    if tool == .claude, queuedAttachment {
-      let rawID = attachment["source_uuid"] as? String
-      let pending = state.queued.lastIndex { !$0.delivered && rawID != nil && $0.id == rawID }
-        ?? state.queued.lastIndex { !$0.delivered && $0.hash == hash && $0.ts <= time }
-      if let pending {
-        time = state.queued[pending].ts
-        state.queued.remove(at: pending)
-      }
-      id = id ?? "claude:legacy:\(time):\(hash)"
-      state.queued.append(.init(hash: hash, id: id, ts: time, delivered: true))
-      state.queued = Array(state.queued.suffix(AgentLogState.queueLimit))
-    } else if tool == .claude, line["promptSource"] as? String == "queued" {
-      // A new enqueue wins over an unmatched earlier delivery with the same words.
-      // A missing enqueue or backward clock can pair identical words with an older unconsumed delivery.
-      let index = state.queued.lastIndex { $0.hash == hash && !$0.delivered && $0.ts <= time }
-        ?? state.queued.firstIndex { $0.hash == hash && $0.delivered }
-      if let index {
-        let pair = state.queued.remove(at: index)
-        if let id { aliases = [id] }
-        time = pair.ts
-        id = pair.delivered ? pair.id : pair.id.map { "claude:" + $0 } ?? id
-      }
+    guard let time = epoch(stamp) else { return .malformed }
+    let hash = AgentLogIdentityCodec.legacy(fingerprint(body))
+    if tool == .claude {
+      legacyRefusal.pairQueue(line, attachment: attachment, queuedAttachment: queuedAttachment,
+        hash: hash, at: time, state: &state)
+    }
+    // Only explicit source/command ids establish lineage. Content equality never establishes identity.
+    if tool == .claude, let command = line["commandUuid"] as? String ?? line["source_uuid"] as? String {
+      let canonical = AgentLogIdentity.claude(command)
+      legacyRefusal.claude(command)
+      if let id, id != canonical { aliases = [id] }
+      id = canonical
     }
     let source = URL(fileURLWithPath: file).deletingPathExtension().lastPathComponent
-    id = id ?? "\(tool.rawValue):legacy:\(time):\(hash)"
+    if id == nil {
+      id = legacyRefusal.fallbackIdentity(tool: tool, at: time, hash: hash)
+    }
     // The full masked cwd distinguishes projects sharing the same final folder name.
-    return .prompt(EvidenceText(
-      ts: time, kind: .prompt, source: source, sourceID: id, sourceAliases: aliases.filter { $0 != id },
-      project: state.project, text: body))
+    var evidence = EvidenceText(
+      ts: time, kind: .prompt, source: source, sourceID: id?.storedKey, sourceAliases: aliases.filter { $0 != id }.map(\.storedKey),
+      project: state.project, text: body)
+    evidence.legacyRefusal = legacyRefusal
+    return .prompt(evidence)
   }
   private static func nonempty(_ value: Any?) -> Bool { !(value as? String ?? "").isEmpty }
   private static func claudeExclusion(
@@ -288,7 +306,7 @@ public enum AgentLogParser {
     let belowLogs = logsRelativePath?.split(separator: "/").map(String.init)
       ?? logs.map { Array(parts.suffix(from: $0 + 1)) } ?? []
     if belowLogs.contains("subagents") { return .subagent }
-    if state.ownWorkingFolder ?? AgentWindowIdentity.containsWorkingFolder(state.project) { return .ownWindow }
+    if state.ownWorkingFolder == true { return .ownWindow }
     if let mark = claudeMark(line) { return mark }
     if queuedAttachment {
       if let mark = claudeMark(attachment) { return mark }
@@ -300,6 +318,7 @@ public enum AgentLogParser {
     }
     if line["toolUseResult"] != nil { return .toolUseResult }
     let message = line["message"] as? [String: Any] ?? [:]
+    if let blocks = message["content"] as? AgentLogRecord.Content, blocks.valid, blocks.toolResult { return .toolResult }
     if let blocks = message["content"] as? [[String: Any]],
       blocks.contains(where: { $0["type"] as? String == "tool_result" }) { return .toolResult }
     return wrapperMark(content(message["content"]) ?? "")
@@ -328,7 +347,7 @@ public enum AgentLogParser {
       kind != "human" else { return nil }
     return namedMark(kind) ?? .nonHumanOrigin
   }
-  private static func namedMark(_ value: String) -> AgentLogIgnore? {
+  static func namedMark(_ value: String) -> AgentLogIgnore? {
     switch value {
     case "subagent": return .subagent
     case "task-notification": return .taskNotification
@@ -338,8 +357,6 @@ public enum AgentLogParser {
     }
   }
   private static func codexMark(_ fields: [String: Any]) -> AgentLogIgnore? {
-    if let originator = fields["originator"] as? String,
-      [AgentWindowIdentity.codexOriginator, AgentWindowIdentity.codexPlanOriginator].contains(originator) { return .ownWindow }
     for key in ["source", "thread_source"] {
       if let name = fields[key] as? String, let mark = namedMark(name) { return mark }
       if let source = fields[key] as? [String: Any], source["subagent"] != nil { return .subagent }
@@ -347,15 +364,9 @@ public enum AgentLogParser {
     if nonempty(fields["parent_thread_id"]) { return .subagent }
     return originMark(fields)
   }
-  private static func setProject(_ value: Any?, state: inout AgentLogState) {
-    if state.project.isEmpty, let path = value as? String, !path.isEmpty {
-      // Classify the first folder before content masking can remove a path component.
-      state.ownWorkingFolder = AgentWindowIdentity.containsWorkingFolder(path)
-      state.project = Redaction.apply(path).text
-    }
-  }
   private static func content(_ value: Any?) -> String? {
     if let string = value as? String { return string }
+    if let content = value as? AgentLogRecord.Content { return content.body }
     guard let blocks = value as? [[String: Any]] else { return nil }
     let words = blocks.filter { ["text", "Text"].contains($0["type"] as? String ?? "") }
       .compactMap { $0["text"] as? String }
@@ -374,6 +385,13 @@ public enum AgentLogParser {
   }
 }
 
+/// Current reader guards and transaction-time historical permission use the same rule.
+public enum AgentLogRecordingPermission {
+  public static func allows(enabled: Bool, pausedUntil: Int?, at time: Int) -> Bool {
+    enabled && (pausedUntil ?? Int.min) <= time
+  }
+}
+
 public struct LogRecordingState: Equatable {
   public let since: Int
   public let enabled: Bool
@@ -383,10 +401,17 @@ public struct LogRecordingState: Equatable {
     self.enabled = enabled
     self.pausedUntil = pausedUntil
   }
-  public func allows(_ time: Int) -> Bool { enabled && (pausedUntil ?? Int.min) <= time }
+  public func allows(_ time: Int) -> Bool {
+    AgentLogRecordingPermission.allows(enabled: enabled, pausedUntil: pausedUntil, at: time)
+  }
 }
 
 public protocol LogPrivacyHistory {
   func logRecordingHistory() throws -> [LogRecordingState]
 }
-public protocol AgentLogStorage: SettingsStore, LogPositionStore, LogBatchWriter, LogPrivacyHistory {}
+public protocol AgentLogStorage: SettingsStore, LogPositionStore, LogBatchWriter, LogPrivacyHistory {
+  func prepareAgentLogCollection() throws
+}
+extension AgentLogStorage {
+  public func prepareAgentLogCollection() throws {}
+}

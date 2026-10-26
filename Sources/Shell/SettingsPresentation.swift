@@ -166,7 +166,7 @@ public struct SettingsStrings {
 }
 
 /// What the Codex row shows and offers. Pure, so every state is checked without drawing.
-/// Summaries and agent-log reading run only with consent and a ChatGPT sign-in with plan use.
+/// Summaries run with consent and a ChatGPT sign-in with plan use. Local recording is independent.
 public struct ChatGPTRow: Equatable {
   /// The ChatGPT status. With consent on but no usable sign-in, a note says summaries are paused.
   public let headline: SettingsLabel

@@ -147,7 +147,7 @@ extension ActivityStorage {
       [.integer(time)]
     ) {
       let pause = try $0.optionalText("paused_until").flatMap(Int.init)
-      allowed = try $0.int("enabled") != 0 && (pause ?? Int.min) <= time
+      allowed = try AgentLogRecordingPermission.allows(enabled: $0.int("enabled") != 0, pausedUntil: pause, at: time)
     }
     return allowed
   }

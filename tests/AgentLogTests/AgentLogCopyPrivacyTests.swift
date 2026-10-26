@@ -15,12 +15,12 @@ extension AgentLogTests {
   func testDeletedQueuedInstructionCannotReturnFromContinuedAttachmentOrCopy() throws {
     let parent = try file(.claude, name: "invented-parent.jsonl")
     let attachment = try continuedAttachment()
-    let copy = try queuedCopy("invented-copy", at: 96)
+    let copy = try queuedCopy("invented-copy", at: 96, commandID: "invented-command")
     try write([enqueue("invented-command", at: 90), attachment, copy], to: parent)
     let task = AgentLogTask(reader: reader(.claude), storage: store)
     try task.scan(at: 200)
-    XCTAssertEqual(try store.evidence(in: all).map(\.ts), [90])
-    let preview = try store.previewDeletion(in: TimeRange(85, 92))
+    XCTAssertEqual(try store.evidence(in: all).map(\.ts), [95])
+    let preview = try store.previewDeletion(in: TimeRange(85, 97))
     _ = try store.deleteRecords(in: preview.range, confirmation: preview.confirmation)
     let child = try file(.claude, name: "invented-child.jsonl")
     try write([attachment, copy], to: child)
@@ -36,7 +36,7 @@ extension AgentLogTests {
     try store.saveFixtureSettings(StorageSettings(pausedUntil: 93, subscriptionConnected: true), at: 85)
     let parent = try file(.claude, name: "invented-parent.jsonl")
     let attachment = try continuedAttachment()
-    let copy = try queuedCopy("invented-copy", at: 96)
+    let copy = try queuedCopy("invented-copy", at: 96, commandID: "invented-command")
     try write([enqueue("invented-command", at: 90), attachment, copy], to: parent)
     let task = AgentLogTask(reader: reader(.claude), storage: store)
     try task.scan(at: 200)
@@ -79,15 +79,15 @@ extension AgentLogTests {
   func testCopyReadBeforeItsPairingParentKeepsOneInstruction() throws {
     let child = try file(.claude, name: "aa-invented-child.jsonl")
     let parent = try file(.claude, name: "zz-invented-parent.jsonl")
-    let copy = try queuedCopy("invented-copy", at: 96)
+    let copy = try queuedCopy("invented-copy", at: 96, commandID: "invented-command")
     try write([copy], to: child)
     try write([enqueue("invented-command", at: 90), copy], to: parent)
     try AgentLogTask(reader: reader(.claude), storage: store).scan(at: 200)
-    XCTAssertEqual(try store.evidence(in: all).map(\.sourceID), ["claude:invented-copy"])
+    XCTAssertEqual(try store.evidence(in: all).map(\.sourceID), ["claude:invented-command"])
   }
   func testEnqueueAndCopyOnlyKeepOneInstructionAcrossSourcesAndReopen() throws {
     let parent = try file(.claude, name: "invented-parent.jsonl")
-    let copy = try queuedCopy("invented-copy", at: 96)
+    let copy = try queuedCopy("invented-copy", at: 96, commandID: "invented-command")
     try write([enqueue("invented-command", at: 90), copy], to: parent)
     let task = AgentLogTask(reader: reader(.claude), storage: store)
     try task.scan(at: 200)
@@ -98,12 +98,12 @@ extension AgentLogTests {
     try AgentLogTask(reader: reader(.claude), storage: reopened).scan(at: 201)
     XCTAssertEqual(try reopened.evidence(in: all).count, 1)
     XCTAssertEqual(try reopened.connection.integer(
-      "SELECT count(*) FROM forgotten_sources WHERE source_id='claude:invented-copy'"), 1)
+      "SELECT count(*) FROM forgotten_sources WHERE source_id='claude:invented-copy'"), 0)
   }
   func testDeletedCopyKeepsItsLaterParentRefused() throws {
     let child = try file(.claude, name: "aa-invented-child.jsonl")
     let parent = try file(.claude, name: "zz-invented-parent.jsonl")
-    let copy = try queuedCopy("invented-copy", at: 96)
+    let copy = try queuedCopy("invented-copy", at: 96, commandID: "invented-command")
     try write([copy], to: child)
     let task = AgentLogTask(reader: reader(.claude), storage: store)
     try task.scan(at: 200)
@@ -116,7 +116,7 @@ extension AgentLogTests {
   }
   func testRefusedThroughDeletedCopyRemembersTheInstructionForItsAttachment() throws {
     let child = try file(.claude, name: "aa-invented-child.jsonl")
-    let copy = try queuedCopy("invented-copy", at: 96)
+    let copy = try queuedCopy("invented-copy", at: 96, commandID: "invented-command")
     try write([copy], to: child)
     let task = AgentLogTask(reader: reader(.claude), storage: store)
     try task.scan(at: 200)
@@ -149,7 +149,7 @@ extension AgentLogTests {
       }
       let parent = try file(.claude, name: "aa-invented-parent.jsonl")
       let child = try file(.claude, name: "zz-invented-child.jsonl")
-      let copy = try queuedCopy("invented-copy", at: 96)
+      let copy = try queuedCopy("invented-copy", at: 96, commandID: "invented-command")
       try write([enqueue("invented-command", at: 90), copy], to: parent)
       try write([copy], to: child)
       try AgentLogTask(reader: reader(.claude), storage: store).scan(at: 86493)
@@ -159,7 +159,7 @@ extension AgentLogTests {
   func testContinuedSessionReadFirstUsesDeliveryTime() throws {
     let child = try file(.claude, name: "aa-invented-child.jsonl")
     let parent = try file(.claude, name: "zz-invented-parent.jsonl")
-    let lines = try [continuedAttachment(), queuedCopy("invented-copy", at: 96)]
+    let lines = try [continuedAttachment(), queuedCopy("invented-copy", at: 96, commandID: "invented-command")]
     try write(lines, to: child)
     try write([enqueue("invented-command", at: 90)] + lines, to: parent)
     try AgentLogTask(reader: reader(.claude), storage: store).scan(at: 200)
@@ -179,7 +179,7 @@ extension AgentLogTests {
   func testAliasAndPrivacyRefusalRollBackWithPosition() throws {
     var state = AgentLogState()
     _ = parsed(try enqueue("invented-command", at: 90), state: &state)
-    let row = try parsedPrompt(queuedCopy("invented-copy", at: 96), state: &state)
+    let row = try parsedPrompt(queuedCopy("invented-copy", at: 96, commandID: "invented-command"), state: &state)
     try store.saveFixtureSettings(StorageSettings(pausedUntil: 93, subscriptionConnected: true), at: 85)
     XCTAssertThrowsError(try store.appendLogBatch([row], position: LogPosition(
       path: "invented", device: 1, inode: 1, offset: -1, state: "{}", seenAt: 200)))
@@ -198,7 +198,7 @@ extension AgentLogTests {
       try store.connection.run("DROP INDEX IF EXISTS forgotten_source_id")
       try store.connection.run("PRAGMA user_version=\(version)")
       let adopted = try ActivityStorage(url: root.appendingPathComponent("invented.sqlite"), appDataDirectory: root, databaseScope: .directory(root))
-      XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), 14)
+      XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), SQLiteConnection.schemaVersion)
       XCTAssertEqual(try adopted.evidence(in: all).count, 1)
       XCTAssertEqual(try adopted.logRecordingHistory(), history)
       XCTAssertEqual(try adopted.settings(), settings)
@@ -233,9 +233,9 @@ extension AgentLogTests {
     _ = try parsedPrompt(queued("invented-delivered", at: 90), state: &state)
     _ = parsed(try claudeRow(["isMeta": true,
       "message": ["content": "Invented repeated queue words"]], at: 95), state: &state)
-    XCTAssertEqual(state.queued.filter(\.delivered).count, 1)
-    XCTAssertEqual(try parsedPrompt(queuedCopy("invented-copy", at: 96), state: &state).sourceID,
-      "claude:invented-delivered")
+    XCTAssertEqual(state.queued.filter(\.delivered).count, 0)
+    XCTAssertEqual(try parsedPrompt(queuedCopy("invented-copy", at: 96, commandID: "invented-command"), state: &state).sourceID,
+      "claude:invented-command")
   }
   func testMarkedOrWrappedEnqueueNeverEntersPendingState() throws {
     for fields: [String: Any] in [["isMeta": true], ["content": "<task-notification>Invented"]] {

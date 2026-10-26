@@ -7,6 +7,18 @@ struct CollectionOperationalHealth: Codable {
   var staging = 0
   var persistence = 0
   var initialization = 0
+  var busyRetries = 0
+
+  init() {}
+  private enum CodingKeys: String, CodingKey { case acquisition, staging, persistence, initialization, busyRetries }
+  init(from decoder: Decoder) throws {
+    let fields = try decoder.container(keyedBy: CodingKeys.self)
+    acquisition = try fields.decodeIfPresent(Int.self, forKey: .acquisition) ?? 0
+    staging = try fields.decodeIfPresent(Int.self, forKey: .staging) ?? 0
+    persistence = try fields.decodeIfPresent(Int.self, forKey: .persistence) ?? 0
+    initialization = try fields.decodeIfPresent(Int.self, forKey: .initialization) ?? 0
+    busyRetries = try fields.decodeIfPresent(Int.self, forKey: .busyRetries) ?? 0
+  }
 
   static func read(database: URL) throws -> CollectionOperationalHealth {
     let directory = try OperationalDirectory(database.deletingLastPathComponent())
@@ -21,6 +33,7 @@ struct CollectionOperationalHealth: Codable {
       case 0: value.acquisition += 1
       case 1: value.staging += 1
       case 2: value.persistence += 1
+      case 4: value.busyRetries += 1
       default: value.initialization += 1
       }
       let leaf = database.lastPathComponent + ".collection-health", temporary = leaf + ".tmp-" + UUID().uuidString

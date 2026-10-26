@@ -7,12 +7,22 @@ public enum AgentLogErrorKind: String { case busy, storage, files, state, proces
 public struct AgentLogHealth {
   public var lastSuccessTime: Int?
   public var lastErrorKind: AgentLogErrorKind?
+  /// Human-prompt projection counts; acquired totals are parser output, not stored growth.
   public var stored = 0
   public var refused = 0
+  public var persistedEvents = 0
+  public var persistedPayloads = 0
+  public var persistedSourceBytes = 0
+  public var persistedPayloadBytes = 0
+  public var persistedRefusalOccurrences = 0
   public var malformedLines = 0
   public var failures = 0
   public var fileFailures = 0
   public var folderFailures = 0
+  public var discoveryFailures = 0
+  public var ownershipDeferredBatches = 0
+  public var acquiredEvents = 0
+  public var acquiredBytes = 0
   public var ignored: [AgentLogIgnore: Int] = [:]
 }
 
@@ -22,9 +32,6 @@ public final class AgentLogTask {
   let storage: AgentLogStorage
   private let lock = NSLock()
   private var status = AgentLogHealth()
-  /// Besides consent, log reading waits for a ChatGPT sign-in with plan use, because the evidence is
-  /// read only to be summarized. Set once by the composition, before maintenance starts.
-  var planUseSignedIn: () -> Bool = { true }
   public init(reader: AgentLogReader, storage: AgentLogStorage) {
     self.reader = reader
     self.storage = storage
@@ -41,7 +48,8 @@ public final class AgentLogTask {
   public func scan(at time: Int) throws {
     let listing: AgentLogListing
     do {
-      guard try storage.settings().subscriptionConnected, planUseSignedIn() else { return }
+      guard try recordingAllowed(at: time) else { return }
+      try storage.prepareAgentLogCollection()
       listing = try reader.listing()
     } catch {
       recordFailure(error)
@@ -55,15 +63,30 @@ public final class AgentLogTask {
       for _ in 0..<listing.folderFailures { recordFailure(AgentLogReadError.fileUnavailable) }
       failure = AgentLogReadError.fileUnavailable
     }
+    if listing.discoveryFailures > 0 {
+      lock.lock()
+      status.discoveryFailures += listing.discoveryFailures
+      lock.unlock()
+      for _ in 0..<listing.discoveryFailures { recordFailure(AgentLogReadError.processUnavailable) }
+      failure = AgentLogReadError.processUnavailable
+    }
     for file in listing.files {
       do {
         var position = try storage.logPosition(path: file.path)
         while true {
-          guard try storage.settings().subscriptionConnected else { return }
+          guard try recordingAllowed(at: time) else { return }
           let batch = try reader.read(file, position: position, at: time)
-          guard try storage.settings().subscriptionConnected else { return }
-          let result = try storage.appendLogBatch(batch.evidence, position: batch.position)
+          guard try recordingAllowed(at: time) else { return }
+          let result = try storage.appendLogEvents(batch.events, evidence: batch.evidence, position: batch.position)
           lock.lock()
+          if batch.ownershipDeferred { status.ownershipDeferredBatches += 1 }
+          status.acquiredEvents += batch.events.count
+          status.acquiredBytes += batch.events.reduce(0) { $0 + $1.byteCount }
+          status.persistedEvents += result.logGrowth.events
+          status.persistedPayloads += result.logGrowth.payloads
+          status.persistedSourceBytes += result.logGrowth.sourceBytes
+          status.persistedPayloadBytes += result.logGrowth.payloadBytes
+          status.persistedRefusalOccurrences += result.logGrowth.refusalOccurrences
           status.stored += result.stored
           status.refused += result.refused
           status.malformedLines += batch.malformedLines
@@ -87,6 +110,10 @@ public final class AgentLogTask {
     status.lastSuccessTime = time
     status.lastErrorKind = nil
     lock.unlock()
+  }
+  private func recordingAllowed(at time: Int) throws -> Bool {
+    let settings = try storage.settings()
+    return AgentLogRecordingPermission.allows(enabled: settings.recordingEnabled, pausedUntil: settings.pausedUntil, at: time)
   }
   private func recordFailure(_ error: Error) {
     lock.lock()

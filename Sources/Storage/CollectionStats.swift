@@ -30,7 +30,7 @@ extension ActivityStorage {
       var output: [String] = [], total = 0, recent = 0
       do {
         let health = try CollectionOperationalHealth.read(database: url)
-        output.append("collection_acquisition_failures=\(health.acquisition) collection_staging_failures=\(health.staging) collection_persistence_failures=\(health.persistence) collection_initialization_failures=\(health.initialization)")
+        output.append("collection_busy_retries=\(health.busyRetries) collection_acquisition_failures=\(health.acquisition) collection_staging_failures=\(health.staging) collection_persistence_failures=\(health.persistence) collection_initialization_failures=\(health.initialization)")
       } catch { output.append("collection_health_unreadable=1") }
       var refusals = try CollectionPolicyHealth.read(storage: self)
       if try connection.integer("SELECT count(*) FROM sqlite_master WHERE name='collection_policy_refusals'") == 1 {

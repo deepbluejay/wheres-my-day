@@ -60,6 +60,7 @@ public struct ConversationConfiguration {
   }
   /// The CLI to start and its environment, looked up on the agent's background thread.
   func launch() throws -> (executable: URL, environment: [String: String]) {
+    try OwnLogSources.registry(appDataDirectory: appDataDirectory).registerHome(codexHome, tool: .codex)
     guard let install = command.resolve() else { throw ConversationError.notInstalled }
     var values = environment
     values["GIT_CEILING_DIRECTORIES"] = gitCeiling

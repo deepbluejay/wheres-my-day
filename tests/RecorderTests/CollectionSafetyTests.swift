@@ -189,7 +189,7 @@ final class CollectionSafetyTests: XCTestCase {
     _ = try capture(102)
     XCTAssertEqual(try store.novelEvidence(in: all).map(\.ts), [100])
   }
-  func testVersionTenMigrationStoresDerivedSelectionWithoutRewritingEvidence() throws {
+  func testUndeployedVersionTenIsRefusedWithoutChangingHistoricalContent() throws {
     for time in [100, 200, 3700, 3800] {
       try store.connection.transaction { try store.insertEvidence(EvidenceText(ts: time, kind: .screen, source: "invented", text: "Invented stable line")) }
       let id = try store.connection.integer("SELECT max(id) FROM evidence")
@@ -197,9 +197,9 @@ final class CollectionSafetyTests: XCTestCase {
     }
     let before = try store.evidence(in: all)
     try store.connection.run("PRAGMA user_version=10")
-    let upgraded = try ActivityStorage(url: folder.appendingPathComponent("invented.sqlite"), appDataDirectory: folder, databaseScope: .directory(folder))
-    XCTAssertEqual(try upgraded.evidence(in: all), before)
-    XCTAssertEqual(try upgraded.novelEvidence(in: all).map(\.ts), [100, 3700])
+    XCTAssertThrowsError(try ActivityStorage(url: folder.appendingPathComponent("invented.sqlite"), appDataDirectory: folder, databaseScope: .directory(folder)))
+    XCTAssertEqual(try store.connection.integer("PRAGMA user_version"), 10)
+    XCTAssertEqual(try store.evidence(in: all), before)
   }
   func testInventedEightHourGrowthMeasurement() throws {
     guard ProcessInfo.processInfo.environment["AP_MEASURE_COLLECTION_GROWTH"] == "1" else { return }

@@ -966,7 +966,7 @@ enum RandomValueMask {
     return qualifies(chars, 0..<chars.count)
   }
 
-  private static func entropy(_ chars: [Unicode.Scalar], _ range: Range<Int>) -> Double {
+  private static func entropy<C: RandomAccessCollection>(_ chars: C, _ range: Range<Int>) -> Double where C.Element == Unicode.Scalar, C.Index == Int {
     var counts: [UInt32: Int] = [:]
     for i in range { counts[chars[i].value, default: 0] += 1 }
     let n = Double(range.count)
@@ -976,7 +976,7 @@ enum RandomValueMask {
     }
   }
 
-  private static func qualifies(_ chars: [Unicode.Scalar], _ range: Range<Int>) -> Bool {
+  private static func qualifies<C: RandomAccessCollection>(_ chars: C, _ range: Range<Int>) -> Bool where C.Element == Unicode.Scalar, C.Index == Int {
     guard range.count >= 16 else { return false }
     var counts = [Int](repeating: 0, count: 95)
     var classes = 0
@@ -1001,9 +1001,64 @@ enum RandomValueMask {
     return h >= 4
   }
 
+  private struct Scalars: RandomAccessCollection {
+    private final class Cursor {
+      var index = -1
+      var nextByte = 0
+      var scalar = Unicode.Scalar(UInt8(0))
+    }
+    let bytes: UnsafeBufferPointer<UInt8>
+    let isASCII: Bool
+    // One byte offset per 64 scalars, rather than one scalar/offset per character.
+    let blocks: [Int]
+    let count: Int
+    private let cursor = Cursor()
+    var startIndex: Int { 0 }
+    var endIndex: Int { count }
+    static func width(_ byte: UInt8) -> Int {
+      byte < 128 ? 1 : byte < 224 ? 2 : byte < 240 ? 3 : 4
+    }
+    init(_ bytes: UnsafeBufferPointer<UInt8>) {
+      self.bytes = bytes
+      isASCII = bytes.allSatisfy { $0 < 128 }
+      if isASCII { blocks = []; count = bytes.count; return }
+      var offsets: [Int] = []
+      var scalar = 0, byte = 0
+      while byte < bytes.count {
+        if scalar & 63 == 0 { offsets.append(byte) }
+        scalar += 1; byte += Self.width(bytes[byte])
+      }
+      blocks = offsets; count = scalar
+    }
+    subscript(index: Int) -> Unicode.Scalar {
+      if isASCII { return Unicode.Scalar(bytes[index]) }
+      if cursor.index == index { return cursor.scalar }
+      var scalar: Int, byte: Int
+      if index > cursor.index, index - cursor.index <= 64 {
+        scalar = cursor.index + 1; byte = cursor.nextByte
+      } else {
+        scalar = index & ~63; byte = blocks[index >> 6]
+      }
+      while scalar < index { byte += Self.width(bytes[byte]); scalar += 1 }
+      let width = Self.width(bytes[byte])
+      var value = UInt32(bytes[byte] & (width == 1 ? 127 : width == 2 ? 31 : width == 3 ? 15 : 7))
+      if width > 1 {
+        for next in 1..<width { value = (value << 6) | UInt32(bytes[byte + next] & 63) }
+      }
+      let decoded = Unicode.Scalar(value)!
+      // Forward scans are constant work; arbitrary lookups decode at most 64 scalars.
+      cursor.index = index; cursor.nextByte = byte + width; cursor.scalar = decoded
+      return decoded
+    }
+  }
   static func ranges(_ text: String, componentsOnly: Bool = false) -> [NSRange] {
     guard text.utf8.count >= 16 else { return [] }
-    let chars = Array(text.unicodeScalars)
+    var text = text
+    return text.withUTF8 { bytes in
+      ranges(Scalars(bytes), componentsOnly: componentsOnly)
+    }
+  }
+  private static func ranges(_ chars: Scalars, componentsOnly: Bool) -> [NSRange] {
     var spans: [Range<Int>] = []
     func string(_ range: Range<Int>) -> String { String(String.UnicodeScalarView(chars[range])) }
     func isWord(_ c: Unicode.Scalar) -> Bool {
@@ -1190,9 +1245,16 @@ enum RandomValueMask {
       } else { merged.append(span) }
     }
     guard !merged.isEmpty else { return [] }
-    var offsets = [Int](); offsets.reserveCapacity(chars.count + 1)
-    offsets.append(0)
-    for c in chars { offsets.append(offsets.last! + (c.value > 0xffff ? 2 : 1)) }
-    return merged.map { NSRange(location: offsets[$0.lowerBound], length: offsets[$0.upperBound] - offsets[$0.lowerBound]) }
+    if chars.isASCII { return merged.map { NSRange(location: $0.lowerBound, length: $0.count) } }
+    // Only endpoints of selected spans need UTF-16 offsets.
+    var result: [NSRange] = []
+    var scalar = 0, offset = 0
+    for span in merged {
+      while scalar < span.lowerBound { offset += chars[scalar].value > 0xffff ? 2 : 1; scalar += 1 }
+      let start = offset
+      while scalar < span.upperBound { offset += chars[scalar].value > 0xffff ? 2 : 1; scalar += 1 }
+      result.append(NSRange(location: start, length: offset - start))
+    }
+    return result
   }
 }

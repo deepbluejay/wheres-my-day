@@ -28,6 +28,7 @@ extension AgentLogTests {
     try task.scan(at: 200)
     XCTAssertEqual(try store.evidence(in: all).count, 1)
     XCTAssertEqual(task.health.refused, 1)
+    XCTAssertEqual(try eventCount(), 2)
     let rows = ["invented-a", "invented-b"].map {
       EvidenceText(ts: 101, kind: .prompt, source: $0, sourceID: "claude:legacy:101:invented", text: "Invented text")
     }
@@ -54,8 +55,10 @@ extension AgentLogTests {
     try task.scan(at: 200)
     XCTAssertEqual(task.health.stored, 1)
     XCTAssertEqual(task.health.ignored, [.imported: 1])
+    XCTAssertEqual(try eventCount(), 3)
+    XCTAssertEqual(try eventCount("flags LIKE '%imported%'"), 1)
   }
-  func testOwnWindowSessionsUseSharedIdentitiesAndFirstFolderOnly() throws {
+  func testOwnWindowSessionsUseSharedIdentitiesAndLateFolderProof() throws {
     for tool in AgentLogTool.allCases {
       let url = try file(tool)
       let own = "/invented/home/" + AgentWindowIdentity.relativeFolder
@@ -66,11 +69,14 @@ extension AgentLogTests {
       let task = AgentLogTask(reader: reader(tool), storage: store)
       try task.scan(at: 200)
       XCTAssertEqual(task.health.stored, 0)
-      XCTAssertEqual(task.health.ignored, [.ownWindow: 1])
+      XCTAssertEqual(task.health.ignored, [.ownWindow: 2])
     }
     var state = AgentLogState()
     _ = parsed(try json(["type": "assistant", "cwd": "/invented/project"]), state: &state)
-    _ = try parsedPrompt(claudeRow(["cwd": "/invented/home/" + AgentWindowIdentity.relativeFolder]), state: &state)
+    guard case .excluded(.ownWindow) = parsed(
+      try claudeRow(["cwd": "/invented/home/" + AgentWindowIdentity.relativeFolder]), state: &state) else {
+      return XCTFail("Later positive folder proof must match all-role parsing and recovery")
+    }
     XCTAssertFalse(AgentWindowIdentity.containsWorkingFolder(
       "/invented/home/" + AgentWindowIdentity.relativeFolder + "-similar"))
     XCTAssertTrue(AgentWindowIdentity.containsWorkingFolder("/invented/home/" + AgentWindowIdentity.relativeFolder))
@@ -88,7 +94,7 @@ extension AgentLogTests {
     let task = AgentLogTask(reader: reader(.codex), storage: store)
     try task.scan(at: 200)
     XCTAssertEqual(task.health.stored, 0)
-    XCTAssertEqual(task.health.ignored, [.ownWindow: 1])
+    XCTAssertEqual(task.health.ignored, [.ownWindow: 2])
   }
   func testFixedWrappersCountByKindAndTypedCommandsSurvive() throws {
     let wrappers: [(String, AgentLogIgnore)] = [
@@ -143,7 +149,7 @@ extension AgentLogTests {
     XCTAssertEqual(task.health.ignored, [.subagent: 1])
     XCTAssertEqual(task.health.stored, 0)
   }
-  func testQueuedPrivacyUsesEnqueueTimeOnly() throws {
+  func testQueuedPrivacyUsesEachActualOccurrence() throws {
     let url = try file(.claude)
     try store.saveFixtureSettings(StorageSettings(pausedUntil: 100, subscriptionConnected: true), at: 94)
     let preview = try store.previewDeletion(in: TimeRange(94, 97))
@@ -152,8 +158,8 @@ extension AgentLogTests {
       queuedCopy("invented-copy", at: 96)], to: url)
     let task = AgentLogTask(reader: reader(.claude), storage: store)
     try task.scan(at: 200)
-    XCTAssertEqual(task.health.stored, 1)
-    XCTAssertEqual(try store.evidence(in: all).first?.ts, 90)
+    XCTAssertEqual(task.health.stored, 0)
+    XCTAssertEqual(try store.evidence(in: all), [])
   }
   func testExcludedUserClearsOnlyEarlierPendingMatchingHashes() throws {
     var state = AgentLogState()
@@ -166,10 +172,10 @@ extension AgentLogTests {
     _ = parsed(try enqueue("invented-future", at: 200), state: &state)
     _ = parsed(try claudeRow(["isMeta": true, "message": ["content": "Invented repeated queue words"]], at: 199),
       state: &state)
-    XCTAssertEqual(state.queued.map(\.ts), [200])
+    XCTAssertEqual(state.queued.map(\.ts), [])
     _ = parsed(try claudeRow(["isMeta": true, "message": ["content": "Invented different words"]], at: 201),
       state: &state)
-    XCTAssertEqual(state.queued.count, 1)
+    XCTAssertEqual(state.queued.count, 0)
     _ = parsed(try claudeRow(["isMeta": true, "message": ["content": "Invented repeated queue words"]], at: 200),
       state: &state)
     XCTAssertEqual(state.queued.count, 0)
@@ -214,7 +220,7 @@ extension AgentLogTests {
     var state = AgentLogState()
     _ = parsed(try enqueue("invented-old", at: 50), state: &state)
     _ = parsed(try enqueue("invented-new", at: 60), state: &state)
-    XCTAssertEqual(state.queued.map(\.id), ["invented-new"])
+    XCTAssertEqual(state.queued.map(\.id), [])
     _ = parsed(try json(["type": "queue-operation", "operation": "remove", "content": "Invented repeated queue words",
       "timestamp": stamp(70)]), state: &state)
     XCTAssertEqual(state.queued.count, 0)
@@ -232,30 +238,30 @@ extension AgentLogTests {
             "content": "Invented \(index)", "timestamp": stamp(100 + index)])
         _ = parsed(line, state: &state)
       }
-      XCTAssertEqual(state.queued.count, 32)
-      XCTAssertEqual(state.queued.first?.ts, 108)
-      XCTAssertEqual(try AgentLogState.decode(state.encoded()).queued.count, 32)
+      XCTAssertEqual(state.queued.count, 0)
+      XCTAssertNil(state.queued.first)
+      XCTAssertEqual(try AgentLogState.decode(state.encoded()).queued.count, 0)
     }
     let oversized = try json(["metadataRead": true, "project": "", "queued": (0..<40).map {
       ["hash": "invented-\($0)", "ts": $0, "delivered": false] as [String: Any]
     }])
     XCTAssertEqual(try AgentLogState.decode(oversized).queued.count, 32)
   }
-  func testQueuedCopyChoosesOldestUnconsumedDelivery() throws {
+  func testQueuedCopyNeverGuessesOldestDelivery() throws {
     var state = AgentLogState()
     _ = try parsedPrompt(queued("invented-first", at: 50), state: &state)
     _ = try parsedPrompt(queued("invented-second", at: 60), state: &state)
     let row = try parsedPrompt(queuedCopy("invented-copy", at: 70), state: &state)
-    XCTAssertEqual(row.sourceID, "claude:invented-first")
-    XCTAssertEqual(row.ts, 50)
+    XCTAssertEqual(row.sourceID, "claude:invented-copy")
+    XCTAssertEqual(row.ts, 70)
   }
   func testCodexPayloadThreadTakesPrecedenceOverHeader() throws {
     var state = AgentLogState()
-    state.session = "invented-header"
+    state.session = AgentLogIdentityCodec.session("invented-header")
     let row = try parsedPrompt(codexRow(["thread_id": "invented-payload"]), tool: .codex, state: &state)
     XCTAssertEqual(row.sourceID, "codex:invented-payload:invented-turn:invented-item")
   }
-  func testOldDeliveredQueueIDRetainsNativePrefixAndDeduplicatesCopy() throws {
+  func testOldDeliveredHashCannotEstablishCopyIdentity() throws {
     let url = try file(.claude)
     let copy = try queuedCopy("invented-copy", at: 95)
     try write([copy], to: url)
@@ -270,9 +276,9 @@ extension AgentLogTests {
       offset: 0, state: old, seenAt: 100))
     let task = AgentLogTask(reader: reader(.claude), storage: store)
     try task.scan(at: 200)
-    XCTAssertEqual(task.health.stored, 0)
-    XCTAssertEqual(task.health.refused, 1)
-    XCTAssertEqual(try store.evidence(in: all).count, 1)
+    XCTAssertEqual(task.health.stored, 1)
+    XCTAssertEqual(task.health.refused, 0)
+    XCTAssertEqual(try store.evidence(in: all).count, 2)
   }
   func testConvertedCodexCursorRecoversHeaderExclusionBeforeAppend() throws {
     let url = try file(.codex)

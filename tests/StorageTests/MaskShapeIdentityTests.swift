@@ -28,26 +28,34 @@ extension StorageTests {
     XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM forgotten_sources WHERE source='[secret]'"), 1)
   }
 
-  func testOldCheckpointDerivesOwnFolderBeforeMaskingAndKeepsIDs() throws {
+  func testOldCheckpointDefersOwnFolderClassificationAndKeepsIDs() throws {
     let project = "/invented/Library/Application Support/ActivityProbe/agent-window"
     let id = "01234567-89ab-cdef-0123-456789abcdef"
     let old = String(decoding: try JSONSerialization.data(withJSONObject: [
       "session": id, "project": project, "metadataRead": true,
       "queued": [["hash": "invented", "id": "claude:" + id, "ts": 90, "delivered": true]]
     ]), as: UTF8.self)
-    XCTAssertEqual(try AgentLogState.decode(old).ownWorkingFolder, true)
+    XCTAssertNil(try AgentLogState.decode(old).ownWorkingFolder)
     let store = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))
     let path = "/invented/rollout-2026-10-14T08-25-39-" + id + ".jsonl"
     try store.appendLogBatch([], position: LogPosition(path: path, device: 1, inode: 2, offset: 123, state: old, seenAt: 100))
     let position = try XCTUnwrap(try store.logPosition(path: path))
     XCTAssertEqual(position.path, Redaction.applyKnownSecrets(path).text)
     let restored = try AgentLogState.decode(position.state)
-    XCTAssertEqual(restored.session, id)
-    XCTAssertEqual(restored.ownWorkingFolder, true)
+    XCTAssertEqual(restored.session?.storedKey, id)
+    XCTAssertNil(restored.ownWorkingFolder)
+    XCTAssertEqual(restored.metadataVersion, 0)
     let text = "{\"type\":\"user\",\"timestamp\":\"1970-01-01T00:01:41Z\",\"uuid\":\"invented\",\"message\":{\"role\":\"user\",\"content\":\"invented instruction\"}}"
     var state = restored
-    guard case .excluded(.ownWindow) = AgentLogParser.parse(text, tool: .claude, file: path, state: &state, fingerprint: { $0 }) else {
-      return XCTFail("Old own-window checkpoint was accepted")
+    guard case .prompt = AgentLogParser.parse(text, tool: .claude, file: path, state: &state, fingerprint: { $0 }) else {
+      return XCTFail("A cached project display manufactured ownership")
+    }
+    let raw = String(decoding: try JSONSerialization.data(withJSONObject: [
+      "type": "user", "timestamp": "1970-01-01T00:01:41Z", "uuid": "invented",
+      "cwd": project, "message": ["role": "user", "content": "invented instruction"]
+    ]), as: UTF8.self)
+    guard case .excluded(.ownWindow) = AgentLogParser.parse(raw, tool: .claude, file: path, state: &state, fingerprint: { $0 }) else {
+      return XCTFail("Decoded raw cwd did not prove ownership")
     }
   }
 }

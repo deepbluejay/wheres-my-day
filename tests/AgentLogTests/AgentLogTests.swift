@@ -13,8 +13,10 @@ final class InventedProcesses: AgentLogProcessSource {
   var denied = Set<Int32>()
   var requested: [(String, Int32)] = []
   var listings = 0
+  var listingFails = false
   func processes() throws -> [AgentLogProcess] {
     listings += 1
+    if listingFails { throw AgentLogReadError.processUnavailable }
     return listed
   }
   func homeVariable(_ name: String, processID: Int32) throws -> String? {
@@ -177,12 +179,12 @@ final class AgentLogTests: XCTestCase {
   {
     if tool == .claude {
       return try json([
-        "type": "user", "timestamp": stamp(time), "uuid": id,
+        "type": "user", "timestamp": stamp(time), "uuid": id, "cwd": "/invented/project",
         "origin": ["kind": "human"], "message": ["role": "user", "content": text],
       ])
     }
     return try json([
-      "type": "event_msg", "timestamp": stamp(time),
+      "type": "event_msg", "timestamp": stamp(time), "cwd": "/invented/project",
       "payload": [
         "type": "item_completed",
         "turn_id": "invented-turn",
@@ -202,7 +204,7 @@ final class AgentLogTests: XCTestCase {
     try handle.seekToEnd()
     try handle.write(contentsOf: bytes)
   }
-  func testEachToolsRealFormatUsesOnlyItsUserMark() throws {
+  func testEachToolsRealFormatKeepsEveryRecordAndProjectsOnlyKnownHumanPrompts() throws {
     for tool in AgentLogTool.allCases {
       let url = try file(tool)
       let own: String
@@ -231,6 +233,8 @@ final class AgentLogTests: XCTestCase {
       try task.scan(at: 200)
       XCTAssertEqual(task.health.stored, 1)
       XCTAssertEqual(task.health.malformedLines, 2)
+      XCTAssertEqual(try eventCount("tool='" + tool.rawValue + "'"), 6)
+      XCTAssertEqual(try eventCount("tool='" + tool.rawValue + "' AND role='assistant'"), 1)
       let rows = try store.evidence(in: all).filter { $0.sourceID?.hasPrefix(tool.rawValue + ":") == true }
       XCTAssertEqual(rows.map(\.text), ["/invented-command"])
       XCTAssertEqual(rows.first?.project, "/invented/project")
@@ -253,7 +257,7 @@ final class AgentLogTests: XCTestCase {
       case .prompt(let row) = AgentLogParser.parse(
         attachment, tool: .claude, file: "/invented/log", state: &state, fingerprint: AgentLogFiles.fingerprint)
     else { return XCTFail("delivered human queue instruction must survive") }
-    XCTAssertEqual(row.ts, 99)
+    XCTAssertEqual(row.ts, 101)
     XCTAssertEqual(row.sourceID, "claude:queued")
     XCTAssertEqual(row.text, "Invented queued request")
   }
@@ -327,16 +331,17 @@ final class AgentLogTests: XCTestCase {
       XCTAssertEqual(processes.requested.suffix(4).map { $0.0 }, Array(repeating: tool.homeVariable, count: 4))
     }
   }
-  func testNotConnectedReadsNeitherFilesNorProcessHomes() throws {
+  func testDisconnectedAccountStillCollectsLocalLogs() throws {
     let url = try file(.claude)
     try write([prompt(.claude, id: "one")], to: url)
     try store.saveFixtureSettings(StorageSettings(), at: 0)
     let task = AgentLogTask(reader: reader(.claude), storage: store)
     try task.scan(at: 200)
-    XCTAssertEqual(processes.listings, 0)
-    XCTAssertEqual(task.health.stored, 0)
-    XCTAssertNil(try store.logPosition(path: url.path))
-    XCTAssertNil(task.health.lastSuccessTime)
+    XCTAssertEqual(processes.listings, 1)
+    XCTAssertEqual(task.health.stored, 1)
+    XCTAssertNotNil(try store.logPosition(path: url.path))
+    XCTAssertEqual(task.health.lastSuccessTime, 200)
+    XCTAssertEqual(try eventCount(), 1)
   }
   func testPauseOffAndDeletedRangesAdvancePositionAndCountRefused() throws {
     for tool in AgentLogTool.allCases {
@@ -427,7 +432,7 @@ final class AgentLogTests: XCTestCase {
         NamedProcessVariable.value("CODEX_HOME", inProcessArguments: $0)
       })
   }
-  func testMissingIDsUseStableFingerprintAfterOffsetShift() throws {
+  func testMissingIDsKeepNewOccurrencesAfterOffsetShift() throws {
     for tool in AgentLogTool.allCases {
       let url = try file(tool)
       var raw = try JSONSerialization.jsonObject(with: Data(prompt(tool, id: "remove").utf8)) as! [String: Any]
@@ -446,8 +451,8 @@ final class AgentLogTests: XCTestCase {
       try task.scan(at: 200)
       try write([line], to: url)
       try task.scan(at: 500)
-      XCTAssertEqual(task.health.stored, 2)
-      XCTAssertEqual(task.health.refused, 1)
+      XCTAssertEqual(task.health.stored, 3)
+      XCTAssertEqual(task.health.refused, 0)
     }
   }
   func testReplacedCaptureCompletesItsLossImmediatelyAndOnlyOnce() throws {
@@ -474,7 +479,7 @@ final class AgentLogTests: XCTestCase {
     XCTAssertEqual(second, [.busy, .permission])
     XCTAssertNotNil(flights.begin(at: 30.002) { _ in })
   }
-  func testConvertedCursorKeepsProjectAndThreadWithoutKeepingOwnershipFields() throws {
+  func testConvertedCursorRecoversSchemaMetadataWithoutKeepingUnscopedIdentity() throws {
     let url = try file(.codex)
     let header = try meta(.codex)
     try write([header, prompt(.codex, id: "one")], to: url)
@@ -490,9 +495,11 @@ final class AgentLogTests: XCTestCase {
     let task = AgentLogTask(reader: reader(.codex), storage: store)
     try task.scan(at: 200)
     let row = try XCTUnwrap(store.evidence(in: all).first)
-    XCTAssertEqual(row.project, "/invented/legacy-project")
-    XCTAssertEqual(row.sourceID, "codex:invented-legacy-thread:invented-turn:one")
+    XCTAssertEqual(row.project, "/invented/project")
+    XCTAssertEqual(row.sourceID, "codex:invented-session:invented-turn:one")
     let checkpoint = try XCTUnwrap(store.logPosition(path: url.path))
+    XCTAssertEqual(checkpoint.offset, listed.size)
+    XCTAssertEqual(try AgentLogState.decode(checkpoint.state).session?.storedKey, "invented-session")
     XCTAssertFalse(checkpoint.state.contains("subagent"))
     XCTAssertFalse(checkpoint.state.contains("continuedFrom"))
   }

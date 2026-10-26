@@ -111,14 +111,15 @@ extension ActivityStorage {
       func disposition(_ table: String, _ kind: String) { projectedCounts["table.\(table).\(kind)", default: 0] += 1 }
       func mask(_ value: String) -> String { Redaction.apply(value).text }
       func key(_ value: String) -> String { Redaction.applyKnownSecrets(value).text }
-      func pair(_ a: String, _ b: String) -> String { "\(a.utf8.count):\(a)\(b)" }
+      func pair(_ a: String, _ b: String) -> Data { Data("\(a.utf8.count):\(a)\(b)".utf8) }
       func canonicalState(_ text: String) -> String {
         guard let object = try? JSONSerialization.jsonObject(with:Data(text.utf8),options:[.fragmentsAllowed]),
           let bytes = try? JSONSerialization.data(withJSONObject:object,options:[.sortedKeys,.fragmentsAllowed]) else { return text }
         return String(decoding:bytes,as:UTF8.self)
       }
       var forgotten: [TimeRange] = []
-      var identities = Set<String>(), nativeIDs = Set<String>(), evidenceIDs = Set<String>(), seenNative = Set<String>()
+      var identities = Set<Data>(), evidenceIDs = Set<Data>()
+      var nativeIDs = Set<AgentLogInstructionIdentity>(), seenNative = Set<AgentLogInstructionIdentity>()
       try rows("forgotten") { row in
         let start = try row.int("start_ts"), end = try row.int("end_ts")
         forgotten.append(TimeRange(start, end)); disposition("forgotten", "carried")
@@ -128,7 +129,7 @@ extension ActivityStorage {
       try rows("forgotten_session_rows") { row in
         let source = key(try row.text("bundle_id")), id = key(try row.text("source_id"))
         if identities.insert(pair(source, id)).inserted {
-          nativeIDs.insert(id); disposition("forgotten_session_rows", "carried")
+          nativeIDs.insert(AgentLogIdentityCodec.instruction(id)); disposition("forgotten_session_rows", "carried")
           try expected.row("forgotten_sources", numbers: [], strings: [source, id])
         } else { disposition("forgotten_session_rows", "refused") }
       }
@@ -136,19 +137,19 @@ extension ActivityStorage {
       try rows("wanted") { row in wanted = try row.int("recording") == 0 ? 0 : 1; disposition("wanted", "carried") }
       // Operator intent deliberately supersedes the final old wanted value after stop.
       _ = wanted
-      var paths = Set<String>()
+      var paths = Set<AgentLogPhysicalSource>()
       try rows("log_cursors") { row in
-        let path = key(try row.text("path")), offset = try row.int("offset")
+        let path = AgentLogIdentity.decodedPath(try row.text("path")), offset = try row.int("offset")
         if paths.contains(path) || offset < 0 { disposition("log_cursors", "refused"); return }
         paths.insert(path); disposition("log_cursors", "carried")
         let state = try row.text("state")
         let storedState: String
         if let object = try? JSONSerialization.jsonObject(with: Data(state.utf8)) as? [String: Any],
           !Set(object.keys).isDisjoint(with: ["session", "threadID", "project", "folder", "queued", "metadataRead"]) {
-          var parsed = try AgentLogState.decode(state); parsed.project = mask(parsed.project)
-          storedState = key(try parsed.encoded())
-        } else { storedState = mask(state) }
-        try expected.row("log_positions", numbers: [try row.int("device"), try row.int("inode"), offset, try row.int("seen_ts")], strings: [path, canonicalState(storedState)])
+          let parsed = try AgentLogState.decode(state)
+          storedState = try parsed.encoded()
+        } else { storedState = AgentLogEventParser.maskedPayload(state) }
+        try expected.row("log_positions", numbers: [try row.int("device"), try row.int("inode"), offset, try row.int("seen_ts")], strings: [path.storedKey, canonicalState(storedState)])
       }
       try rows("samples", defaults: [("watching", "0"), ("hidden_reason", "''")]) { row in
         let time = try row.int("ts"), keys = try row.int("keys"), clicks = try row.int("clicks"), scrolls = try row.int("scrolls"), synth = try row.int("synth")
@@ -172,17 +173,21 @@ extension ActivityStorage {
         }
         let source = key(try row.text("bundle_id")), id = key(try row.text("source_id")), time = try row.int("ts")
         guard time < Int.max else { throw StorageError("Unsupported source timestamp") }
-        let native = kind == "prompt" && id.hasPrefix("claude:") && !id.hasPrefix("claude:legacy:") && !id.isEmpty
+        let identity = AgentLogIdentityCodec.instruction(id)
+        let native = kind == "prompt" && AgentLogEventParser.isNativePromptIdentity(identity.storedKey)
         if isForgotten(time, time + 1) {
           if native && identities.insert(pair(source, id)).inserted {
-            nativeIDs.insert(id); try expected.row("forgotten_sources", numbers: [], strings: [source, id])
+            nativeIDs.insert(AgentLogIdentityCodec.instruction(id)); try expected.row("forgotten_sources", numbers: [], strings: [source, id])
           }
           disposition("evidence", "refused"); diagnostic["evidence.forgotten", default: 0] += 1; return
         }
-        if !id.isEmpty && (identities.contains(pair(source, id)) || evidenceIDs.contains(pair(source, id)) || (native && (nativeIDs.contains(id) || seenNative.contains(id)))) {
+        if !id.isEmpty && (identities.contains(pair(source, id)) || evidenceIDs.contains(pair(source, id)) || (native && (nativeIDs.contains(identity) || seenNative.contains(identity)))) {
+          if native && nativeIDs.contains(identity) && identities.insert(pair(source, id)).inserted {
+            try expected.row("forgotten_sources", numbers: [], strings: [source, id])
+          }
           disposition("evidence", "refused"); diagnostic["evidence.deduplicated", default: 0] += 1; return
         }
-        if !id.isEmpty { evidenceIDs.insert(pair(source, id)); if kind == "prompt" { seenNative.insert(id) } }
+        if !id.isEmpty { evidenceIDs.insert(pair(source, id)); if native { seenNative.insert(identity) } }
         disposition("evidence", "carried"); expected.add("evidence.kind." + kind)
         try expected.row("evidence", numbers: [time, id.isEmpty ? 0 : 1], strings: [kind, source, id, mask(try row.text("doc_key")), mask(try row.text("project")), mask(try row.text("text"))])
       }

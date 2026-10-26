@@ -23,12 +23,13 @@ extension ActivityStorage {
       ("ax_probe_review", "attempt_row IN (SELECT id FROM ax_probe_attempts WHERE ts>=? AND ts<?)"),
       ("ax_probe_attempts", "ts>=? AND ts<?"),
       ("evidence", "ts>=? AND ts<?"),
+      ("agent_log_events", "ts>=? AND ts<?"),
       ("intervals", "end_ts>? AND start_ts<?"),
       ("model_calls", "pending=1 AND end_ts>? AND start_ts<?"),
     ]
     // A read-only preview can precede the first version-6 migration.
     return selections.filter { table, _ in
-      !(table.hasPrefix("ax_probe_") || ["sample_observations", "input_batches", "collection_legacy_times", "collection_metadata"].contains(table)) || (try? connection.integer(
+      !(table.hasPrefix("ax_probe_") || table.hasPrefix("agent_log_") || ["sample_observations", "input_batches", "collection_legacy_times", "collection_metadata"].contains(table)) || (try? connection.integer(
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", [.key(table)])) != 0
     }
   }
@@ -64,6 +65,48 @@ extension ActivityStorage {
         digest.update(data: Data(";".utf8))
       }
       if table != "model_calls" || count > 0 { counts[table] = count }
+    }
+    if try connection.integer("SELECT count(*) FROM sqlite_master WHERE name='agent_log_events'") > 0 {
+      for query in [
+        "SELECT p.payload FROM agent_log_payloads p WHERE p.id IN (SELECT payload_id FROM agent_log_events WHERE ts>=? AND ts<?) ORDER BY p.id",
+        "SELECT i.identity FROM agent_log_event_identities i JOIN agent_log_events e ON e.id=i.event_id WHERE e.ts>=? AND e.ts<? ORDER BY e.id,i.identity",
+      ] {
+        try connection.rows(query, selectionValues(range)) { row in
+          let value = SQLiteConnection.text(row, 0)
+          digest.update(data: Data("|\(value.utf8.count):".utf8))
+          digest.update(data: Data(value.utf8))
+        }
+      }
+    }
+    for (table, tag) in [("agent_log_event_sessions", "session"), ("agent_log_inherited_sessions", "inherited-session")] {
+      if try connection.integer("SELECT count(*) FROM sqlite_master WHERE name IN (?, 'agent_log_events')", [.key(table)]) == 2 {
+        try connection.namedRows("""
+          SELECT s.event_id,s.tool,s.session_id FROM \(table) s JOIN agent_log_events e ON e.id=s.event_id
+          WHERE e.ts>=? AND e.ts<? ORDER BY s.event_id
+          """, selectionValues(range)) { row in
+          for value in [String(try row.int("event_id")), try row.text("tool"), try row.text("session_id")] {
+            digest.update(data: Data("|\(tag):\(value.utf8.count):".utf8))
+            digest.update(data: Data(value.utf8))
+          }
+        }
+      }
+    }
+    try legacyLogAdapter.visitDeletionProofs(range) { tag, value in
+      digest.update(data: Data("|\(tag):\(value.utf8.count):".utf8))
+      digest.update(data: Data(value.utf8))
+    }
+    try resolveDeletionIdentities(range)
+    // Hash the exact reachable relationship snapshot used to create permanent tombstones.
+    if let relation = try logLineageRelation() {
+      try connection.namedRows("""
+        SELECT a.alias,a.canonical FROM \(relation) a
+        JOIN log_identity_component c ON c.identity=a.alias ORDER BY a.alias,a.canonical
+        """) { row in
+        for value in [try row.text("alias"), try row.text("canonical")] {
+          digest.update(data: Data("|lineage:\(value.utf8.count):".utf8))
+          digest.update(data: Data(value.utf8))
+        }
+      }
     }
     if try connection.integer("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='screen_payloads'") > 0 {
       try digestCollectionRows("SELECT * FROM screen_payloads WHERE evidence_id IN (SELECT id FROM evidence WHERE ts>=? AND ts<?) ORDER BY evidence_id", values: selectionValues(range), into: &digest)
@@ -155,8 +198,9 @@ extension ActivityStorage {
   }
 
   private func verifyDeletionEndState(
-    in range: TimeRange, identities: [(String, String)], expectedCalls: [DeletionCallState]
+    in range: TimeRange, expectedCalls: [DeletionCallState]
   ) throws {
+    try legacyLogAdapter.verifyRefusals()
     // Check after all writes, so later triggers cannot undo an earlier erasure or marker.
     for (table, selection) in deletionSelections {
       guard try connection.integer("SELECT EXISTS(SELECT 1 FROM \(table) WHERE \(selection))", selectionValues(range)) == 0
@@ -168,11 +212,10 @@ extension ActivityStorage {
     guard try connection.integer(
       "SELECT EXISTS(SELECT 1 FROM forgotten_ranges WHERE start_ts=? AND end_ts=?)", selectionValues(range)) == 1
     else { throw StorageError("Deletion range marker missing") }
-    for (source, id) in identities {
-      guard try connection.integer(
-        "SELECT EXISTS(SELECT 1 FROM forgotten_sources WHERE source=? AND source_id=?)", [.key(source), .key(id)]) == 1
-      else { throw StorageError("Deletion source marker missing") }
-    }
+    guard try connection.integer("""
+      SELECT EXISTS(SELECT 1 FROM log_deletion_identities c
+        WHERE NOT EXISTS(SELECT 1 FROM forgotten_sources f WHERE f.source_id=c.identity AND f.source=c.source))
+      """) == 0 else { throw StorageError("Deletion source marker missing") }
   }
 
   public func previewDeletion(in range: TimeRange, allowOver24Hours: Bool = false) throws -> DeletionPreview {
@@ -193,13 +236,16 @@ extension ActivityStorage {
           try requireAXProbeReviewClosed()
           let preview = try snapshotDeletion(range, journal: journal)
           guard preview.confirmation == confirmation else { throw StorageError("Records changed; request a new preview") }
-          var identities: [(String, String)] = []
-          try connection.namedRows(
-            "SELECT source,source_id FROM evidence WHERE ts>=? AND ts<? AND source_id IS NOT NULL",
-            [.integer(range.start), .integer(range.end)]
-          ) {
-            identities.append((try $0.text("source"), try $0.text("source_id")))
-          }
+          try resolveDeletionIdentities(range)
+          try connection.run("""
+            INSERT OR IGNORE INTO forgotten_sources(source,source_id)
+            SELECT source,identity FROM log_deletion_identities
+            """)
+          try legacyLogAdapter.refuseEvidence(in: range)
+          try connection.run("""
+            INSERT OR IGNORE INTO agent_log_refusals
+            SELECT tool,device,inode,byte_offset,'forgotten' FROM agent_log_events WHERE ts>=? AND ts<?
+            """, selectionValues(range))
           let childIDs = try collectionPayloadIDs(in: range)
           var observationIDs: [CollectionErasureTarget] = []
           if let (_, selection) = deletionSelections.first(where: { $0.0 == "sample_observations" }) {
@@ -237,9 +283,6 @@ extension ActivityStorage {
           try connection.enableCollectionMaintenanceBatches()
           try preserveCollectionMetadata(in: range)
           let scrubbedObservations = try scrubObservationMetadata(in: range)
-          for (source, id) in identities {
-            try connection.run("INSERT OR IGNORE INTO forgotten_sources VALUES(?,?)", [.key(source), .key(id)])
-          }
           for (table, selection) in deletionSelections {
             try connection.collectionWrite("DELETE FROM \(table) WHERE \(selection)", selectionValues(range))
             if table == "model_calls" {
@@ -262,7 +305,7 @@ extension ActivityStorage {
           try verifySampleMetadataErasure(expectedSampleMetadata)
           try verifyScreenMetadataErasure(expectedMetadata)
           try verifyCollectionErasure(ids: childIDs, observationIDs: observationIDs)
-          try verifyDeletionEndState(in: range, identities: identities, expectedCalls: expectedCalls)
+          try verifyDeletionEndState(in: range, expectedCalls: expectedCalls)
           return preview
         }
         if let (call, _) = try journal.read(), call.range.start < range.end && call.range.end > range.start {

@@ -236,3 +236,10 @@ final class SQLiteConnection {
     sqlite3_column_type(s, c) == SQLITE_NULL ? nil : text(s, c)
   }
 }
+
+// Exact identities serialize only at the SQL boundary; callers cannot compare their text by accident.
+extension SQLValue {
+  static func key<Kind>(_ identity: AgentLogExactIdentity<Kind>) -> SQLValue { .key(identity.storedKey) }
+  static func text<Kind>(_ identity: AgentLogExactIdentity<Kind>) -> SQLValue { .text(identity.storedKey) }
+  static func maskedText<Kind>(_ identity: AgentLogExactIdentity<Kind>) -> SQLValue { .maskedText(identity.storedKey) }
+}

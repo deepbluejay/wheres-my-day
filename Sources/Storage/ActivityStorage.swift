@@ -207,83 +207,32 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
       return result
     }
   }
-  private func nativeClaudeID(_ row: EvidenceText) -> String? {
+  func nativePromptID(_ row: EvidenceText) -> AgentLogInstructionIdentity? {
     guard row.kind == .prompt, let id = row.sourceID,
-      id.hasPrefix("claude:"), !id.hasPrefix("claude:legacy:") else { return nil }
-    return id
+      AgentLogEventParser.isNativePromptIdentity(id) else { return nil }
+    return row.agentLogIdentity
   }
-  private func refuseIdentity(source: String, id: String) throws {
-    try connection.run("INSERT OR IGNORE INTO forgotten_sources VALUES(?,?)",
-      [.key(source), .key(id)])
-  }
-  private func refuseNativeIdentity(_ row: EvidenceText) throws {
-    if let id = nativeClaudeID(row) { try refuseIdentity(source: row.source, id: id) }
-  }
-  private func nativeAliases(_ row: EvidenceText) -> [String] {
-    guard nativeClaudeID(row) != nil else { return [] }
-    return row.sourceAliases.filter {
-      $0 != row.sourceID && $0.hasPrefix("claude:") && !$0.hasPrefix("claude:legacy:")
+  func nativeAliases(_ row: EvidenceText) -> [AgentLogInstructionIdentity] {
+    guard nativePromptID(row) != nil else { return [] }
+    return row.agentLogAliases.filter {
+      $0 != row.agentLogIdentity && $0.hasPrefix("claude:") && !$0.hasPrefix("claude:legacy:")
     }
-  }
-  private func consumeAliases(_ row: EvidenceText) throws {
-    // A paired copy id is consumed forever, including when its canonical instruction is refused or deleted.
-    // Reusing the refusal table needs no text, lineage, or alias lifecycle tied to retention.
-    for alias in nativeAliases(row) { try refuseIdentity(source: row.source, id: alias) }
   }
   @discardableResult func insertEvidence(_ row: EvidenceText, alreadyMasked: Bool = false, applicationIdentity: String? = nil) throws -> Bool {
-    let textValue: (String) -> SQLValue = alreadyMasked ? SQLValue.maskedText : SQLValue.text
-    // A copy stored, deleted or refused under its own id names this same instruction. Checked before this row
-    // consumes its own aliases, and the canonical id is remembered so a later read cannot store it either.
-    for alias in nativeAliases(row)
-    where try connection.integer("""
-      SELECT EXISTS(SELECT 1 FROM evidence WHERE kind='prompt' AND source_id=?)
-        OR EXISTS(SELECT 1 FROM forgotten_sources WHERE source_id=?)
-      """, [.key(alias), .key(alias)]) > 0
-    {
-      try refuseNativeIdentity(row)
-      try consumeAliases(row)
-      return false
-    }
-    try consumeAliases(row)
-    guard row.ts < Int.max else { throw StorageError("Timestamp outside supported range") }
-    guard try !forgotten(TimeRange(row.ts, row.ts + 1)) else {
-      try refuseNativeIdentity(row)
-      return false
-    }
-    if let id = row.sourceID,
-      try connection.integer(
-        "SELECT count(*) FROM forgotten_sources WHERE source=? AND source_id=?",
-        [.key(row.source), .key(id)]) > 0
-    {
-      return false
-    }
-    // Native Claude ids survive copied session history. Legacy fingerprints remain source-scoped.
-    if let id = nativeClaudeID(row),
-      try connection.integer("""
-        SELECT EXISTS(SELECT 1 FROM evidence WHERE kind='prompt' AND source_id=?)
-          OR EXISTS(SELECT 1 FROM forgotten_sources WHERE source_id=?)
-        """, [.key(id), .key(id)]) > 0
-    {
-      return false
-    }
-    try connection.collectionWrite(
-      """
-      INSERT OR IGNORE INTO evidence(ts, kind, source, source_id, document_key, project, text, application_identity)
-      VALUES(?,?,?,?,?,?,?,?)
-      """,
-      [
-        .integer(row.ts), textValue(row.kind.rawValue), .key(row.source), row.sourceID.map(SQLValue.key) ?? .null,
-        textValue(row.documentKey), textValue(row.project), textValue(row.text), applicationIdentity.map(SQLValue.key) ?? .null,
-      ])
-    return sqlite3_changes(connection.handle) == 1
+    let plan = try planLogAdmission([], evidence: [row], position: nil)
+    guard plan.projections[0] else { return false }
+    return try insertAdmittedEvidence(row, alreadyMasked: alreadyMasked, applicationIdentity: applicationIdentity)
   }
   private func maskEvidence(_ row: EvidenceText) -> EvidenceText {
-    EvidenceText(
-      ts: row.ts, kind: row.kind, source: Redaction.applyKnownSecrets(row.source).text,
-      sourceID: row.sourceID.map { Redaction.applyKnownSecrets($0).text },
-      sourceAliases: row.sourceAliases.map { Redaction.applyKnownSecrets($0).text },
-      documentKey: Redaction.apply(row.documentKey).text, project: Redaction.apply(row.project).text,
-      text: Redaction.apply(row.text).text)
+    let mask: (String) -> String = row.kind == .prompt
+      ? AgentLogEventParser.safeString : { Redaction.apply($0).text }
+    var safe = EvidenceText(
+      ts: row.ts, kind: row.kind, source: row.kind == .prompt ? AgentLogIdentityCodec.legacySourceLabel(row.source) : Redaction.applyKnownSecrets(row.source).text,
+      sourceID: row.sourceID.map { row.kind == .prompt ? AgentLogIdentityCodec.instruction($0).storedKey : Redaction.applyKnownSecrets($0).text },
+      sourceAliases: row.sourceAliases.map { row.kind == .prompt ? AgentLogIdentityCodec.instruction($0).storedKey : Redaction.applyKnownSecrets($0).text },
+      documentKey: mask(row.documentKey), project: mask(row.project), text: mask(row.text))
+    safe.legacyRefusal = row.legacyRefusal
+    return safe
   }
   @discardableResult public func appendEvidence(_ evidence: [EvidenceText]) throws -> AppendResult {
     let prepared = evidence.map(maskEvidence)
@@ -471,23 +420,26 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
   public func logPosition(path: String) throws -> LogPosition? {
     try locked {
       var result: LogPosition?
-      try connection.namedRows(
-        "SELECT path,device,inode,offset,state,seen_ts FROM log_positions WHERE path=?", [.key(path)]
-      ) {
-        result = LogPosition(
-          path: try $0.text("path"), device: try $0.int("device"), inode: try $0.int("inode"),
-          offset: try $0.int("offset"), state: try $0.text("state"), seenAt: try $0.int("seen_ts"))
+      // Historical main stored raw paths; intervening versions stored masked paths.
+      // Read those keys additively, then keep every new checkpoint in the exact path domain.
+      for key in legacyLogAdapter.sourceKeys(path: path) {
+        try connection.namedRows(
+          "SELECT device,inode,offset,state,seen_ts FROM log_positions WHERE path=?", [.key(key)]
+        ) {
+          result = LogPosition(path: path, device: try $0.int("device"), inode: try $0.int("inode"),
+            offset: try $0.int("offset"), state: try $0.text("state"), seenAt: try $0.int("seen_ts"))
+        }
+        if result != nil { break }
       }
       return result
     }
   }
   private func maskedLogState(_ text: String) throws -> String {
+    // Preserve defaults and classify legacy own folders before masking every checkpoint string.
     guard let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
       !Set(object.keys).isDisjoint(with: ["session", "threadID", "project", "folder", "queued", "metadataRead"])
-    else { return Redaction.apply(text).text }
-    var state = try AgentLogState.decode(text)
-    state.project = Redaction.apply(state.project).text
-    return Redaction.applyKnownSecrets(try state.encoded()).text
+    else { return AgentLogEventParser.maskedPayload(text) }
+    return try AgentLogState.decode(text).encoded()
   }
 
   public func saveLogPosition(_ p: LogPosition) throws {
@@ -501,34 +453,68 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
         ON CONFLICT(path) DO UPDATE SET device=excluded.device,inode=excluded.inode,
         offset=excluded.offset,state=excluded.state,seen_ts=excluded.seen_ts
         """,
-        [.key(p.path), .integer(p.device), .integer(p.inode), .integer(p.offset), state, .integer(p.seenAt)])
+        [.key(AgentLogIdentity.decodedPath(p.path)), .integer(p.device), .integer(p.inode), .integer(p.offset), state, .integer(p.seenAt)])
     }
   }
   @discardableResult public func appendLogBatch(_ evidence: [EvidenceText], position: LogPosition) throws
     -> AppendResult
   {
+    try appendLogEvents([], evidence: evidence, position: position)
+  }
+  @discardableResult public func appendLogEvents(_ events: [AgentLogEvent], evidence: [EvidenceText], position: LogPosition) throws -> AppendResult {
     let prepared = evidence.map(maskEvidence)
+    let preparedEvents = try events.map(PreparedAgentLogEvent.init)
     let state = SQLValue.maskedText(try maskedLogState(position.state))
     return try locked {
       try connection.transaction {
         let days = try settings().promptRetentionDays
         let (cutoff, overflow) = position.seenAt.subtractingReportingOverflow(days * 86400)
         let oldest = overflow ? Int.min : cutoff
-        let result = try append(
-          prepared,
-          using: {
-            guard $0.kind != .screen else { return false }
-            // Privacy first: a prompt in a deleted range, a pause or off is remembered even when it is also too old.
-            if try forgotten(TimeRange($0.ts, $0.ts + 1)) || !logRecordingAllowed(at: $0.ts) {
-              try refuseNativeIdentity($0)
-              try consumeAliases($0)
-              return false
+        let decodedCheckpoint = try? AgentLogState.decode(position.state)
+        let checkpoint = decodedCheckpoint?.tool.flatMap(AgentLogTool.init(rawValue:)) == nil ? nil : decodedCheckpoint
+        let tool = checkpoint?.tool.flatMap(AgentLogTool.init(rawValue:)) ?? events.first?.tool
+        guard events.allSatisfy({ $0.tool == tool }) else { throw StorageError("Mixed agent-log tool namespaces") }
+        let plan: AgentLogAdmissionPlan
+        switch try planLogBatch(events, evidence: prepared, position: position, checkpoint: checkpoint, tool: tool, oldest: oldest) {
+        case .stopped(let growth):
+          var refused = AppendResult(stored: 0, refused: prepared.count)
+          refused.logGrowth = growth
+          return refused
+        case .owned(let tool, let ownership):
+          try connection.run("INSERT OR IGNORE INTO agent_log_tool_own_sources VALUES(?,?,?,?)",
+            [.key(tool.rawValue), .integer(position.device), .integer(position.inode), .key(AgentLogIdentity.decodedPath(position.path))])
+          for session in ownership.sessions {
+            try ownLogSources().registerSession(session, tool: tool)
+            try purgeOwnLogSession(session, tool: tool)
+          }
+          for key in legacyLogAdapter.sourceKeys(path: position.path) {
+            try purgeOwnLogSource(position, tool: tool, sourceKey: key)
+          }
+          try insertLogPosition(position, state: state)
+          return AppendResult(stored: 0, refused: prepared.count)
+        case .content(let admitted):
+          plan = admitted
+        }
+        var growth = try insertAdmittedLogEvents(plan.eventIndices.map { preparedEvents[$0] }, position: position)
+        growth.refusalOccurrences += plan.growth.refusalOccurrences
+        var result = AppendResult()
+        for (row, allowed) in zip(prepared, plan.projections) {
+          guard allowed && row.kind != .screen else { result.refused += 1; continue }
+          let inserted = try insertAdmittedEvidence(row, alreadyMasked: true)
+          if inserted { result.stored += 1 } else { result.refused += 1 }
+          if let id = try logEvidenceID(row, inserted: inserted) {
+            if inserted {
+              try connection.run("INSERT INTO agent_log_evidence_origins VALUES(?,?,?,?,?)",
+                [.integer(id), .key(tool?.rawValue ?? "projection"), .integer(position.device),
+                  .integer(position.inode), .key(AgentLogIdentity.decodedPath(position.path))])
             }
-            // Too old for retention: refused now, but not remembered, so a longer retention can take it later.
-            if $0.ts < oldest { return false }
-            return try insertEvidence($0, alreadyMasked: true)
-          })
+            try connection.run("INSERT OR IGNORE INTO agent_log_source_evidence VALUES(?,?,?,?,?)",
+              [.key(tool?.rawValue ?? "projection"), .integer(position.device), .integer(position.inode),
+                .key(AgentLogIdentity.decodedPath(position.path)), .integer(id)])
+          }
+        }
         try insertLogPosition(position, state: state)
+        result.logGrowth = growth
         return result
       }
     }
@@ -628,6 +614,7 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
         try requireAXProbeReviewClosed()
         let settings = try self.settings()
         try connection.run("DELETE FROM ax_probe_attempts WHERE ts<?", [.integer(now - settings.screenRetentionDays * 86400)])
+        try connection.run("DELETE FROM agent_log_events WHERE ts<?", [.integer(now - settings.promptRetentionDays * 86400)])
         let priorCutoff = try connection.integer("SELECT COALESCE(MAX(screen_cutoff),-9223372036854775808) FROM collection_retention")
         let cutoff = max(now - settings.screenRetentionDays * 86400, priorCutoff)
         try connection.collectionWrite("INSERT INTO collection_retention VALUES(1,?) ON CONFLICT(id) DO UPDATE SET screen_cutoff=MAX(screen_cutoff,excluded.screen_cutoff)", [.integer(cutoff)])

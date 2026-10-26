@@ -261,7 +261,7 @@ final class CollectionFidelityTests: XCTestCase {
       """)
     let adopted = try ActivityStorage(url: folder.appendingPathComponent("invented.sqlite"), appDataDirectory: folder,
       databaseScope: .directory(folder))
-    XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), 14)
+    XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), SQLiteConnection.schemaVersion)
     XCTAssertEqual(try adopted.samples(in: all), beforeSamples)
     XCTAssertEqual(try adopted.evidence(in: all), beforeEvidence)
     XCTAssertEqual(try adopted.observations(in: all), [])
