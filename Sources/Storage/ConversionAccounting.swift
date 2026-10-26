@@ -83,7 +83,7 @@ extension ActivityStorage {
   public static func validateOldConversionSource(_ url: URL, scope: DatabaseOpenScope) throws {
     let db = try SQLiteConnection(url: url, readOnly: true, immutable: true, scope: scope)
     guard try db.integer("PRAGMA application_id") == 0,
-      (0...11).contains(try db.integer("PRAGMA user_version")),
+      (0...SQLiteConnection.schemaVersion).contains(try db.integer("PRAGMA user_version")),
       try db.integer("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('samples','evidence','activities')") == 3
     else { throw StorageError("Unsupported source schema") }
     var good = true

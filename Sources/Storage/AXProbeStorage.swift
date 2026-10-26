@@ -287,7 +287,7 @@ extension ActivityStorage: AXProbeStore {
     try locked {
       let settings = try self.settings()
       guard settings.axProbeRun == request.run, RecorderPolicy.recording(settings, at: now),
-        !settings.excludedApps.contains(where: { $0.lowercased() == request.bundleID.lowercased() }),
+        !settings.excludesApplication(request.bundleID),
         !settings.axProbeReviewActive(at: now),
         try connection.integer("SELECT count(*) FROM ax_probe_runs WHERE id=? AND cancelled=0", [.key(request.run.id)]) == 1,
         request.time < Int.max, try !forgotten(TimeRange(request.time, request.time + 1)) else { return false }

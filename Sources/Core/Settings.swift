@@ -99,11 +99,12 @@ public struct SettingsViewModel {
       let id = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
       guard SettingsValidation.validIdentity(id) else { throw SettingsValidationError.appIdentity }
       guard id != ownBundleID else { throw SettingsValidationError.ownApp }
-      guard !result.excludedApps.contains(where: { $0.lowercased() == id }) else { throw SettingsValidationError.duplicateApp }
+      guard !result.excludesApplication(id) else { throw SettingsValidationError.duplicateApp }
       result.excludedApps.append(id)
     case .removeApp(let id):
       guard id.lowercased() != ownBundleID else { throw SettingsValidationError.ownApp }
       result.excludedApps.removeAll { $0.lowercased() == id.lowercased() }
+      result.excludedAppPrivacyIdentities.removeValue(forKey: id.lowercased())
     }
     try SettingsValidation.validate(result)
     result.excludedApps.sort()

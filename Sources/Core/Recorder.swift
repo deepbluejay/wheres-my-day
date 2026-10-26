@@ -28,7 +28,7 @@ public enum SourceReading<Value> {
   }
 }
 
-public struct WindowIdentity: Hashable {
+public struct WindowIdentity: Hashable, Codable {
   public var processID: Int32
   public var windowID: UInt32
   public init(processID: Int32, windowID: UInt32) {
@@ -47,11 +47,12 @@ public struct FrontObservation {
   public var isBrowser: Bool
   public var isBrowserKnown: Bool
   public var window: WindowIdentity?
+  public var observedAt: Double?
   public var accessibility: SourceAbsence?
   public init(
     bundleID: String = "", app: String = "", title: String = "", document: String? = nil,
     browserAddress: String? = nil, isBrowser: Bool = false, isBrowserKnown: Bool = true, window: WindowIdentity? = nil,
-    accessibility: SourceAbsence? = nil, processID: Int32? = nil
+    accessibility: SourceAbsence? = nil, processID: Int32? = nil, observedAt: Double? = nil
   ) {
     self.bundleID = bundleID
     self.app = app
@@ -61,18 +62,42 @@ public struct FrontObservation {
     self.isBrowser = isBrowser
     self.isBrowserKnown = isBrowserKnown
     self.window = window
+    self.observedAt = observedAt
     self.accessibility = accessibility
     self.processID = processID ?? window?.processID ?? 0
   }
 }
 
-public enum InputEventKind { case key, click, scroll, move }
+public enum InputEventKind: String, Codable { case key, keyUp, click, mouseUp, modifiers, scroll, move, drag }
+public struct InputObservation: Equatable, Codable {
+  public var kind: InputEventKind
+  public var timestamp: Double
+  public var monotonicNanoseconds: UInt64?
+  public var sourcePID: Int64?
+  public var button: Int?
+  public var scrollX: Int64?
+  public var scrollY: Int64?
+  public var scrollZ: Int64?
+  public var continuousScroll: Bool?
+  public init(kind: InputEventKind, timestamp: Double, sourcePID: Int64? = nil,
+    button: Int? = nil, scrollX: Int64? = nil, scrollY: Int64? = nil, scrollZ: Int64? = nil,
+    continuousScroll: Bool? = nil, monotonicNanoseconds: UInt64? = nil) {
+    self.kind = kind; self.timestamp = timestamp; self.sourcePID = sourcePID
+    self.button = button; self.scrollX = scrollX; self.scrollY = scrollY
+    self.scrollZ = scrollZ; self.continuousScroll = continuousScroll; self.monotonicNanoseconds = monotonicNanoseconds
+  }
+  public var programMade: Bool? { sourcePID.map { $0 != 0 } }
+}
 public struct InputCounts: Equatable {
   public var keys = 0
   public var clicks = 0
   public var scrolls = 0
   public var moved = false
   public var synthetic = 0
+  public var movements = 0
+  public var events: [InputObservation] = []
+  public var detailedEventOverflow = 0
+  private var personActivity = false
   public init(keys: Int = 0, clicks: Int = 0, scrolls: Int = 0, moved: Bool = false, synthetic: Int = 0) {
     self.keys = keys
     self.clicks = clicks
@@ -86,18 +111,26 @@ public struct InputCounts: Equatable {
     scrolls += other.scrolls
     moved = moved || other.moved
     synthetic += other.synthetic
+    movements += other.movements
+    events += other.events
+    detailedEventOverflow += other.detailedEventOverflow
+    personActivity = personActivity || other.byPerson
   }
-  public var byPerson: Bool { keys > 0 || clicks > 0 || scrolls > 0 || moved }
+  public var byPerson: Bool { personActivity || (events.isEmpty && (keys > 0 || clicks > 0 || scrolls > 0 || moved)) }
   public mutating func observe(_ event: InputEventKind, programMade: Bool) {
-    if programMade {
-      synthetic += 1
-      return
-    }
-    switch event {
+    observe(InputObservation(kind: event, timestamp: 0, sourcePID: programMade ? 1 : 0))
+  }
+  public mutating func observe(_ event: InputObservation, retainingAtMost limit: Int? = nil) {
+    if let limit, events.count >= limit { detailedEventOverflow += 1 }
+    else { events.append(event) }
+    if event.programMade == true { synthetic += 1 }
+    if event.programMade == false && [.key, .click, .scroll, .move, .drag].contains(event.kind) { personActivity = true }
+    switch event.kind {
     case .key: keys += 1
     case .click: clicks += 1
     case .scroll: scrolls += 1
-    case .move: moved = true
+    case .move, .drag: moved = true; movements += 1
+    case .keyUp, .mouseUp, .modifiers: break
     }
   }
 }
@@ -108,10 +141,10 @@ public enum RecorderPolicy {
       && (settings.pausedUntil ?? Int.min) <= time
   }
   public static func excluded(_ front: FrontObservation, settings: StorageSettings) -> Bool {
-    settings.excludedApps.contains { $0.lowercased() == front.bundleID.lowercased() }
+    settings.excludesApplication(front.bundleID)
   }
   public static func documentKey(_ front: FrontObservation) -> String {
-    let document = front.isBrowser ? front.browserAddress ?? front.document : front.document
+    let document = front.browserAddress ?? front.document
     if let document, let url = URL(string: document) {
       if url.isFileURL { return url.path }
       if let host = url.host, !host.isEmpty {
@@ -133,7 +166,11 @@ public enum RecorderPolicy {
       ts: time, bundleID: front.bundleID, app: front.app,
       window: hidden ? "" : front.title, documentKey: hidden ? "" : documentKey(front),
       keys: input.keys, clicks: input.clicks, scrolls: input.scrolls, moved: input.moved,
-      synthetic: input.synthetic, keepingAwake: keepingAwake, excluded: hidden)
+      synthetic: input.synthetic, keepingAwake: keepingAwake, excluded: hidden,
+      document: hidden ? nil : front.document, browserAddress: hidden ? nil : front.browserAddress,
+      inputEvents: input.events, observedAt: hidden ? nil : front.observedAt, windowIdentity: hidden ? nil : front.window,
+      processID: hidden ? nil : front.processID, isBrowser: hidden ? nil : front.isBrowser, isBrowserKnown: hidden ? nil : front.isBrowserKnown,
+      accessibility: hidden ? nil : front.accessibility?.rawValue)
   }
   public static func captureAllowed(
     front: FrontObservation, input: InputCounts, secureInput: Bool?,
@@ -155,12 +192,14 @@ public struct CaptureSchedule {
   }
 }
 
+/// Write-time compatibility state. Capture persistence never depends on these keys.
 public struct ScreenKeyMemory: Equatable {
   public private(set) var storedAt: [String: Int] = [:]
   public init() {}
   public var keys: Set<String> { Set(storedAt.keys) }
   public mutating func expire(at time: Int) {
-    storedAt = storedAt.filter { $0.value > time - RecorderTiming.lineMemorySeconds && $0.value <= time }
+    let (oldest, overflow) = time.subtractingReportingOverflow(RecorderTiming.lineMemorySeconds)
+    storedAt = storedAt.filter { (overflow || $0.value > oldest) && $0.value <= time }
   }
   public mutating func rebuild(_ keys: [String: Int], at time: Int) {
     storedAt = keys
@@ -178,7 +217,11 @@ public protocol FrontWindowSource {
   /// Identity only. Do not ask for content before policy permits it.
   func frontApplication() -> FrontObservation
   func details(for application: FrontObservation) -> FrontObservation
+  func invalidateMetadata()
+  func takeCompletedDetails() -> [FrontObservation]
 }
+extension FrontWindowSource { public func invalidateMetadata() {}
+  public func takeCompletedDetails() -> [FrontObservation] { [] } }
 public protocol SecureInputSource { func secureInput() -> SourceReading<Bool> }
 public protocol DisplayAwakeSource { func keepingDisplayAwake(processID: Int32) -> SourceReading<Bool> }
 public enum CaptureCheck {
@@ -189,17 +232,27 @@ public enum CaptureCheck {
 }
 
 public protocol ScreenTextSource {
+  func capturePayload(window: WindowIdentity, permitted: @escaping (CaptureCheck) -> Bool,
+    completion: @escaping (SourceReading<ScreenTextPayload>) -> Void)
   /// No image leaves this adapter. Completion may run later; the loop must never wait for it.
   func captureText(
     window: WindowIdentity, permitted: @escaping (CaptureCheck) -> Bool,
     completion: @escaping (SourceReading<String>) -> Void)
 }
+extension ScreenTextSource {
+  public func capturePayload(window: WindowIdentity, permitted: @escaping (CaptureCheck) -> Bool,
+    completion: @escaping (SourceReading<ScreenTextPayload>) -> Void) {
+    captureText(window: window, permitted: permitted) { completion($0.map { ScreenTextPayload(text: $0) }) }
+  }
+}
 public protocol DeletionCounter { func deletionsSoFar() throws -> Int }
-public protocol RecorderStorage: SampleWriter, ScreenCaptureWriter, EvidenceReader, SettingsStore,
+public protocol RecorderStorage: SampleWriter, ObservationWriter, ScreenCaptureWriter, StructuredScreenCaptureWriter, EvidenceReader, SettingsStore,
   DeletionCounter, EvidenceRetention
 {}
 
 public enum AddressCachePolicy {
   /// A deadline-limited walk is unknown, not a completed miss.
-  public static func canReuse(sameTitle: Bool, finished: Bool) -> Bool { sameTitle && finished }
+  public static func canReuse(sameTitle: Bool, finished: Bool, age: Double = .infinity) -> Bool {
+    sameTitle && finished && age >= 0 && age < Double(RecorderTiming.accessibilityCacheSeconds)
+  }
 }

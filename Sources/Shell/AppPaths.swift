@@ -6,7 +6,7 @@ import Storage
 
 /// Computed at the entry. A database override never changes the app-owned directories.
 public struct AppPaths: Equatable {
-  public static let bundleID = "dev.local.ActivityProbe"
+  public static let bundleID = ActivityProbeIdentity.bundleID
   public let userHome: URL
   public let appData: URL
   public let database: URL

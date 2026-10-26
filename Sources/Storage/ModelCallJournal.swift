@@ -12,11 +12,39 @@ final class ModelCallJournal {
     directory = try OperationalDirectory(database.deletingLastPathComponent())
     leaf = database.lastPathComponent + ".summary-attempt"
   }
+  // Privacy plans survive collection checkpoints. Serialize only operations that
+  // can invalidate those plans, using a different file from the publication lock.
+  // Always acquire this barrier before the shared journal lock.
+  func withPrivacyPlanLock<T>(_ body: () throws -> T) throws -> T {
+    let file = try directory.open(leaf + ".privacy-plan.lock", flags: O_CREAT | O_RDWR)!
+    defer { flock(file, LOCK_UN); Darwin.close(file) }
+    guard flock(file, LOCK_EX) == 0 else { throw StorageError("Privacy planning lock unavailable") }
+    return try body()
+  }
+  func withAccountingLock<T>(_ body: () throws -> T) throws -> T {
+    try withPrivacyPlanLock { try withLock(body) }
+  }
   func withLock<T>(_ body: () throws -> T) throws -> T {
     let file = try directory.open(leaf + ".lock", flags: O_CREAT | O_RDWR)!
     defer { flock(file, LOCK_UN); Darwin.close(file) }
     guard flock(file, LOCK_EX) == 0 else { throw StorageError("Summary accounting lock unavailable") }
     return try body()
+  }
+  func withMaintenanceLock<T>(_ connection: SQLiteConnection, _ body: () throws -> T) throws -> T {
+    try withPrivacyPlanLock {
+      let file = try directory.open(leaf + ".lock", flags: O_CREAT | O_RDWR)!
+      defer { connection.collectionMaintenanceYield = nil; flock(file, LOCK_UN); Darwin.close(file) }
+      guard flock(file, LOCK_EX) == 0 else { throw StorageError("Summary accounting lock unavailable") }
+      connection.collectionMaintenanceYield = {
+        guard flock(file, LOCK_UN) == 0 else { throw StorageError("Summary accounting unlock unavailable") }
+        // Waiting publishers/recovery can hold the barrier through their SQL commit.
+        do { try connection.collectionMaintenanceGap?() }
+        catch { flock(file, LOCK_EX); throw error }
+        Thread.sleep(forTimeInterval: 0.001)
+        guard flock(file, LOCK_EX) == 0 else { throw StorageError("Summary accounting lock unavailable") }
+      }
+      return try body()
+    }
   }
   func read() throws -> (ModelCall, Data)? {
     guard let file = try directory.open(leaf, flags: O_RDONLY, missingAllowed: true) else { return nil }
@@ -65,7 +93,7 @@ extension ActivityStorage {
     try locked {
       guard sqlite3_db_readonly(connection.handle, "main") == 0 else { throw StorageError("Read-only accounting store") }
       let journal = try ModelCallJournal(database: url)
-      try journal.withLock { try recoverModelCalls(from: journal) }
+      try journal.withAccountingLock { try recoverModelCalls(from: journal) }
     }
   }
 }

@@ -19,7 +19,7 @@ final class RecorderPolicyTests: XCTestCase {
     both.observe(.key, programMade: true)
     both.observe(.click, programMade: false)
     XCTAssertTrue(both.byPerson)
-    XCTAssertEqual(both.keys, 0)
+    XCTAssertEqual(both.keys, 1)
     XCTAssertEqual(both.clicks, 1)
   }
   func testSampleKeepsOnlyExcludedAppName() {
@@ -68,11 +68,11 @@ final class RecorderPolicyTests: XCTestCase {
     XCTAssertFalse(allowed(front, InputCounts(keys: 1), false, StorageSettings(pausedUntil: 101)))
     XCTAssertTrue(allowed(front, InputCounts(keys: 1), false, StorageSettings(pausedUntil: 100)))
   }
-  func testDocumentKeyUsesOSBrowserAnswerOnly() {
+  func testDocumentKeyUsesObservedAddressIndependentlyOfBrowserHint() {
     var front = FrontObservation(title: "Invented title", document: "file:///invented/folder/item")
     XCTAssertEqual(RecorderPolicy.documentKey(front), "/invented/folder/item")
     front.browserAddress = "https://invented.example/page///?password=invented#fragment"
-    XCTAssertEqual(RecorderPolicy.documentKey(front), "/invented/folder/item")
+    XCTAssertEqual(RecorderPolicy.documentKey(front), "invented.example/page")
     front.isBrowser = true
     XCTAssertEqual(RecorderPolicy.documentKey(front), "invented.example/page")
     front.document = nil
@@ -127,7 +127,19 @@ final class RecorderPolicyTests: XCTestCase {
     memory.expire(at: 3700)
     XCTAssertEqual(memory.keys, [])
   }
-  func testRepeatedLineWithinCaptureIsSelectedOnce() {
+  func testNoveltyReplayHandlesMinimumTimestampWithoutOverflow() {
+    var memory = ScreenKeyMemory()
+    memory.add(["invented"], storedAt: Int.min, now: Int.min)
+    memory.expire(at: Int.min + 3599)
+    XCTAssertEqual(memory.keys, ["invented"])
+    memory.expire(at: Int.min + 3600)
+    XCTAssertEqual(memory.keys, [])
+  }
+  func testRepeatedLineWithinCaptureIsRetained() {
+    let text = "Invented line 1!\nInvented line 2?\nOther line"
+    XCTAssertEqual(ScreenTextPayload(text: text).redacted().text, text)
+  }
+  func testNoveltyReadViewSelectsRepeatedLineOnce() {
     let selected = ScreenLines.select(maskedText: "Invented line 1!\nInvented line 2?\nOther line", knownKeys: [])
     XCTAssertEqual(selected.lines, ["Invented line 1!", "Other line"])
     XCTAssertEqual(selected.keys, ["Inventedline", "Otherline"])

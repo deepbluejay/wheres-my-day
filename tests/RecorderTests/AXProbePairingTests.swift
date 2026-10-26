@@ -91,11 +91,11 @@ final class AXProbePairingTests: XCTestCase {
     XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM ax_probe_attempts WHERE evidence_id IS NOT NULL"), 1)
     clock.now += 15; loop.tick(); screen.pending?(); loop.flush(); drainProbe()
     XCTAssertEqual(try attempts(), 2)
-    XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM ax_probe_attempts WHERE evidence_id IS NULL"), 1)
+    XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM ax_probe_attempts WHERE evidence_id IS NULL"), 0)
     screen.result = .absent(.failed)
     clock.now += 15; loop.tick(); screen.pending?(); loop.flush(); drainProbe()
     XCTAssertEqual(try attempts(), 3)
-    XCTAssertEqual(try store.evidence(in: TimeRange(0, 100000)).count, 1)
+    XCTAssertEqual(try store.evidence(in: TimeRange(0, 100000)).count, 2)
   }
   func testLargePayloadPreparationAllowsRecorderTicksAndOCRDelivery() throws {
     loop.stop(); drainProbe()
@@ -207,7 +207,7 @@ final class AXProbePairingTests: XCTestCase {
     }
   }
   func testForgetDuringInflightSleepAndOffInvalidateProbe() throws {
-    loop.tick()
+    loop.tick(); loop.flush()
     let preview = try store.previewDeletion(in: TimeRange(10000, 10001))
     _ = try store.deleteRecords(in: preview.range, confirmation: preview.confirmation)
     screen.pending?(); loop.flush(); drainProbe()

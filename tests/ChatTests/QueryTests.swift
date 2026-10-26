@@ -16,7 +16,7 @@ final class QueryTests: XCTestCase {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let url = root.appendingPathComponent("invented.sqlite")
     writer = try ActivityStorage(url: url, appDataDirectory: root, databaseScope: .directory(root))
-    try writer.saveSettings(StorageSettings(excludedApps: ["invented.excluded"], general: ["dayStartHour": "4"]), at: 0)
+    try writer.saveSettings(StorageSettings(excludedApps: [], general: ["dayStartHour": "4"]), at: 0)
     try writer.appendIntervals([
       NamedInterval(range: TimeRange(start - 120, start + 120), name: "Invented plan", description: "Review plan", kind: .work),
       NamedInterval(range: TimeRange(start + 120, start + 180), name: "Private canary", project: "Hidden", state: .private),
@@ -25,6 +25,8 @@ final class QueryTests: XCTestCase {
     ])
     try writer.appendSamples([TimeSample(ts: start + 180, bundleID: "invented.excluded"),
       TimeSample(ts: start + 360, keys: 1)])
+    // These rows predate the exclusion; clearing it may reveal already-allowed history.
+    try writer.saveSettings(StorageSettings(excludedApps: ["invented.excluded"], general: ["dayStartHour": "4"]), at: 0)
     calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
     reader = try ActivityStorage(url: url, appDataDirectory: root, readOnly: true, databaseScope: .directory(root))
     query = ActivityQueries(storage: reader, calendar: calendar, now: { 15000 })

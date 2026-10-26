@@ -2,12 +2,13 @@ import Core
 import Foundation
 
 /// Any caller thread. The lock owns flight/completion; callbacks run after unlocking, never under the lock.
-public final class ScreenTextFlights {
+public typealias ScreenTextFlights = ScreenCaptureFlights<String>
+public final class ScreenCaptureFlights<Value> {
   private let lock = NSLock()
   private var flight = CaptureFlight()
-  private var completion: ((SourceReading<String>) -> Void)?
+  private var completion: ((SourceReading<Value>) -> Void)?
   public init() {}
-  public func begin(at time: TimeInterval, completion next: @escaping (SourceReading<String>) -> Void) -> Int? {
+  public func begin(at time: TimeInterval, completion next: @escaping (SourceReading<Value>) -> Void) -> Int? {
     lock.lock()
     let token = flight.begin(at: time)
     let displaced = token == nil ? nil : completion
@@ -18,7 +19,7 @@ public final class ScreenTextFlights {
     displaced?(.absent(.superseded))
     return token
   }
-  public func finish(_ token: Int, result: SourceReading<String>) {
+  public func finish(_ token: Int, result: SourceReading<Value>) {
     lock.lock()
     let current = flight.finish(token)
     let delivered = current ? completion : nil

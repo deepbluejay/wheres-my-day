@@ -8,7 +8,9 @@ import XCTest
 extension RecorderFixTests {
   func testInterruptedAddressWalkCannotBeRememberedAsAMiss() {
     XCTAssertFalse(AddressCachePolicy.canReuse(sameTitle: true, finished: false))
-    XCTAssertTrue(AddressCachePolicy.canReuse(sameTitle: true, finished: true))
+    XCTAssertFalse(AddressCachePolicy.canReuse(sameTitle: true, finished: true))
+    XCTAssertTrue(AddressCachePolicy.canReuse(sameTitle: true, finished: true, age: 2.9))
+    XCTAssertFalse(AddressCachePolicy.canReuse(sameTitle: true, finished: true, age: 3))
     XCTAssertFalse(AddressCachePolicy.canReuse(sameTitle: false, finished: true))
   }
   func testUnknownInputTicksHaveTheirOwnCountWithoutRows() throws {

@@ -22,12 +22,12 @@ extension StorageTests {
         for i in 0..<8 {
           let result = try store.appendScreenCapture(
             text: capture, at: 60 + i * 15, source: "invented-screen", knownKeys: keys)
-          XCTAssertEqual(result.append, AppendResult(stored: i == 0 ? 1 : 0))
-          XCTAssertEqual(result.addedKeys.count, i == 0 ? (index == 0 ? 1 : 14) : 0)
+          XCTAssertEqual(result.append, AppendResult(stored: 1))
+          XCTAssertEqual(result.addedKeys.count, index == 0 ? 1 : 14)
           keys.formUnion(result.addedKeys)
           XCTAssertEqual(Set(try store.recentScreenLineKeys(at: 60 + i * 15).keys), keys)
         }
-        XCTAssertEqual(try store.evidence(in: all).count, 1)
+        XCTAssertEqual(try store.evidence(in: all).count, 8)
         for file in [database.path, database.path + "-wal"] {
           let bytes = (try? Data(contentsOf: URL(fileURLWithPath: file))) ?? Data()
           for body in ["INVENTED_SECRET_BODY_ALPHA_ABCXYZ", "INVENTED_SECRET_BODY_BETA_ABCXYZ"] {
@@ -59,6 +59,7 @@ extension StorageTests {
       TimeSample(ts: 13), TimeSample(ts: 11), TimeSample(ts: 14), TimeSample(ts: 14), TimeSample(ts: 15)]),
       AppendResult(stored: 3, refused: 2))
     XCTAssertEqual(try store.samples(in: all).map(\.ts), Array(10...15))
+    XCTAssertEqual(try store.observations(in: all).count, 8)
   }
 
   func testDeletionReportsDelayedTruncationUsesShortWaitAndRecorderOpenRetries() throws {

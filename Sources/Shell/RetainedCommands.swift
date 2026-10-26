@@ -29,7 +29,10 @@ public enum RetainedCommands {
         case "forget": return try forget(Array(arguments.dropFirst(2)), paths: paths, now: now, zone: calendar.timeZone)
         case "verdicts" where arguments.count == 2:
           let settings = try ActivityStorage(url: paths.database, appDataDirectory: paths.appData, readOnly: true, databaseScope: paths.databaseScope).settings()
-          let excluded = Set((settings.excludedApps + [AppPaths.bundleID]).map { $0.lowercased() })
+          let historical = HistoricalApplicationPrivacy(applications: settings.excludedApps + [AppPaths.bundleID])
+          func hidden(_ identity: String) -> Bool {
+            identity.lowercased() == AppPaths.bundleID.lowercased() || settings.excludesApplication(identity)
+          }
           var bundles: [String: Set<String>] = [:], known = Set<String>()
           for app in applications {
             let id = app.bundleID.lowercased(); known.insert(id)
@@ -40,7 +43,9 @@ public enum RetainedCommands {
           return AppCommandResult(0, lines.map { line in
             let name = line.components(separatedBy: "\t")[0].lowercased()
             let matches = bundles[name] ?? []
-            return excluded.contains(name) || !matches.isDisjoint(with: excluded) ? "hidden app"
+            let refused = matches.contains(where: hidden) || hidden(name)
+              || (HistoricalApplicationPrivacy.masked(name) && historical.contains(name))
+            return refused ? "hidden app"
               : !matches.isEmpty || known.contains(name) ? "open" : "open unmatched"
           }.joined(separator: "\n"))
         default: throw AppCommandError.arguments

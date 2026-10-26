@@ -20,6 +20,11 @@ final class RecorderLifecycleTests: XCTestCase {
       screen: sources, storage: storage, maintenanceStorage: storage, ownBundleID: "invented.own")
   }
   override func tearDownWithError() throws {
+    loop?.stop()
+    if let loop {
+      let drained = expectation(description: "Owned recorder work drained")
+      loop.finishMaintenance { drained.fulfill() }; wait(for: [drained], timeout: 60)
+    }
     loop = nil; storage = nil
     try FileManager.default.removeItem(at: root)
   }

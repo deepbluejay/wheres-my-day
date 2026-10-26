@@ -80,7 +80,7 @@ public enum ActivityProbeEntry {
       // A session-end quit takes the same stop and, like every stop, exits 0.
       let stop: () -> Void = { [weak lifecycle] in
         lifecycle?.stop { health in
-          print("stopped stored=\(health.storedSeconds) dropped_seconds=\(health.droppedSeconds) dropped_captures=\(health.droppedCaptures) pending_seconds=\(health.pendingSeconds) pending_captures=\(health.pendingCaptures)")
+          print("stopped stored=\(health.storedSeconds) dropped_seconds=\(health.droppedSeconds) dropped_captures=\(health.droppedCaptures) pending_seconds=\(health.pendingSeconds) pending_captures=\(health.pendingCaptures) stored_ocr_bytes=\(health.storedOCRBytes) stored_observations=\(health.storedObservations) pending_observations=\(health.pendingObservations) dropped_observations=\(health.droppedObservations) collection_failures=\(health.collectionFailures) collection_backpressure=\(health.collectionBackpressure) collection_busy_retries=\(health.collectionBusyRetries) collection_acquisition_failures=\(health.collectionAcquisitionFailures) collection_staging_failures=\(health.collectionStagingFailures) collection_persistence_failures=\(health.collectionPersistenceFailures) collection_initialization_failures=\(health.collectionInitializationFailures) collection_retained_bytes=\(health.collectionRetainedBytes) collection_diagnostic_publication_failures=\(health.collectionDiagnosticPublicationFailures) collection_evicted_loss_receipts=\(health.collectionEvictedLossReceipts)")
           MainActor.assumeIsolated { events.stop() }
         }
       }

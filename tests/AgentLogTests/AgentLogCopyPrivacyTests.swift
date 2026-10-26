@@ -198,7 +198,7 @@ extension AgentLogTests {
       try store.connection.run("DROP INDEX IF EXISTS forgotten_source_id")
       try store.connection.run("PRAGMA user_version=\(version)")
       let adopted = try ActivityStorage(url: root.appendingPathComponent("invented.sqlite"), appDataDirectory: root, databaseScope: .directory(root))
-      XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), 9)
+      XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), 14)
       XCTAssertEqual(try adopted.evidence(in: all).count, 1)
       XCTAssertEqual(try adopted.logRecordingHistory(), history)
       XCTAssertEqual(try adopted.settings(), settings)

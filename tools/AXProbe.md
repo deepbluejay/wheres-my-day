@@ -116,8 +116,9 @@ Attempts also record AXManualAccessibility outcome, elements visited, IPC count,
 reasons, elapsed/worker/queue time and pairing diagnostics. New attempt headers record `isBrowser`
 as a boolean from observed browser metadata; unavailable metadata leaves the field absent, meaning
 unknown. App identity never determines an activity category. No categories are written in new
-headers, and legacy category fields remain untouched and readable. This additive JSON change uses
-the existing schema 9 and version-3 content format, preserves active runs, and requires no data rewrite.
+headers, and legacy category fields remain untouched and readable. This additive JSON change keeps
+the version-3 content format, preserves active runs, and requires no data rewrite. The database
+schema is version 14 after the separate additive collection-identity change.
 Node latency covers batch, metadata and text reads, excluding descendant traversal. Attempt headers
 store a deterministic uniform reservoir prepared on the background pipeline of at most 4,096 microsecond-rounded node latencies and
 the exact measured-node count. Timing stays outside node parts, preserving metadata deduplication.

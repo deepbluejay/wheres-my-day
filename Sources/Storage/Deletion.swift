@@ -13,8 +13,13 @@ extension ActivityStorage {
     }
   }
   private var deletionSelections: [(String, String)] {
+    let modernObservations = (try? connection.integer("SELECT count(*) FROM sqlite_master WHERE name='collection_legacy_times'")) == 1
     let selections = [
       ("samples", "ts>=? AND ts<?"),
+      ("sample_observations", modernObservations ? "ts>=?1 AND ts<?2 OR observed_ts>=?1 AND observed_ts<?2 OR id IN (SELECT observation_row FROM collection_legacy_times WHERE ts>=?1 AND ts<?2)" : "ts>=? AND ts<?"),
+      ("input_batches", "ts>=? AND ts<?"),
+      ("collection_metadata", "ts>=? AND ts<?"),
+      ("collection_legacy_times", "ts>=? AND ts<?"),
       ("ax_probe_review", "attempt_row IN (SELECT id FROM ax_probe_attempts WHERE ts>=? AND ts<?)"),
       ("ax_probe_attempts", "ts>=? AND ts<?"),
       ("evidence", "ts>=? AND ts<?"),
@@ -23,7 +28,7 @@ extension ActivityStorage {
     ]
     // A read-only preview can precede the first version-6 migration.
     return selections.filter { table, _ in
-      !table.hasPrefix("ax_probe_") || (try? connection.integer(
+      !(table.hasPrefix("ax_probe_") || ["sample_observations", "input_batches", "collection_legacy_times", "collection_metadata"].contains(table)) || (try? connection.integer(
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", [.key(table)])) != 0
     }
   }
@@ -60,6 +65,22 @@ extension ActivityStorage {
       }
       if table != "model_calls" || count > 0 { counts[table] = count }
     }
+    if try connection.integer("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='screen_payloads'") > 0 {
+      try digestCollectionRows("SELECT * FROM screen_payloads WHERE evidence_id IN (SELECT id FROM evidence WHERE ts>=? AND ts<?) ORDER BY evidence_id", values: selectionValues(range), into: &digest)
+
+    }
+    if try connection.integer("SELECT count(*) FROM sqlite_master WHERE name='collection_blobs'") > 0 {
+      try connection.namedRows("""
+        SELECT hash,content FROM collection_blobs WHERE hash IN (
+          SELECT text_hash FROM screen_payloads WHERE evidence_id IN (SELECT id FROM evidence WHERE ts>=?1 AND ts<?2)
+          UNION SELECT payload_hash FROM screen_payloads WHERE evidence_id IN (SELECT id FROM evidence WHERE ts>=?1 AND ts<?2)) ORDER BY hash
+        """, selectionValues(range)) {
+        digest.update(data: Data("blob:\(try $0.text("hash")):\(try $0.text("content"))".utf8))
+      }
+    }
+    counts["sample_metadata"] = try digestSampleMetadata(in: range, into: &digest)
+    counts["screen_metadata"] = try digestScreenMetadata(in: range, into: &digest)
+    counts["staged_collection"] = try digestStagedCollection(in: range, into: &digest)
     try digestAXProbeContent(attempts: "SELECT id FROM ax_probe_attempts WHERE ts>=? AND ts<?",
       values: selectionValues(range), into: &digest)
     if let (call, bytes) = try journal.read(), call.range.start < range.end && call.range.end > range.start {
@@ -87,11 +108,13 @@ extension ActivityStorage {
     var facts: Data?
   }
 
-  private func deletionCallState() throws -> [DeletionCallState] {
+  private func deletionCallState(ids: Set<Int>? = nil) throws -> [DeletionCallState] {
+    if let ids, ids.isEmpty { return [] }
+    let selection = ids.map { " WHERE id IN (" + $0.sorted().map(String.init).joined(separator: ",") + ")" } ?? ""
     var calls: [DeletionCallState] = []
     try connection.rows("""
       SELECT id,ts,start_ts,end_ts,model,input_tokens,cached_tokens,output_tokens,succeeded,table_facts,pending,attempt_id
-      FROM model_calls ORDER BY id
+      FROM model_calls\(selection) ORDER BY id
       """) { row in
       // Preserve the bytes and SQLite types of every billing field and outer boundary.
       let billing = (Array(Int32(0)..<9) + [10, 11]).map { column -> Data in
@@ -156,7 +179,7 @@ extension ActivityStorage {
     try validateDeletion(range, allowOver24Hours: allowOver24Hours)
     return try locked {
       let journal = try ModelCallJournal(database: url)
-      return try journal.withLock { try connection.transaction(write: false) { try snapshotDeletion(range, journal: journal) } }
+      return try journal.withAccountingLock { try connection.transaction(write: false) { try snapshotDeletion(range, journal: journal) } }
     }
   }
   @discardableResult public func deleteRecords(
@@ -165,8 +188,8 @@ extension ActivityStorage {
     try validateDeletion(range, allowOver24Hours: allowOver24Hours)
     return try locked {
       let journal = try ModelCallJournal(database: url)
-      return try journal.withLock {
-        let result = try connection.transaction {
+      return try journal.withMaintenanceLock(connection) {
+        let result = try connection.transaction(collectionMaintenance: true) {
           try requireAXProbeReviewClosed()
           let preview = try snapshotDeletion(range, journal: journal)
           guard preview.confirmation == confirmation else { throw StorageError("Records changed; request a new preview") }
@@ -176,6 +199,13 @@ extension ActivityStorage {
             [.integer(range.start), .integer(range.end)]
           ) {
             identities.append((try $0.text("source"), try $0.text("source_id")))
+          }
+          let childIDs = try collectionPayloadIDs(in: range)
+          var observationIDs: [CollectionErasureTarget] = []
+          if let (_, selection) = deletionSelections.first(where: { $0.0 == "sample_observations" }) {
+            try connection.namedRows("SELECT id,observation_id,ts FROM sample_observations WHERE (\(selection)) AND ts>=?1 AND ts<?2", selectionValues(range)) {
+              observationIDs.append(CollectionErasureTarget(row: try $0.int("id"), identity: try $0.optionalText("observation_id"), time: try $0.int("ts")))
+            }
           }
           let originalCalls = try deletionCallState()
           var removedCalls = Set<Int>()
@@ -187,23 +217,58 @@ extension ActivityStorage {
           for index in expectedCalls.indices {
             expectedCalls[index].facts = try factsAfterDeletion(expectedCalls[index].facts, in: range)
           }
+          // Capture billing/fact expectations before the early progress marker.
+          // Only changed call identities are reread at each batch boundary.
+          var expectedAtCheckpoint = Dictionary(uniqueKeysWithValues: originalCalls.map { ($0.id, $0) })
+          var changedCalls = Set<Int>()
+          connection.collectionPrivacyChangeObserver = { table, row in
+            if table == "model_calls" { changedCalls.insert(Int(row)) }
+          }
+          let progressID = try connection.integer("SELECT COALESCE(MAX(rowid),0)+1 FROM forgotten_ranges")
+          let markerValues: [SQLValue] = [.integer(progressID)] + selectionValues(range)
+          try connection.run("INSERT INTO forgotten_ranges(rowid,start_ts,end_ts) VALUES(?,?,?)", markerValues)
+          connection.collectionPrivacyProgressProof = { [unowned self] in
+            try self.requireAXProbeReviewClosed()
+            guard try self.connection.integer("SELECT EXISTS(SELECT 1 FROM forgotten_ranges WHERE rowid=? AND start_ts=? AND end_ts=?)", markerValues) == 1 else { throw StorageError("Deletion progress marker missing") }
+            let expected = changedCalls.compactMap { expectedAtCheckpoint[$0] }.sorted { $0.id < $1.id }
+            guard try self.deletionCallState(ids: changedCalls) == expected else { throw StorageError("Deletion batch changed call facts or billing") }
+            changedCalls.removeAll(keepingCapacity: true)
+          }
+          try connection.enableCollectionMaintenanceBatches()
+          try preserveCollectionMetadata(in: range)
+          let scrubbedObservations = try scrubObservationMetadata(in: range)
           for (source, id) in identities {
             try connection.run("INSERT OR IGNORE INTO forgotten_sources VALUES(?,?)", [.key(source), .key(id)])
           }
           for (table, selection) in deletionSelections {
-            try connection.run("DELETE FROM \(table) WHERE \(selection)", selectionValues(range))
+            try connection.collectionWrite("DELETE FROM \(table) WHERE \(selection)", selectionValues(range))
+            if table == "model_calls" {
+              changedCalls.formUnion(removedCalls)
+              expectedAtCheckpoint = Dictionary(uniqueKeysWithValues: retainedCalls.map { ($0.id, $0) })
+            }
           }
+          let expectedSampleMetadata = try scrubSampleMetadata(ids: sampleMetadataTargets(in: range))
+          let expectedMetadata = try scrubScreenMetadata(ids: screenMetadataTargets(in: range))
           for (original, expected) in zip(retainedCalls, expectedCalls) where original.facts != expected.facts {
             let value = expected.facts.map { SQLValue.maskedText(String(decoding: $0, as: UTF8.self)) } ?? .null
             try connection.run("UPDATE model_calls SET table_facts=? WHERE id=?", [value, .integer(expected.id)])
+            expectedAtCheckpoint[expected.id] = expected; changedCalls.insert(expected.id)
           }
-          try connection.run("INSERT INTO forgotten_ranges VALUES(?,?)", selectionValues(range))
+          // Refresh the progress marker after the last planned writes. Removing
+          // and reinserting this operation's row is atomic within the final batch.
+          try connection.run("DELETE FROM forgotten_ranges WHERE rowid=?", [.integer(progressID)])
+          try connection.run("INSERT INTO forgotten_ranges(rowid,start_ts,end_ts) VALUES(?,?,?)", markerValues)
+          try verifyScrubbedObservationMetadata(count: scrubbedObservations)
+          try verifySampleMetadataErasure(expectedSampleMetadata)
+          try verifyScreenMetadataErasure(expectedMetadata)
+          try verifyCollectionErasure(ids: childIDs, observationIDs: observationIDs)
           try verifyDeletionEndState(in: range, identities: identities, expectedCalls: expectedCalls)
           return preview
         }
         if let (call, _) = try journal.read(), call.range.start < range.end && call.range.end > range.start {
           try journal.clear()
         }
+        try eraseStagedCollection(in: range)
         // A reader snapshot can delay truncation; deletion itself has already committed.
         return DeletionResult(preview: result, walTruncated: connection.truncateWAL())
       }

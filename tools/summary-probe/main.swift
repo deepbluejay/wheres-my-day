@@ -11,7 +11,7 @@ final class MeasurementStorage: SummaryStorage {
   let output: ActivityStorage
   init(source: ActivityStorage, output: ActivityStorage) { self.source = source; self.output = output }
   func samples(in range: TimeRange) throws -> [TimeSample] { try source.samples(in: range) }
-  func evidence(in range: TimeRange) throws -> [EvidenceText] { try source.evidence(in: range) }
+  func evidence(in range: TimeRange) throws -> [EvidenceText] { try source.novelEvidence(in: range) }
   func recentScreenLineKeys(at now: Int) throws -> [String: Int] { try source.recentScreenLineKeys(at: now) }
   func forgottenRanges(in range: TimeRange) throws -> [TimeRange] { try source.forgottenRanges(in: range) }
   func intervals(in range: TimeRange) throws -> [NamedInterval] { try output.intervals(in: range) }
@@ -134,7 +134,7 @@ if command == "dry-run" {
   let storage = try ActivityStorage(url: root.appendingPathComponent("converted.sqlite"), appDataDirectory: root, databaseScope: .directory(root))
   let result = try storage.convertOldDatabase(at: URL(fileURLWithPath: arguments[1]))
   let range = TimeRange(start, end)
-  let samples = try storage.samples(in: range), evidence = try storage.evidence(in: range)
+  let samples = try storage.samples(in: range), evidence = try storage.novelEvidence(in: range)
   let planningSamples = try storage.samples(in: TimeRange(start - RestPolicy.inputAgeSeconds - 1, end))
   let plan = SummaryPolicy.plan(samples: planningSamples, forgotten: try storage.forgottenRanges(in: range),
     through: end, requested: true, from: start)
@@ -152,7 +152,7 @@ if command == "dry-run" {
   let output = try ActivityStorage(url: root.appendingPathComponent("sample-1.sqlite"), appDataDirectory: root, databaseScope: .directory(root))
   let range = TimeRange(start, end)
   let samples = try source.samples(in: TimeRange(start - RestPolicy.inputAgeSeconds - 1, end))
-  let evidence = try source.evidence(in: range)
+  let evidence = try source.novelEvidence(in: range)
   let plan = SummaryPolicy.plan(samples: samples, forgotten: try source.forgottenRanges(in: range),
     through: end, requested: true, from: start)
   let rows = try plan.pieces.filter { !$0.isPrivate }.map { piece -> [String: Any] in
@@ -218,7 +218,7 @@ if command == "dry-run" {
   guard arguments.count == 3, let start = Int(arguments[1]), let end = Int(arguments[2]) else { fatalError("Bounds required") }
   let source = try ActivityStorage(url: root.appendingPathComponent("converted.sqlite"), appDataDirectory: root, databaseScope: .directory(root))
   let range = TimeRange(start, end)
-  let samples = try source.samples(in: range), evidence = try source.evidence(in: range)
+  let samples = try source.samples(in: range), evidence = try source.novelEvidence(in: range)
   let minutes = stride(from: start, to: end, by: 60).map { minute -> [String: Any] in
     ["ts": minute, "table": format.table(range: TimeRange(minute, minute + 60), samples: samples, evidence: evidence)]
   }

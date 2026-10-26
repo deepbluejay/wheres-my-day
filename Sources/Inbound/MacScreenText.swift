@@ -6,12 +6,27 @@ import Vision
 
 // Injection keeps native preflight/screenshot/recognition ordering testable without captures or windows.
 protocol AXProbeScreenDriver {
+  func capturePayload(window: WindowIdentity, permitted: @escaping (CaptureCheck) -> Bool,
+    requested: (() -> Void)?, returned: (() -> Void)?, completion: @escaping (SourceReading<ScreenTextPayload>) -> Void)
   func preflight() -> Bool
   func capture(window: WindowIdentity, permitted: @escaping (CaptureCheck) -> Bool,
     requested: (() -> Void)?, returned: (() -> Void)?, completion: @escaping (SourceReading<String>) -> Void)
 }
+extension AXProbeScreenDriver {
+  func capturePayload(window: WindowIdentity, permitted: @escaping (CaptureCheck) -> Bool,
+    requested: (() -> Void)?, returned: (() -> Void)?, completion: @escaping (SourceReading<ScreenTextPayload>) -> Void) {
+    capture(window: window, permitted: permitted, requested: requested, returned: returned) {
+      completion($0.map { ScreenTextPayload(text: $0) })
+    }
+  }
+}
 private struct NativeAXProbeScreenDriver: AXProbeScreenDriver {
   func preflight() -> Bool { CGPreflightScreenCaptureAccess() }
+  func capturePayload(window: WindowIdentity, permitted: @escaping (CaptureCheck) -> Bool,
+    requested: (() -> Void)?, returned: (() -> Void)?, completion: @escaping (SourceReading<ScreenTextPayload>) -> Void) {
+    Task { completion(await MacScreenTextSource.recognizePayload(window: window, permitted: permitted,
+      requested: requested, returned: returned)) }
+  }
   func capture(window: WindowIdentity, permitted: @escaping (CaptureCheck) -> Bool,
     requested: (() -> Void)?, returned: (() -> Void)?, completion: @escaping (SourceReading<String>) -> Void) {
     Task {
@@ -21,8 +36,8 @@ private struct NativeAXProbeScreenDriver: AXProbeScreenDriver {
 }
 
 // Calls may arrive on any thread; ScreenTextFlights owns completions. Recognition runs asynchronously.
-public final class MacScreenTextSource: AXProbeScreenSource {
-  private let flights = ScreenTextFlights()
+public final class MacScreenTextSource: StructuredAXProbeScreenSource {
+  private let flights = ScreenCaptureFlights<ScreenTextPayload>()
   private let probeWorker: MacAXProbeWorker
   private let driver: AXProbeScreenDriver
   private let uptime: () -> Double
@@ -42,31 +57,58 @@ public final class MacScreenTextSource: AXProbeScreenSource {
     permitted: @escaping (CaptureCheck) -> Bool, probePermitted: @escaping () -> Bool,
     probeBegin: @escaping () -> AXProbeStatus?, probeEnd: @escaping (AXProbeResult) -> Void, probeWatchdogOCR: @escaping (AXProbePair, Bool) -> Void, probeRefused: @escaping () -> Void,
     probeCompletion: @escaping (AXProbePair) -> Void, completion: @escaping (SourceReading<String>) -> Void) {
+    captureStructured(window: window, probe: probe, permitted: permitted, probePermitted: probePermitted,
+      probeBegin: probeBegin, probeEnd: probeEnd, probeWatchdogOCR: probeWatchdogOCR,
+      probeRefused: probeRefused, probeCompletion: probeCompletion) { completion($0.map(\.text)) }
+  }
+  public func captureStructured(window: WindowIdentity, probe: AXProbeRequest,
+    permitted: @escaping (CaptureCheck) -> Bool, probePermitted: @escaping () -> Bool,
+    probeBegin: @escaping () -> AXProbeStatus?, probeEnd: @escaping (AXProbeResult) -> Void,
+    probeWatchdogOCR: @escaping (AXProbePair, Bool) -> Void, probeRefused: @escaping () -> Void,
+    probeCompletion: @escaping (AXProbePair) -> Void, completion: @escaping (SourceReading<ScreenTextPayload>) -> Void) {
     let pair = AXProbePairFlight(request: probe, permitted: probePermitted, ordinaryPermitted: { permitted(.beforeDelivery) },
       watchdogOCR: probeWatchdogOCR, refused: probeRefused, completion: probeCompletion)
     pair.axStarted()
     probeWorker.acquire(probe, permitted: probePermitted, begin: probeBegin, end: probeEnd,
       failurePolicyInStore: true, completion: pair.axFinished)
-    capture(window: window, permitted: permitted, requested: pair.imageRequested, returned: pair.imageReturned) { reading in
+    capturePayload(window: window, permitted: permitted, requested: pair.imageRequested, returned: pair.imageReturned) { reading in
       completion(reading)
-      pair.ocrFinished(reading)
+      pair.ocrFinished(reading.map(\.text))
     }
+  }
+  public func capturePayload(window: WindowIdentity, permitted: @escaping (CaptureCheck) -> Bool,
+    completion: @escaping (SourceReading<ScreenTextPayload>) -> Void) {
+    capturePayload(window: window, permitted: permitted, requested: nil, returned: nil, completion: completion)
   }
   private func capture(window: WindowIdentity, permitted: @escaping (CaptureCheck) -> Bool,
     requested: (() -> Void)?, returned: (() -> Void)?, completion: @escaping (SourceReading<String>) -> Void) {
-    guard driver.preflight() else {
-      completion(.absent(.permission))
-      return
+    capturePayload(window: window, permitted: permitted, requested: requested, returned: returned) {
+      completion($0.map(\.text))
     }
+  }
+  private func capturePayload(window: WindowIdentity, permitted: @escaping (CaptureCheck) -> Bool,
+    requested: (() -> Void)?, returned: (() -> Void)?, completion: @escaping (SourceReading<ScreenTextPayload>) -> Void) {
+    guard driver.preflight() else { completion(.absent(.permission)); return }
     guard let token = flights.begin(at: uptime(), completion: completion) else { return }
-    driver.capture(window: window, permitted: permitted, requested: requested, returned: returned) { result in
+    driver.capturePayload(window: window, permitted: permitted, requested: requested, returned: returned) { result in
       self.flights.finish(token, result: result)
     }
+  }
+  @discardableResult static func configure(_ request: VNRecognizeTextRequest, supported: [String]?) -> OCRRecognitionPlan {
+    let plan = OCRRecognitionPlan(supported: supported)
+    request.recognitionLanguages = plan.languages
+    request.automaticallyDetectsLanguage = plan.automaticallyDetectsLanguage
+    request.usesLanguageCorrection = plan.usesLanguageCorrection
+    return plan
   }
   fileprivate static func recognize(window: WindowIdentity, permitted: (CaptureCheck) -> Bool,
     requested: (() -> Void)?, returned: (() -> Void)?) async
     -> SourceReading<String>
   {
+    await recognizePayload(window: window, permitted: permitted, requested: requested, returned: returned).map(\.text)
+  }
+  fileprivate static func recognizePayload(window: WindowIdentity, permitted: (CaptureCheck) -> Bool,
+    requested: (() -> Void)?, returned: (() -> Void)?) async -> SourceReading<ScreenTextPayload> {
     guard CGPreflightScreenCaptureAccess() else { return .absent(.permission) }
     guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
       let target = content.windows.first(where: {
@@ -92,28 +134,21 @@ public final class MacScreenTextSource: AXProbeScreenSource {
     returned?()
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
-    request.recognitionLanguages = recognitionLanguages(request)
-    request.usesLanguageCorrection = true
+    let plan = configure(request, supported: try? request.supportedRecognitionLanguages())
     guard (try? VNImageRequestHandler(cgImage: image).perform([request])) != nil else {
       return .absent(.failed)
     }
-    let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
-    return .value(text)
-  }
-  private static func recognitionLanguages(_ request: VNRecognizeTextRequest) -> [String] {
-    let supported = (try? request.supportedRecognitionLanguages()) ?? ["en-US"]
-    var picked: [String] = []
-    for preferred in Locale.preferredLanguages {
-      let base = String(preferred.prefix { $0 != "-" && $0 != "_" })
-      if let match = supported.first(where: { $0 == preferred || $0 == base || $0.hasPrefix(base + "-") }),
-        !picked.contains(match)
-      {
-        picked.append(match)
-      }
+    let observations = (request.results ?? []).map { result in
+      let box = result.boundingBox
+      return OCRObservation(bounds: OCRBounds(x: box.origin.x, y: box.origin.y,
+        width: box.width, height: box.height),
+        candidates: result.topCandidates(10).map { OCRCandidate(text: $0.string, confidence: $0.confidence) })
     }
-    if supported.contains("en-US"), !picked.contains("en-US") { picked.append("en-US") }
-    return picked
+    let text = observations.compactMap { $0.candidates.first?.text }.joined(separator: "\n")
+    return .value(ScreenTextPayload(text: text, observations: observations,
+      languages: plan.languages, languageStatus: plan.status, engine: "Vision", window: window))
   }
+
 }
 
 // Holds only the two in-flight arms; does not delay or modify OCR delivery.

@@ -419,7 +419,7 @@ public final class SummaryService {
       }
       health.carriedPieces += piece.carriedCount
       let observedRange = TimeRange(piece.range.start, min(piece.range.end, end))
-      let samples = try storage.samples(in: observedRange), evidence = try storage.evidence(in: observedRange)
+      let samples = try storage.samples(in: observedRange), evidence = try storage.novelEvidence(in: observedRange)
       let activeMinutes = samples.filter { $0.hasInput || $0.keepingAwake }.map { $0.ts - (($0.ts % 60 + 60) % 60) }
       let tableFacts = SummaryCallFacts(through: end, sentRanges: piece.sentRanges,
         endsAtRest: piece.endsAtRest, activeMinutes: activeMinutes)

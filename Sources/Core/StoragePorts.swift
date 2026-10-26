@@ -6,7 +6,7 @@ public struct TimeRange: Equatable, Codable {
   public init(_ start: Int, _ end: Int) { self.start = start; self.end = end }
 }
 
-public struct TimeSample: Equatable {
+public struct TimeSample: Equatable, Codable {
   public var ts: Int
   public var bundleID: String
   public var app: String
@@ -18,13 +18,29 @@ public struct TimeSample: Equatable {
   public var moved: Bool
   public var synthetic: Int
   public var keepingAwake: Bool
+  public var document: String?
+  public var browserAddress: String?
+  public var inputEvents: [InputObservation]
+  public var observedAt: Double?
+  public var windowIdentity: WindowIdentity?
+  public var processID: Int32?
+  public var isBrowser: Bool?
+  public var isBrowserKnown: Bool?
+  public var accessibility: String?
   public var excluded: Bool
+  public var applicationPrivacyIdentity: String? = nil
   public init(ts: Int, bundleID: String = "", app: String = "", window: String = "", documentKey: String = "",
     keys: Int = 0, clicks: Int = 0, scrolls: Int = 0, moved: Bool = false,
-    synthetic: Int = 0, keepingAwake: Bool = false, excluded: Bool = false) {
+    synthetic: Int = 0, keepingAwake: Bool = false, excluded: Bool = false,
+    document: String? = nil, browserAddress: String? = nil, inputEvents: [InputObservation] = [], observedAt: Double? = nil, windowIdentity: WindowIdentity? = nil,
+    processID: Int32? = nil, isBrowser: Bool? = nil, isBrowserKnown: Bool? = nil, accessibility: String? = nil) {
     self.ts = ts; self.bundleID = bundleID; self.app = app; self.window = window; self.documentKey = documentKey
     self.keys = keys; self.clicks = clicks; self.scrolls = scrolls; self.moved = moved
     self.synthetic = synthetic; self.keepingAwake = keepingAwake; self.excluded = excluded
+    self.document = document; self.browserAddress = browserAddress; self.inputEvents = inputEvents; self.observedAt = observedAt
+    self.windowIdentity = windowIdentity; self.processID = processID; self.isBrowser = isBrowser
+    self.isBrowserKnown = isBrowserKnown; self.accessibility = accessibility
+    self.applicationPrivacyIdentity = ApplicationPrivacyIdentity.originalDigest(bundleID)
   }
   public var hasInput: Bool { keys > 0 || clicks > 0 || scrolls > 0 || moved }
 }
@@ -71,6 +87,7 @@ public enum ScreenLineKey {
   }
 }
 
+/// Compatibility novelty selection. Persistence keeps every masked line.
 public struct ScreenLines: Equatable {
   public var lines: [String]
   public var keys: Set<String>
@@ -82,7 +99,7 @@ public struct ScreenLines: Equatable {
     var keys = Set<String>()
     for line in maskedText.components(separatedBy: .newlines) where !line.isEmpty {
       let key = ScreenLineKey.fromMaskedLine(line)
-      // All fully masked lines share one key, so a second masked line within the hour is not stored.
+      // Fully masked lines share one key in this compatibility view; raw captures retain every occurrence.
       if seen.insert(key).inserted { lines.append(line); keys.insert(key) }
     }
     return ScreenLines(lines: lines, keys: keys)
@@ -100,6 +117,7 @@ public struct ScreenCaptureResult: Equatable {
 
 public struct StorageSettings: Equatable {
   public var excludedApps: [String]
+  public var excludedAppPrivacyIdentities: [String: Set<String>] = [:]
   public var subscriptionConnected: Bool
   public var connectionGeneration = ""
   public var recordingEnabled: Bool
@@ -192,6 +210,10 @@ public struct DeletionPreview: Equatable {
 }
 
 public protocol SampleWriter { @discardableResult func appendSamples(_ samples: [TimeSample]) throws -> AppendResult }
+public protocol ObservationWriter {
+  @discardableResult func appendAccountingSamples(_ samples: [TimeSample]) throws -> AppendResult
+  @discardableResult func appendObservations(_ observations: [ActivityObservation]) throws -> AppendResult
+}
 public protocol SampleReader { func samples(in range: TimeRange) throws -> [TimeSample] }
 public protocol IntervalWriter {
   @discardableResult func appendIntervals(_ intervals: [NamedInterval]) throws -> AppendResult
@@ -202,13 +224,14 @@ public protocol EvidenceWriter {
   @discardableResult func appendEvidence(_ evidence: [EvidenceText]) throws -> AppendResult
 }
 public protocol ScreenCaptureWriter {
-  /// Masks one whole capture before selecting lines. The recorder keeps and expires last-hour keys in memory.
+  /// Appends the entire masked capture. knownKeys is retained for source compatibility and does not suppress storage.
   @discardableResult func appendScreenCapture(
     text: String, at time: Int, source: String, documentKey: String, project: String, knownKeys: Set<String>
   ) throws -> ScreenCaptureResult
 }
 public protocol EvidenceReader {
   func evidence(in range: TimeRange) throws -> [EvidenceText]
+  func novelEvidence(in range: TimeRange) throws -> [EvidenceText]
   /// Latest evidence timestamp per shape, strictly newer than now minus one hour and no later than now.
   func recentScreenLineKeys(at now: Int) throws -> [String: Int]
 }
@@ -263,4 +286,8 @@ public struct AppendResult: Equatable {
   public var stored: Int
   public var refused: Int
   public init(stored: Int = 0, refused: Int = 0) { self.stored = stored; self.refused = refused }
+}
+
+extension EvidenceReader {
+  public func novelEvidence(in range: TimeRange) throws -> [EvidenceText] { try evidence(in: range) }
 }

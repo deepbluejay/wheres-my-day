@@ -49,6 +49,6 @@ public struct RecorderControl {
     let running = try isRunning(paths: paths)
     let store = try ActivityStorage(url: paths.database, appDataDirectory: paths.appData, readOnly: true, databaseScope: paths.databaseScope)
     let settings = try store.settings()
-    return AppCommandResult(0, "running=\(running ? 1 : 0) recording=\(settings.recordingEnabled ? 1 : 0) paused_until=\(settings.pausedUntil ?? 0) forgotten_ranges=\(try store.deletionsSoFar()) summary_unavailable_until=\(Int(try store.summaryUnavailableUntil() ?? 0)) \(try store.axProbeStatus())")
+    return AppCommandResult(0, "running=\(running ? 1 : 0) recording=\(settings.recordingEnabled ? 1 : 0) paused_until=\(settings.pausedUntil ?? 0) forgotten_ranges=\(try store.deletionsSoFar()) summary_unavailable_until=\(Int(try store.summaryUnavailableUntil() ?? 0)) \(try store.axProbeStatus()) \(try store.collectionStatus())")
   }
 }

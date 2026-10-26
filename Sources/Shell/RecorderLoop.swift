@@ -12,12 +12,30 @@ public struct RecorderHealth {
   public var policyRefusedCaptures = 0
   public var captureFailures = 0
   public var inputUnavailableTicks = 0
+  public var nativeEventLimitRefusals = 0
   public var settingsUnreadableCaptures = 0
   public var supersededCaptures = 0
   public var droppedSeconds = 0
   public var droppedCaptures = 0
   public var pendingSeconds = 0
   public var pendingCaptures = 0
+  public var pendingObservations = 0
+  public var droppedObservations = 0
+  public var storedOCRBytes = 0
+  public var storedObservations = 0
+  public var collectionBackpressure = 0
+  public var collectionFailures = 0
+  public var collectionBusyRetries = 0
+  public var collectionAcquisitionFailures = 0
+  public var collectionStagingFailures = 0
+  public var collectionPersistenceFailures = 0
+  public var collectionInitializationFailures = 0
+  public var collectionRetainedBytes = 0
+  public var collectionDiagnosticPublicationFailures = 0
+  public var collectionLastDropSource: String?
+  public var collectionLastDropTime: Int?
+  public var collectionLastAdmissionLosses: [CollectionPipeline.AdmissionLoss] = []
+  public var collectionEvictedLossReceipts = 0
   public var maintenanceFailures: [String: Int] = [:]
   public var storageBusy = false
   public var storageFailed = false
@@ -33,15 +51,30 @@ public struct RecorderMaintenanceTask {
 }
 
 private struct PendingCapture {
+  var bytes: Int {
+    (payload?.estimatedBytes ?? text.utf8.count) + source.utf8.count + documentKey.utf8.count + 128
+  }
   var attemptID: String? = nil
   var probeRunID: String? = nil
   var time: Int
   var source: String
   var documentKey: String
   var text: String
+  var payload: ScreenTextPayload? = nil
+  var metadataObservedAt: Double? = nil
+
+  // A received large payload gets its own slot; it cannot consume the ordinary budget.
+  static func fits(_ capture: PendingCapture, beside waiting: [PendingCapture]) -> Bool {
+    if capture.bytes > CollectionPipeline.queueBytes {
+      return !waiting.contains { $0.bytes > CollectionPipeline.queueBytes }
+    }
+    let ordinary = waiting.filter { $0.bytes <= CollectionPipeline.queueBytes }
+    return ordinary.count < RecorderTiming.pendingCaptures
+      && ordinary.reduce(0, { $0 + $1.bytes }) + capture.bytes <= CollectionPipeline.queueBytes
+  }
 }
 
-/// Health and keyMemory reads, start, stop, tick and flush are main-thread only.
+/// Health reads, start, stop, tick and flush are main-thread only.
 /// Sources must support completion-thread privacy reads.
 public final class RecorderLoop {
   // Immutable dependencies may be used by completion threads.
@@ -60,7 +93,6 @@ public final class RecorderLoop {
   private var activeCaptures = Set<UUID>()
   private var timer: Timer?
   private var schedule = CaptureSchedule()
-  public private(set) var keyMemory = ScreenKeyMemory()
   public private(set) var health = RecorderHealth()
   public var recordingDisabled: (() -> Void)?
   public var pendingCaptureCompletions: Int {
@@ -69,6 +101,9 @@ public final class RecorderLoop {
     return inbox.count
   }
   private var pending: [TimeSample] = []
+  private var pendingObservations: [ActivityObservation] = []
+  private let collectionPipeline: CollectionPipeline?
+  private var collectionAttempts = Set<String>()
   private var captures: [PendingCapture] = []
   private var probeInbox: [(AXProbeReceipt, Int)] = []
   private var probePending: [(AXProbeReceipt, Int)] = []
@@ -82,8 +117,8 @@ public final class RecorderLoop {
   private var lastPersonInput: Int?
   private var carriedInput = InputCounts()
   private var retryingWrites = false
-  private var needsRebuild = true
   private var deletionCount: Int?
+  private var metadataPolicy: String?
   // inboxLock owns completions, losses, and maintenance running/results.
   private let inboxLock = NSLock()
   private var inbox: [(PendingCapture, SourceAbsence?)] = []
@@ -110,6 +145,7 @@ public final class RecorderLoop {
     self.screen = screen
     self.maintenanceStorage = maintenanceStorage
     self.storage = storage
+    self.collectionPipeline = (storage as? ActivityStorage)?.makeCollectionPipeline(ownBundleID: ownBundleID)
     if let probePipeline { self.probePipeline = probePipeline }
     else if let store = storage as? AXProbeStore {
       self.probePipeline = AXProbePipeline(write: { pair, evidence, now, gate in
@@ -148,11 +184,26 @@ public final class RecorderLoop {
     probePending.removeAll(); probeEvidence.removeAll(); probePipeline?.discardWaiting()
     timer?.invalidate()
     timer = nil
-    flush()
-    drainInbox()
+    // A barrier can free a large slot for the next owned completion. Keep handing
+    // off while ownership advances, and never enqueue after the final barrier.
+    var remaining = pending.count + pendingObservations.count + captures.count + pendingCaptureCompletions
+    repeat {
+      let before = remaining
+      flush()
+      collectionPipeline?.drain()
+      drainCollectionResults()
+      remaining = pending.count + pendingObservations.count + captures.count + pendingCaptureCompletions
+      if remaining == 0 || remaining >= before { break }
+    } while true
     health.droppedSeconds += pending.count
     health.droppedCaptures += captures.count
+    inboxLock.lock()
+    health.droppedCaptures += inbox.count
+    inbox.removeAll()
+    inboxLock.unlock()
     pending.removeAll()
+    health.droppedObservations += pendingObservations.count
+    pendingObservations.removeAll()
     captures.removeAll()
     updatePendingHealth()
   }
@@ -174,6 +225,7 @@ public final class RecorderLoop {
     _ = input.takeInput()
     lastPersonInput = nil; carriedInput = InputCounts()
     lastTickUptime = nil; lastTickActive = false
+    if value { front.invalidateMetadata() }
     if value { (screen as? AXProbeScreenSource)?.invalidateProbe(); flush() }
   }
   public func requestMaintenance() {
@@ -205,8 +257,15 @@ public final class RecorderLoop {
   }
   private func settingsAndApplyDeletions() throws -> StorageSettings {
     let settings = try storage.settings()
+    let policy = "\(settings.recordingEnabled)|\(settings.pausedUntil ?? 0)|" + settings.persistedAppExclusions.map(\.identity).sorted().joined(separator: "|")
+    if let metadataPolicy, metadataPolicy != policy { front.invalidateMetadata() }
+    metadataPolicy = policy
     let count = try storage.deletionsSoFar()
     if let deletionCount, count != deletionCount {
+      front.invalidateMetadata()
+      collectionPipeline?.clearDiagnosticIdentities()
+      health.collectionLastDropSource = nil; health.collectionLastDropTime = nil
+      health.collectionLastAdmissionLosses.removeAll()
       health.droppedCaptures += captures.count
       captures.removeAll()
       inboxLock.lock()
@@ -215,18 +274,19 @@ public final class RecorderLoop {
       inboxLock.unlock()
       (screen as? AXProbeScreenSource)?.invalidateProbe()
       probePending.removeAll(); probeEvidence.removeAll(); probePipeline?.discardWaiting()
-      keyMemory = ScreenKeyMemory()
-      needsRebuild = true
     }
     deletionCount = count
     return settings
   }
   private func drainInbox() {
+    drainCollectionResults()
     inboxLock.lock()
-    let completed = inbox
+    // Leave the next oversized completion in its owned slot until the main-thread slot is free.
+    let holdsOversized = captures.contains { $0.bytes > CollectionPipeline.queueBytes }
+    let completed = inbox.filter { !holdsOversized || $0.0.bytes <= CollectionPipeline.queueBytes }
     let probes = probeInbox
     probeInbox.removeAll()
-    inbox.removeAll()
+    inbox.removeAll { !holdsOversized || $0.0.bytes <= CollectionPipeline.queueBytes }
     health.droppedCaptures += inboxDropped
     inboxDropped = 0
     for name in maintenanceResults { health.maintenanceFailures[name, default: 0] += 1 }
@@ -255,7 +315,7 @@ public final class RecorderLoop {
         continue
       }
       health.absentSources.removeValue(forKey: .screen)
-      if captures.count < RecorderTiming.pendingCaptures {
+      if PendingCapture.fits(capture, beside: captures) {
         captures.append(capture)
       } else {
         health.droppedCaptures += 1
@@ -266,14 +326,6 @@ public final class RecorderLoop {
         }
       }
     }
-  }
-  private func rebuildKeys(at now: Int) {
-    keyMemory.expire(at: now)
-    guard needsRebuild else { return }
-    do {
-      keyMemory.rebuild(try storage.recentScreenLineKeys(at: now), at: now)
-      needsRebuild = false
-    } catch { failure(error) }
   }
   private func allowedApplication(_ application: FrontObservation, settings: StorageSettings) -> Bool {
     !RecorderPolicy.excluded(application, settings: settings)
@@ -292,6 +344,7 @@ public final class RecorderLoop {
     let inputReading = input.takeInput()
     if case .absent = inputReading { health.inputUnavailableTicks += 1 }
     let counts = read(inputReading, source: .input) ?? InputCounts()
+    health.nativeEventLimitRefusals += counts.detailedEventOverflow
     if !suspended { observeInputActivity(counts, at: now) }
     health.storageBusy = false
     health.storageFailed = false
@@ -321,10 +374,16 @@ public final class RecorderLoop {
     }
     lastTickActive = activeTick; lastTickUptime = tickUptime
     drainInbox()
-    rebuildKeys(at: now)
     if !suspended && RecorderPolicy.recording(settings, at: now) {
+      for details in front.takeCompletedDetails() {
+        let observed = details.observedAt.map { Int($0) } ?? now
+        let sample = RecorderPolicy.sample(at: observed, front: details, input: InputCounts(),
+          keepingAwake: false, settings: settings, ownBundleID: ownBundleID)
+        enqueueObservation(ActivityObservation(sample: sample))
+      }
       observeSecond(at: now, counts: counts, settings: settings)
     } else {
+      front.invalidateMetadata()
       carriedInput = InputCounts()
     }
     lastTick = now
@@ -349,10 +408,11 @@ public final class RecorderLoop {
         source: .displayAssertions) ?? false
     var rowInput = counts
     rowInput.add(carriedInput)
+    let row = RecorderPolicy.sample(
+      at: now, front: focus, input: rowInput,
+      keepingAwake: watching, settings: settings, ownBundleID: ownBundleID)
+    queueObservation(row, counts: counts)
     if RestPolicy.recordsSecond(at: now, lastInput: lastPersonInput, keepingAwake: watching) {
-      let row = RecorderPolicy.sample(
-        at: now, front: focus, input: rowInput,
-        keepingAwake: watching, settings: settings, ownBundleID: ownBundleID)
       queueSecond(row, counts: counts)
     }
     let ordinaryOpportunity = RecorderPolicy.captureAllowed(
@@ -366,6 +426,47 @@ public final class RecorderLoop {
       requestCapture(window: window, focus: focus, counts: counts, settings: settings, at: now)
     }
   }
+  private func enqueueObservation(_ observation: ActivityObservation) {
+    if let collectionPipeline { collectionPipeline.offer(observation) }
+    else if pendingObservations.count < RecorderTiming.pendingSeconds { pendingObservations.append(observation) }
+    else { health.droppedObservations += 1 }
+  }
+  private func drainCollectionResults() {
+    guard let collectionPipeline else { return }
+    let (results, errors, pressure, busy) = collectionPipeline.takeCompletions()
+    health.collectionFailures += errors; health.collectionBackpressure += pressure
+    let diagnostics = collectionPipeline.takeDiagnostics()
+    health.collectionAcquisitionFailures += diagnostics.acquisitionFailures
+    health.collectionStagingFailures += diagnostics.stagingFailures
+    health.collectionPersistenceFailures += diagnostics.persistenceFailures
+    health.collectionInitializationFailures += diagnostics.initializationFailures
+    health.collectionRetainedBytes = diagnostics.retainedBytes
+    health.collectionDiagnosticPublicationFailures += diagnostics.diagnosticPublicationFailures
+    health.collectionEvictedLossReceipts += diagnostics.evictedLossReceipts
+    if !diagnostics.losses.isEmpty { health.collectionLastAdmissionLosses = diagnostics.losses }
+    health.droppedObservations += diagnostics.droppedObservations
+    health.droppedCaptures += diagnostics.droppedCaptures
+    if let time = diagnostics.lastDropTime {
+      health.collectionLastDropTime = time; health.collectionLastDropSource = diagnostics.lastDropSource
+    }
+    health.collectionBusyRetries += busy
+    if busy > 0 { health.storageBusy = true }
+    if errors > 0 { health.storageFailed = true }
+    for result in results {
+      health.storedObservations += result.storedObservations
+      if let screen = result.screen {
+        if let id = result.attemptID { collectionAttempts.remove(id); probeEvidence[id] = (screen.evidenceID, result.time, nil) }
+        health.refusedCaptures += screen.append.refused
+        if screen.append.stored > 0 { health.storedOCRBytes += result.ocrBytes }
+      }
+    }
+  }
+  private func queueObservation(_ row: TimeSample, counts: InputCounts) {
+    var observation = row
+    observation.keys = counts.keys; observation.clicks = counts.clicks; observation.scrolls = counts.scrolls
+    observation.moved = counts.moved; observation.synthetic = counts.synthetic; observation.inputEvents = counts.events
+    enqueueObservation(ActivityObservation(sample: observation))
+  }
   private func queueSecond(_ row: TimeSample, counts: InputCounts) {
     if lastQueuedSecond == row.ts {
       if let index = pending.lastIndex(where: { $0.ts == row.ts }) {
@@ -374,6 +475,7 @@ public final class RecorderLoop {
         pending[index].scrolls += counts.scrolls
         pending[index].moved = pending[index].moved || counts.moved
         pending[index].synthetic += counts.synthetic
+        pending[index].inputEvents += counts.events
       } else {
         carriedInput.add(counts)
       }
@@ -446,7 +548,7 @@ public final class RecorderLoop {
         self?.permitted(
           check, window: window, documentKey: documentKey, counts: counts, at: now, generation: generation, reviewEpoch: reviewEpoch, state: state) ?? false
       }
-    let completion: (SourceReading<String>) -> Void = { [weak self] result in
+    let completion: (SourceReading<ScreenTextPayload>) -> Void = { [weak self] result in
       guard let self else { return }
       var absence: SourceAbsence?
       if case .absent(let reason) = result { absence = reason }
@@ -471,9 +573,11 @@ public final class RecorderLoop {
           : absence == .superseded ? .supersededOCR : absence == .busy ? .busyOCR : nil
         if let event { try? store.countAXProbeEvent(runID: request.run.id, event: event, amount: 1) }
       }
+      var payload = result.value ?? ScreenTextPayload(text: "")
+      payload.document = focus.document; payload.browserAddress = focus.browserAddress; payload.window = window
       let capture = PendingCapture(
         attemptID: request?.attemptID, probeRunID: request?.run.id, time: now, source: focus.bundleID,
-        documentKey: documentKey, text: result.value ?? "")
+        documentKey: documentKey, text: payload.text, payload: payload, metadataObservedAt: focus.observedAt)
       var capacityDrop = false
       self.inboxLock.lock()
       self.activeCaptures.remove(captureID)
@@ -483,7 +587,7 @@ public final class RecorderLoop {
       if self.suspended || self.captureGeneration != generation {
         // A delivery from before sleep/lock/stop cannot enter a later recording session.
         self.inboxDropped += 1
-      } else if self.inbox.count < RecorderTiming.pendingCaptures {
+      } else if PendingCapture.fits(capture, beside: self.inbox.map { $0.0 }) {
         self.inbox.append((capture, absence))
       } else {
         self.inboxDropped += 1; capacityDrop = true
@@ -502,7 +606,7 @@ public final class RecorderLoop {
           at: now, generation: generation, reviewEpoch: reviewEpoch, state: state, probe: true)
           && ((try? store.axProbeAllowed(request, at: self.clock.now)) == true)
       }
-      source.captureText(window: window, probe: request, permitted: gate, probePermitted: probeGate,
+      source.capturePayload(window: window, probe: request, permitted: gate, probePermitted: probeGate,
         probeBegin: { [weak self] in
           guard let self else { return .cancelled }
           do { return try store.beginAXProbe(request, at: self.clock.now) } catch { return .cancelled }
@@ -526,26 +630,34 @@ public final class RecorderLoop {
           self.inboxLock.unlock()
           if !accepted { self.probePipeline?.discard(receipt) }
         }, completion: completion)
-    } else { screen.captureText(window: window, permitted: gate, completion: completion) }
+    } else { screen.capturePayload(window: window, permitted: gate, completion: completion) }
   }
   public func flush() {
     do {
       _ = try settingsAndApplyDeletions()
       drainInbox()
-      rebuildKeys(at: clock.now)
       flush(at: clock.now)
+      collectionPipeline?.drain()
+      drainCollectionResults()
+      flush(at: clock.now, retryCollection: false)
     } catch {
       failure(error)
       flushSamples(at: clock.now)
     }
     updatePendingHealth()
   }
-  private func flushSamples(at now: Int) {
+  private func flushSamples(at now: Int, retryCollection: Bool = true) {
     lastFlush = now
     retryingWrites = false
+    if retryCollection { collectionPipeline?.retry() }
+    drainCollectionResults()
+    if !pendingObservations.isEmpty {
+      do { let batch = Array(pendingObservations.prefix(32)); let result = try storage.appendObservations(batch); health.storedObservations += result.stored; pendingObservations.removeFirst(batch.count) }
+      catch { failure(error); retryingWrites = true }
+    }
     guard !pending.isEmpty else { return }
     do {
-      let result = try storage.appendSamples(pending)
+      let result = try storage.appendAccountingSamples(pending)
       health.storedSeconds += result.stored
       health.refusedSeconds += result.refused
       pending.removeAll()
@@ -554,10 +666,9 @@ public final class RecorderLoop {
       retryingWrites = true
     }
   }
-  private func flush(at now: Int) {
-    keyMemory.expire(at: now)
-    flushSamples(at: now)
-    guard !needsRebuild else { return }
+  private func flush(at now: Int, retryCollection: Bool = true) {
+    flushSamples(at: now, retryCollection: retryCollection)
+    var deferred: [PendingCapture] = []
     while let capture = captures.first {
       do {
         let current = try storage.settings()
@@ -567,18 +678,25 @@ public final class RecorderLoop {
           captures.removeFirst()
           continue
         }
-        let result: ScreenCaptureResult
-        if let run = capture.probeRunID, let attempt = capture.attemptID,
-          let linked = storage as? AXProbeLinkedScreenWriter {
-          result = try linked.appendScreenCapture(text: capture.text, at: capture.time, source: capture.source,
-            documentKey: capture.documentKey, project: "", knownKeys: keyMemory.keys,
-            probe: AXProbeLink(runID: run, attemptID: attempt))
-        } else {
-          result = try storage.appendScreenCapture(text: capture.text, at: capture.time,
-            source: capture.source, documentKey: capture.documentKey, project: "", knownKeys: keyMemory.keys)
+        if let collectionPipeline {
+          let admission = collectionPipeline.handoff(payload: capture.payload ?? ScreenTextPayload(text: capture.text), at: capture.time,
+            source: capture.source, documentKey: capture.documentKey, runID: capture.probeRunID, attemptID: capture.attemptID, metadataObservedAt: capture.metadataObservedAt)
+          if admission == .deferred {
+            deferred.append(capture); captures.removeFirst(); continue
+          }
+          if let id = capture.attemptID {
+            if admission == .accepted { collectionAttempts.insert(id) }
+            else { probeEvidence[id] = (nil, capture.time, .dropped) }
+          }
+          captures.removeFirst(); continue
         }
+        let probe = capture.probeRunID.flatMap { run in
+          capture.attemptID.map { AXProbeLink(runID: run, attemptID: $0) }
+        }
+        let result = try storage.appendScreenCapture(payload: capture.payload ?? ScreenTextPayload(text: capture.text),
+          at: capture.time, source: capture.source, documentKey: capture.documentKey, project: "", probe: probe)
         if let id = capture.attemptID { probeEvidence[id] = (result.evidenceID, capture.time, nil) }
-        keyMemory.add(result.addedKeys, storedAt: capture.time, now: now)
+        if result.append.stored > 0 { health.storedOCRBytes += Redaction.apply(capture.text).text.utf8.count }
         health.refusedCaptures += result.append.refused
         captures.removeFirst()
       } catch {
@@ -587,12 +705,13 @@ public final class RecorderLoop {
         break
       }
     }
+    captures.insert(contentsOf: deferred, at: 0)
     if storage is AXProbeStore {
       var waiting: [(AXProbeReceipt, Int)] = []
       for (pair, generation) in probePending {
         guard generation == captureGeneration, !suspended, !stopped else { probePipeline?.discard(pair); continue }
         guard let linkage = probeEvidence[pair.attemptID] else {
-          if captures.contains(where: { $0.attemptID == pair.attemptID }), now >= pair.time, now - pair.time <= 60 {
+          if (captures.contains(where: { $0.attemptID == pair.attemptID }) || collectionAttempts.contains(pair.attemptID)), now >= pair.time, now - pair.time <= 60 {
             waiting.append((pair, generation))
           } else { probePipeline?.commit(pair, evidenceID: nil, at: now) }
           continue
@@ -606,6 +725,7 @@ public final class RecorderLoop {
   }
   private func updatePendingHealth() {
     health.pendingSeconds = pending.count
+    health.pendingObservations = pendingObservations.count
     health.pendingCaptures = captures.count
   }
   private func scheduleMaintenance(at now: Int, force: Bool = false) {

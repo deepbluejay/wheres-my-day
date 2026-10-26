@@ -54,8 +54,11 @@ extension ActivityStorage {
     var expectedPairs = ["initialized":"1", "old-files-imported":"1", "recording":recordingIntent ? "1":"0",
       "retention.screen":String(expected.screenRetentionDays), "retention.prompt":String(expected.promptRetentionDays)]
     if let pause = expected.pausedUntil { expectedPairs["pause"] = String(pause) }
-    for (index, app) in Set(expected.excludedApps.map { $0.lowercased() }).sorted().enumerated() {
-      expectedPairs["app.\(index)"] = Redaction.applyKnownSecrets(app).text
+    for (index, app) in expected.persistedAppExclusions.enumerated() {
+      expectedPairs["app.\(index)"] = app.label
+      if app.identity != ApplicationPrivacyIdentity.digest(app.label) {
+        expectedPairs["appIdentity.\(index)"] = app.identity
+      }
     }
     for (key, value) in expected.general { expectedPairs["general." + key] = Redaction.apply(value).text }
     func hex(_ text: String) -> String { text.utf8.map { String(format:"%02X",$0) }.joined() }

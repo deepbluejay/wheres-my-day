@@ -52,7 +52,7 @@ final class StorageTests: XCTestCase {
       tableFacts: SummaryCallFacts(through: 1200, sentRanges: [TimeRange(600, 900)], endsAtRest: false))
     try adopted.appendModelCall(call)
     XCTAssertEqual(try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder)).modelCalls(in: all), [old, call])
-    XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), 9)
+    XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), 14)
   }
   func testDeletingObservationsErasesMinuteFactsButKeepsBillingAndOtherMinutes() throws {
     let store = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))
@@ -101,11 +101,15 @@ final class StorageTests: XCTestCase {
   func testRoundTripsAndMaskingEveryTextPath() throws {
     let store = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))
     let sample = TimeSample(ts: 61, bundleID: secret, app: secret, window: secret, documentKey: secret,
-      keys: 3, clicks: 2, scrolls: 1, moved: true, synthetic: 4, keepingAwake: true)
+      keys: 3, clicks: 2, scrolls: 1, moved: true, synthetic: 4, keepingAwake: true,
+      document: secret, browserAddress: secret)
     try store.appendSamples([sample])
     let got = try XCTUnwrap(store.samples(in: all).first)
     for text in [got.bundleID, got.app, got.window, got.documentKey] { XCTAssertEqual(text, "[secret]") }
     XCTAssertEqual(got.keys, 3); XCTAssertEqual(got.synthetic, 4); XCTAssertTrue(got.keepingAwake); XCTAssertTrue(got.hasInput)
+    let observed = try XCTUnwrap(store.observations(in: all).first).sample
+    XCTAssertEqual(observed.document, "[secret]")
+    XCTAssertEqual(observed.browserAddress, "[secret]")
     try store.appendIntervals([NamedInterval(range: TimeRange(60, 120), name: secret, description: secret, kind: .work, project: secret)])
     let interval = try XCTUnwrap(store.intervals(in: all).first)
     XCTAssertEqual(interval.kind, .work)
@@ -174,7 +178,7 @@ final class StorageTests: XCTestCase {
     try store.appendModelCall(ModelCall(ts: 500, range: TimeRange(0, 120), model: "invented", succeeded: false))
     let range = TimeRange(60, 120), preview = try store.previewDeletion(in: range)
     XCTAssertEqual(preview.intervalExtent, TimeRange(0, 120))
-    XCTAssertEqual(preview.counts, ["samples": 1, "evidence": 1, "intervals": 1, "ax_probe_attempts": 0, "ax_probe_review": 0])
+    XCTAssertEqual(preview.counts, ["samples": 1, "sample_observations": 1, "evidence": 1, "intervals": 1, "ax_probe_attempts": 0, "ax_probe_review": 0, "input_batches": 0, "collection_legacy_times": 0, "staged_collection": 0, "screen_metadata": 0, "sample_metadata": 0, "collection_metadata": 0])
     XCTAssertEqual(try store.samples(in: all).count, 2)
     try store.appendFixtureEvidence([EvidenceText(ts: 62, kind: .screen, source: "invented", text: "changed snapshot")])
     XCTAssertThrowsError(try store.deleteRecords(in: range, confirmation: preview.confirmation))

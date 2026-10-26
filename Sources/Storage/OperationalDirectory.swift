@@ -90,6 +90,15 @@ public final class OperationalDirectory {
     }
     return file
   }
+  /// Durable counters must distinguish an absent leaf from unreadable/corrupt state.
+  func readStrict(_ leaf: String) throws -> Data? {
+    guard let descriptor = try open(leaf, flags: O_RDONLY, missingAllowed: true) else { return nil }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    defer { try? handle.close() }
+    let bytes = try handle.read(upToCount: 1024 * 1024 + 1) ?? Data()
+    guard bytes.count <= 1024 * 1024 else { throw StorageError("Operational state is damaged") }
+    return bytes
+  }
   public func read(_ leaf: String) throws -> Data? {
     // Unreadable settings keep their defaults, including a directory at the expected leaf.
     try validate(leaf, allowUnreadableDirectory: true)

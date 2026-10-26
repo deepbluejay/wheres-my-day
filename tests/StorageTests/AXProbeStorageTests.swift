@@ -41,7 +41,7 @@ extension StorageTests {
     try store.connection.rows("SELECT payload FROM ax_probe_attempts") { legacy = SQLiteConnection.text($0, 0) }
     XCTAssertNil(try JSONDecoder().decode(AXProbePair.self, from: Data(legacy.utf8)).isBrowser)
     let reopened = try ActivityStorage(url: url, appDataDirectory: folder, databaseScope: .directory(folder))
-    XCTAssertEqual(try reopened.connection.integer("PRAGMA user_version"), 9)
+    XCTAssertEqual(try reopened.connection.integer("PRAGMA user_version"), 14)
     XCTAssertEqual(try reopened.settings().axProbeRun, run)
     var next = original; next.attemptID = UUID().uuidString; next.time += 15; next.isBrowser = true
     XCTAssertTrue(try reopened.appendAXProbe(next, evidenceID: nil, at: next.time))
@@ -60,7 +60,7 @@ extension StorageTests {
     try store.connection.run("ALTER TABLE ax_probe_runs DROP COLUMN probe_version")
     try store.connection.run("PRAGMA user_version=7")
     let upgraded = try ActivityStorage(url: url, appDataDirectory: folder, databaseScope: .directory(folder))
-    XCTAssertEqual(try upgraded.connection.integer("PRAGMA user_version"), 9)
+    XCTAssertEqual(try upgraded.connection.integer("PRAGMA user_version"), 14)
     XCTAssertEqual(try upgraded.connection.integer("SELECT probe_version FROM ax_probe_runs WHERE id=?", [.key(run.id)]), 1)
     XCTAssertEqual(try upgraded.connection.integer("SELECT expiry_ts FROM ax_probe_runs"), 96400)
     try upgraded.connection.rows("SELECT payload FROM ax_probe_attempts") { XCTAssertEqual(SQLiteConnection.text($0, 0), before) }
@@ -137,7 +137,7 @@ extension StorageTests {
     old = nil
     for _ in 0..<2 {
       let store = try ActivityStorage(url: url, appDataDirectory: folder, databaseScope: .directory(folder))
-      XCTAssertEqual(try store.connection.integer("PRAGMA user_version"), 9)
+      XCTAssertEqual(try store.connection.integer("PRAGMA user_version"), 14)
       for table in tables { XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM \(table)"), 0) }
       XCTAssertEqual(try store.samples(in: all), samples); XCTAssertEqual(try store.evidence(in: all), evidence)
       XCTAssertEqual(try store.intervals(in: all), intervals); XCTAssertEqual(try store.modelCalls(in: all), calls)
@@ -173,7 +173,7 @@ extension StorageTests {
     XCTAssertEqual(try upgraded.connection.integer("SELECT count(*) FROM sqlite_master WHERE name='ax_probe_review_no_enable' AND instr(sql,'general.axProbe.reviewLease')>0"), 1)
     try upgraded.connection.transaction {
       let reopened = try ActivityStorage(url: url, appDataDirectory: folder, busyMilliseconds: 50, databaseScope: .directory(folder))
-      XCTAssertEqual(try reopened.connection.integer("PRAGMA user_version"), 9)
+      XCTAssertEqual(try reopened.connection.integer("PRAGMA user_version"), 14)
     }
   }
 
@@ -196,7 +196,7 @@ extension StorageTests {
     XCTAssertFalse(try store.appendAXProbe(original, evidenceID: evidence.evidenceID, at: original.time))
     let repeated = try store.appendScreenCapture(text: original.ocr, at: original.time + 1,
       source: "invented.editor", knownKeys: evidence.addedKeys)
-    XCTAssertNil(repeated.evidenceID)
+    XCTAssertNotNil(repeated.evidenceID)
     for status in ["empty", "failed"] {
       var pair = original; pair.attemptID = UUID().uuidString; pair.ocr = ""; pair.ocrStatus = status
       XCTAssertTrue(try store.appendAXProbe(pair, evidenceID: nil, at: original.time))
@@ -207,7 +207,7 @@ extension StorageTests {
     XCTAssertFalse(payload.contains("inventedCredential"))
     XCTAssertFalse(payload.contains("invented.editor"))
     XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM ax_probe_chunks WHERE instr(text,'[secret]')>0"), 1)
-    XCTAssertEqual(try store.evidence(in: all).count, 1)
+    XCTAssertEqual(try store.evidence(in: all).count, 2)
   }
   func testProbeNormalForgetCoversUnlinkedRowsAndRejectsInflightResurrection() throws {
     let (store, _, pair) = try probeFixture()
@@ -418,7 +418,7 @@ extension StorageTests {
     try store.connection.run("ALTER TABLE ax_probe_runs DROP COLUMN cancel_ts")
     try store.connection.run("PRAGMA user_version=6")
     let upgraded = try ActivityStorage(url: url, appDataDirectory: folder, databaseScope: .directory(folder))
-    XCTAssertEqual(try upgraded.connection.integer("PRAGMA user_version"), 9)
+    XCTAssertEqual(try upgraded.connection.integer("PRAGMA user_version"), 14)
     XCTAssertTrue(try upgraded.axProbeStatus().contains("ax_probe_reason=off ax_probe_cancelled_at=unknown"))
     try upgraded.connection.transaction {
       _ = try ActivityStorage(url: url, appDataDirectory: folder, busyMilliseconds: 0, databaseScope: .directory(folder))

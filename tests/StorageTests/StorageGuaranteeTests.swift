@@ -27,7 +27,7 @@ extension StorageTests {
     let store = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))
     try store.appendFixtureEvidence([EvidenceText(ts: 61, kind: .screen, source: "invented", text: "first")])
     let preview = try store.previewDeletion(in: TimeRange(60, 120))
-    try store.connection.run("UPDATE evidence SET text='later'")
+    try store.connection.run("UPDATE collection_blobs SET content='later' WHERE hash IN (SELECT text_hash FROM screen_payloads)")
     XCTAssertEqual(try store.previewDeletion(in: preview.range).counts, preview.counts)
     XCTAssertThrowsError(try store.deleteRecords(in: preview.range, confirmation: preview.confirmation))
     XCTAssertEqual(try store.evidence(in: all).first?.text, "later")
@@ -87,8 +87,8 @@ extension StorageTests {
   func testDeletionFailureRollsBackEverything() throws {
     let store = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))
     let settings = StorageSettings(recordingEnabled: false)
-    try store.saveSettings(settings)
     try store.appendSamples([TimeSample(ts: 61)])
+    try store.saveSettings(settings)
     try store.appendFixtureEvidence([EvidenceText(ts: 61, kind: .prompt, source: "invented", sourceID: "one", text: "kept")])
     try store.appendIntervals([NamedInterval(range: TimeRange(60, 120), kind: .work)])
     try store.connection.run("""

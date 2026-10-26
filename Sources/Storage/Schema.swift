@@ -1,7 +1,7 @@
 import Foundation
 
 extension SQLiteConnection {
-  static let schemaVersion = 9
+  static let schemaVersion = 14
   static let applicationID = 0x4150_5342
 
   /// Later schema changes go in this function, before the version is advanced.
@@ -21,9 +21,10 @@ extension SQLiteConnection {
           AND instr(sql,'general.axProbe.reviewLease')=0
         UNION ALL SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM pragma_table_info('ax_probe_pid') WHERE name='failure_policy'))
         """) > 0 { try transaction { try createAXProbeSchema() } }
+      collectionAccountingEnabled = true
       return
     }
-    try transaction {
+    try transaction(collectionMaintenance: true, collectionFullBaseline: true) {
       for sql in [
         """
         CREATE TABLE IF NOT EXISTS samples (
@@ -99,6 +100,21 @@ extension SQLiteConnection {
           source TEXT NOT NULL, layer TEXT NOT NULL, last_row INTEGER NOT NULL, PRIMARY KEY(source,layer))
         """,
       ] { try run(sql) }
+      try createCollectionSchema()
+      // Identity is a fact of the new record. Historical rows stay NULL, with
+      // no attempt to recover identity from another record or a masked label.
+      for table in ["samples", "evidence", "input_batches", "collection_metadata"] {
+        if try integer("SELECT count(*) FROM pragma_table_info('\(table)') WHERE name='application_identity'") == 0 {
+          try run("ALTER TABLE \(table) ADD COLUMN application_identity TEXT")
+        }
+      }
+      if version < 11 { try backfillCollectionNovelty() }
+      // Replace only the accounting definitions affected by additive columns.
+      // Their historical numeric rows are retained without recomputation.
+      for table in ["evidence", "input_batches", "collection_metadata"] {
+        try run("DROP TRIGGER IF EXISTS ingestion_\(table)")
+      }
+      try createCollectionAccounting()
       try createAXProbeSchema()
       var hasTableFacts = false
       try rows("PRAGMA table_info(model_calls)") { row in
@@ -123,5 +139,6 @@ extension SQLiteConnection {
       try run("PRAGMA application_id=\(Self.applicationID)")
       try run("PRAGMA user_version=\(Self.schemaVersion)")
     }
+    collectionAccountingEnabled = true
   }
 }

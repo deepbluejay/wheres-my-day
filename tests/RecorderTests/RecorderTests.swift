@@ -37,6 +37,10 @@ final class FakeSources: InputCountSource, FrontWindowSource, SecureInputSource,
     drains += 1
     return input
   }
+  var completedDetails: [FrontObservation] = []
+  func takeCompletedDetails() -> [FrontObservation] {
+    let result = completedDetails; completedDetails.removeAll(); return result
+  }
   var detailReads = 0
   var detailWork: (() -> Void)?
   var awakePIDs: [Int32] = []
@@ -87,7 +91,7 @@ final class RecorderTests: XCTestCase {
   private var recorder: RecorderLoop!
   private let all = TimeRange(0, 1_000_000)
   override func setUpWithError() throws {
-    folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    folder = URL(fileURLWithPath: ProcessInfo.processInfo.environment["ACTIVITYPROBE_TEST_ROOT"] ?? NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     clock = FakeClock()
     sources = FakeSources()
@@ -97,6 +101,11 @@ final class RecorderTests: XCTestCase {
     recorder = makeRecorder()
   }
   override func tearDownWithError() throws {
+    recorder?.stop()
+    if let recorder {
+      let drained = expectation(description: "Owned recorder work drained")
+      recorder.finishMaintenance { drained.fulfill() }; wait(for: [drained], timeout: 60)
+    }
     recorder = nil
     storage = nil
     try FileManager.default.removeItem(at: folder)
@@ -138,7 +147,18 @@ final class RecorderTests: XCTestCase {
       }
       second(ts)
     }
-    recorder.flush()
+    // Each writer drain acknowledges at most 32 records. Observe durable backlog
+    // completion rather than treating one barrier as global exhaustion.
+    let deadline = Date(timeIntervalSinceNow: 60)
+    repeat {
+      recorder.flush()
+      if try storage.collectionFiles().isEmpty && recorder.pendingCaptureCompletions == 0
+        && recorder.health.pendingCaptures == 0 && recorder.health.collectionRetainedBytes == 0 { break }
+    } while Date() < deadline
+    let recoveryHealth = "ready=\(try storage.collectionFiles().count) pending=\(recorder.health.pendingCaptures) inbox=\(recorder.pendingCaptureCompletions) retained=\(recorder.health.collectionRetainedBytes) captureDrops=\(recorder.health.droppedCaptures) observationDrops=\(recorder.health.droppedObservations) failures=\(recorder.health.collectionFailures)"
+    XCTAssertTrue(try storage.collectionFiles().isEmpty, recoveryHealth)
+    XCTAssertEqual(recorder.health.droppedCaptures, 0, recoveryHealth)
+    XCTAssertEqual(recorder.health.droppedObservations, 0, recoveryHealth)
     let rows = try storage.samples(in: TimeRange(10000, 13600))
     XCTAssertEqual(rows.count, 3600)
     XCTAssertEqual(rows.map(\.ts), Array(10000..<13600))
@@ -155,36 +175,36 @@ final class RecorderTests: XCTestCase {
       }
     }
     XCTAssertEqual(sources.requested.map { $0.0 }, expectedCaptureTimes)
-    XCTAssertEqual(try storage.evidence(in: all).count, 1)
+    XCTAssertEqual(try storage.evidence(in: all).count, expectedCaptureTimes.count, recoveryHealth)
     XCTAssertEqual(recorder.health.refusedSeconds, 0)
   }
-  func testRepeatedCapturesExactExpiryAndRestartRebuild() throws {
+  func testRepeatedCapturesStoredAndNoveltyReplayedAfterRestart() throws {
     sources.screen = .value("Invented first 1\nInvented first 2\nInvented second")
     second(10000)
     finish(10001)
-    XCTAssertEqual(try storage.evidence(in: all).first?.text, "Invented first 1\nInvented second")
-    XCTAssertEqual(recorder.keyMemory.storedAt, ["Inventedfirst": 10000, "Inventedsecond": 10000])
+    XCTAssertEqual(try storage.evidence(in: all).first?.text, "Invented first 1\nInvented first 2\nInvented second")
+    XCTAssertEqual(try storage.recentScreenLineKeys(at: clock.now), ["Inventedfirst": 10000, "Inventedsecond": 10000])
     sources.input = .value(InputCounts(keys: 1))
     sources.screen = .value("Invented first 9\nInvented third")
     second(10015)
     finish(10016)
-    XCTAssertEqual(try storage.evidence(in: all).map(\.text), ["Invented first 1\nInvented second", "Invented third"])
-    let beforeRestart = recorder.keyMemory
+    XCTAssertEqual(try storage.evidence(in: all).map(\.text), ["Invented first 1\nInvented first 2\nInvented second", "Invented first 9\nInvented third"])
+    let beforeRestart = try storage.recentScreenLineKeys(at: clock.now)
     recorder = makeRecorder()
     second(10017)
-    XCTAssertEqual(recorder.keyMemory, beforeRestart)
+    XCTAssertEqual(try storage.recentScreenLineKeys(at: clock.now), beforeRestart)
     second(13599)
-    XCTAssertTrue(recorder.keyMemory.keys.contains("Inventedfirst"))
+    XCTAssertTrue(Set(try storage.recentScreenLineKeys(at: clock.now).keys).contains("Inventedfirst"))
     second(13600)
-    XCTAssertFalse(recorder.keyMemory.keys.contains("Inventedfirst"))
-    XCTAssertEqual(recorder.keyMemory.storedAt, ["Inventedthird": 10015])
+    XCTAssertFalse(Set(try storage.recentScreenLineKeys(at: clock.now).keys).contains("Inventedfirst"))
+    XCTAssertEqual(try storage.recentScreenLineKeys(at: clock.now), ["Inventedthird": 10015])
     sources.input = .value(InputCounts(keys: 1))
     sources.screen = .value("Invented first 7")
     second(13600)
     finish(13601)
     XCTAssertEqual(try storage.evidence(in: all).last?.text, "Invented first 7")
   }
-  func testDeletionRebuildRemovesDeletedKeysAndDiscardsInFlightCapture() throws {
+  func testDeletionUpdatesNoveltyViewAndRefusesInFlightCapture() throws {
     second(10000)
     finish(10001)
     sources.input = .value(InputCounts(keys: 1))
@@ -194,16 +214,17 @@ final class RecorderTests: XCTestCase {
     let preview = try storage.previewDeletion(in: TimeRange(10000, 10010))
     try storage.deleteRecords(in: preview.range, confirmation: preview.confirmation)
     second(10022)
-    XCTAssertEqual(recorder.keyMemory.storedAt, ["Inventedretainedline": 10020])
+    XCTAssertEqual(try storage.recentScreenLineKeys(at: clock.now), ["Inventedretainedline": 10020])
     sources.deferCompletion = true
     sources.input = .value(InputCounts(keys: 1))
     sources.screen = .value("Invented delayed line")
     second(10040)
+    recorder.flush()
     let next = try storage.previewDeletion(in: TimeRange(10040, 10041))
     try storage.deleteRecords(in: next.range, confirmation: next.confirmation)
     sources.delayed?()
     finish(10041)
-    XCTAssertFalse(recorder.keyMemory.keys.contains("Inventeddelayedline"))
+    XCTAssertFalse(Set(try storage.recentScreenLineKeys(at: clock.now).keys).contains("Inventeddelayedline"))
     XCTAssertEqual(try storage.evidence(in: all).map(\.text), ["Invented retained line"])
   }
   func testWholeSecretBlockNeverReachesDatabaseOrWAL() throws {
@@ -352,7 +373,7 @@ final class RecorderTests: XCTestCase {
     finish(10016)
     XCTAssertEqual(try storage.evidence(in: all), [])
   }
-  func testCaptureInboxAndRetryQueueOverflowIsCounted() throws {
+  func testCaptureRetriesUseDurableStagingWithoutCountQuotaLoss() throws {
     let blocker = try SQLiteConnection(url: database, scope: .directory(folder), busyMilliseconds: 0)
     try blocker.run("BEGIN IMMEDIATE")
     for offset in 0..<243 {
@@ -360,11 +381,13 @@ final class RecorderTests: XCTestCase {
       second(10000 + offset)
     }
     finish(10243)
-    XCTAssertEqual(recorder.health.pendingCaptures, 240)
-    XCTAssertEqual(recorder.health.droppedCaptures, 3)
+    XCTAssertEqual(recorder.health.pendingCaptures, 0)
+    XCTAssertEqual(recorder.health.droppedCaptures, 0)
+    XCTAssertGreaterThanOrEqual(try storage.collectionFiles().count, 243)
     try blocker.run("COMMIT")
-    recorder.flush()
-    XCTAssertEqual(try storage.evidence(in: all).count, 1)
+    for _ in 0..<16 { recorder.flush() }
+    XCTAssertEqual(try storage.evidence(in: all).count, 243)
+    XCTAssertEqual(try storage.collectionFiles().count, 0)
     XCTAssertEqual(recorder.health.pendingCaptures, 0)
   }
   func testBoundedBusyBacklogCountsNewestOverflow() throws {

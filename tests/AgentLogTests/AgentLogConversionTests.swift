@@ -24,7 +24,7 @@ extension AgentLogTests {
   }
   func oldCursor(_ db: SQLiteConnection, file: AgentLogFile, thread: String = "invented-session") throws {
     try db.run("INSERT INTO log_cursors VALUES(?,?,?,?,?,200)", [
-      .text(file.path), .integer(file.device), .integer(file.inode), .integer(file.size),
+      .key(file.path), .integer(file.device), .integer(file.inode), .integer(file.size),
       .text(try json(["folder": "/invented/project", "threadID": thread])),
     ])
   }

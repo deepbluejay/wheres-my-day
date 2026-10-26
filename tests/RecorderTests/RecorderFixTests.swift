@@ -30,6 +30,23 @@ final class FailingRecorderStorage: RecorderStorage {
     try callback?()
     return result
   }
+  func appendAccountingSamples(_ samples: [TimeSample]) throws -> AppendResult {
+    if failSamples { throw StorageError.busy("invented contention") }
+    let result = try base.appendAccountingSamples(samples)
+    let callback = afterSamples; afterSamples = nil; try callback?()
+    return result
+  }
+  func appendObservations(_ observations: [ActivityObservation]) throws -> AppendResult {
+    if failSamples { throw StorageError.busy("invented contention") }
+    return try base.appendObservations(observations)
+  }
+  func appendScreenCapture(payload: ScreenTextPayload, at time: Int, source: String,
+    documentKey: String, project: String, probe: AXProbeLink?) throws -> ScreenCaptureResult {
+    screenWrites += 1
+    if failScreens { throw StorageError.busy("invented contention") }
+    return try base.appendScreenCapture(payload: payload, at: time, source: source,
+      documentKey: documentKey, project: project, probe: probe)
+  }
   func evidence(in range: TimeRange) throws -> [EvidenceText] { try base.evidence(in: range) }
   func recentScreenLineKeys(at now: Int) throws -> [String: Int] {
     if failRebuild { throw StorageError.busy("invented contention") }
@@ -62,7 +79,7 @@ final class RecorderFixTests: XCTestCase {
   var loop: RecorderLoop!
   let all = TimeRange(0, 1_000_000)
   override func setUpWithError() throws {
-    folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    folder = URL(fileURLWithPath: ProcessInfo.processInfo.environment["ACTIVITYPROBE_TEST_ROOT"] ?? NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     base = try ActivityStorage(url: folder.appendingPathComponent("invented.sqlite"), appDataDirectory: folder, busyMilliseconds: 0, databaseScope: .directory(folder))
     try base.saveSettings(StorageSettings(excludedApps: []))
@@ -73,6 +90,11 @@ final class RecorderFixTests: XCTestCase {
     loop = makeLoop()
   }
   override func tearDownWithError() throws {
+    loop?.stop()
+    if let loop {
+      let drained = expectation(description: "Owned recorder work drained")
+      loop.finishMaintenance { drained.fulfill() }; wait(for: [drained], timeout: 60)
+    }
     loop = nil
     store = nil
     base = nil
@@ -174,13 +196,13 @@ final class RecorderFixTests: XCTestCase {
     XCTAssertEqual(loop.health.pendingSeconds, 0)
     XCTAssertEqual(sources.requested.map { $0.0 }, [10000, 9990])
   }
-  func testNoCaptureWriteBeforeKeyRebuildSucceeds() throws {
+  func testCaptureWriteDoesNotRequireKeyRebuild() throws {
     store.failRebuild = true
     tick(10000)
     sources.input = .value(InputCounts())
     tick(10005)
-    XCTAssertEqual(store.screenWrites, 0)
-    XCTAssertEqual(loop.health.pendingCaptures, 1)
+    XCTAssertEqual(store.screenWrites, 1)
+    XCTAssertEqual(loop.health.pendingCaptures, 0)
     XCTAssertEqual(try base.samples(in: all).count, 2)
     store.failRebuild = false
     loop.flush()
@@ -210,12 +232,12 @@ final class RecorderFixTests: XCTestCase {
     loop.flush()
     XCTAssertEqual(try base.evidence(in: all), [])
     XCTAssertEqual(loop.health.refusedCaptures, 1)
-    XCTAssertEqual(loop.keyMemory.keys, [])
+    XCTAssertEqual(Set(try base.recentScreenLineKeys(at: clock.now).keys), [])
   }
   func testSecondConnectionDeletionDropsQueueAndRebuildsMemory() throws {
     tick(10000)
     loop.flush()
-    XCTAssertFalse(loop.keyMemory.keys.isEmpty)
+    XCTAssertFalse(Set(try base.recentScreenLineKeys(at: clock.now).keys).isEmpty)
     store.failScreens = true
     sources.screen = .value("Invented queued line")
     tick(10015)
@@ -227,7 +249,7 @@ final class RecorderFixTests: XCTestCase {
     tick(10016)
     loop.flush()
     XCTAssertEqual(loop.health.droppedCaptures, 1)
-    XCTAssertEqual(loop.keyMemory.keys, [])
+    XCTAssertEqual(Set(try base.recentScreenLineKeys(at: clock.now).keys), [])
     XCTAssertEqual(try base.evidence(in: all), [])
     sources.input = .value(InputCounts(keys: 1))
     sources.screen = .value("Invented screen line")
@@ -267,6 +289,8 @@ final class RecorderFixTests: XCTestCase {
   func testTwoTicksMergePendingOrCarryStoredInputIntoNextSecond() throws {
     sources.input = .value(InputCounts(keys: 1))
     tick(10000)
+    sources.front.title = "Invented second window"
+    sources.front.window = WindowIdentity(processID: 10, windowID: 21)
     sources.input = .value(InputCounts(keys: 7, clicks: 2, scrolls: 3, moved: true, synthetic: 4))
     tick(10000)
     sources.input = .value(InputCounts(keys: 2))
@@ -276,6 +300,10 @@ final class RecorderFixTests: XCTestCase {
     loop.flush()
     let rows = try base.samples(in: all)
     XCTAssertEqual(rows.map(\.keys), [1, 14])
+    let observations = try base.observations(in: all)
+    XCTAssertEqual(observations.count, 4)
+    XCTAssertEqual(observations.prefix(2).map(\.sample.window), ["Invented title", "Invented second window"])
+    XCTAssertEqual(observations.prefix(2).map(\.sample.windowIdentity?.windowID), [20, 21])
     XCTAssertEqual(rows[1].clicks, 2)
     XCTAssertEqual(rows[1].scrolls, 3)
     XCTAssertTrue(rows[1].moved)

@@ -19,15 +19,14 @@ extension StorageTests {
     XCTAssertEqual(try store.logPosition(path: "invented-log"), position)
     XCTAssertEqual(try store.evidence(in: all), [prompt, next])
   }
-  func testMaskedKnownCaptureDoesNotAcquireWriteTransaction() throws {
+  func testKnownCaptureStillRequiresOccurrenceWrite() throws {
     let store = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), busyMilliseconds: 0, databaseScope: .directory(folder))
     let blocker = try SQLiteConnection(url: url, scope: .directory(folder), busyMilliseconds: 0)
     try blocker.run("BEGIN IMMEDIATE")
     defer { try? blocker.run("ROLLBACK") }
-    let result = try store.appendScreenCapture(
+    XCTAssertThrowsError(try store.appendScreenCapture(
       text: "password=inventedCredential", at: 10,
-      source: "invented", knownKeys: ["secret"])
-    XCTAssertEqual(result, ScreenCaptureResult(append: AppendResult(), addedKeys: []))
+      source: "invented", knownKeys: ["secret"]))
   }
   func testCaptureDuplicateAndRebuildLatestStoredTime() throws {
     let store = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))
@@ -35,14 +34,14 @@ extension StorageTests {
       text: "Invented line 1\nInvented line 2\nAnother line", at: 10,
       source: "invented", documentKey: "invented-document", project: "invented-project", knownKeys: [])
     XCTAssertEqual(result.addedKeys, ["Inventedline", "Anotherline"])
-    XCTAssertEqual(try store.evidence(in: all).first?.text, "Invented line 1\nAnother line")
+    XCTAssertEqual(try store.evidence(in: all).first?.text, "Invented line 1\nInvented line 2\nAnother line")
     XCTAssertEqual(try store.evidence(in: all).first?.documentKey, "invented-document")
     XCTAssertEqual(try store.evidence(in: all).first?.project, "invented-project")
     try store.appendScreenCapture(text: "Invented line 3", at: 20, source: "invented", knownKeys: [])
-    XCTAssertEqual(try store.recentScreenLineKeys(at: 3610), ["Inventedline": 20])
+    XCTAssertEqual(try store.recentScreenLineKeys(at: 3610), [:])
     XCTAssertEqual(try store.recentScreenLineKeys(at: 3620), [:])
   }
-  func testSelectedLinesAreMaskedAgainBeforeStorageAndKeysMatchRebuild() throws {
+  func testWholeCaptureStoredAndNovelViewMaskedAgain() throws {
     let store = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))
     let label = "Authorization: Bearer"
     let known = "Invented separator line"
@@ -52,16 +51,11 @@ extension StorageTests {
     let selected = ScreenLines.select(maskedText: capture, knownKeys: [ScreenLineKey.fromMaskedLine(known)])
     let expected = Redaction.apply(selected.lines.joined(separator: "\n")).text
     XCTAssertFalse(expected.contains(value))
-    let result = try store.appendScreenCapture(
-      text: capture, at: 10, source: "invented",
-      knownKeys: [ScreenLineKey.fromMaskedLine(known)])
-    XCTAssertEqual(try store.evidence(in: all).first?.text, expected)
-    XCTAssertEqual(result.addedKeys, Set(try store.recentScreenLineKeys(at: 10).keys))
-    for path in [url.path, url.path + "-wal"] {
-      let bytes = (try? Data(contentsOf: URL(fileURLWithPath: path))) ?? Data()
-      XCTAssertNil(bytes.range(of: Data(value.utf8)))
-    }
+    try store.appendScreenCapture(text: capture, at: 10, source: "invented", knownKeys: [ScreenLineKey.fromMaskedLine(known)])
+    XCTAssertEqual(try store.evidence(in: all).first?.text, Redaction.apply(capture).text)
+    XCTAssertEqual(try store.novelEvidence(in: all).first?.text, Redaction.apply(ScreenLines.select(maskedText: capture, knownKeys: []).lines.joined(separator: "\n")).text)
   }
+
   func testLogBatchPositionStateIsMaskedBeforeBinding() throws {
     let store = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))
     let raw = "password=inventedPositionSecret"

@@ -19,7 +19,10 @@ public final class MacInputSource: InputCountSource {
   private var runLoopSource: CFRunLoopSource?
   private var runLoop: CFRunLoop?
   private let lock = NSLock()
+  public static let maximumEventsBetweenDrains = 65_536
   private var counts = InputCounts()
+  private var overflowTotal = 0
+  public var eventLimitRefusals: Int { lock.lock(); defer { lock.unlock() }; return overflowTotal }
   public init() {}
   /// Start on the main thread. Only the later process switch calls this. Preflight never asks for permission.
   public func start() -> Bool {
@@ -29,7 +32,8 @@ public final class MacInputSource: InputCountSource {
     guard tap == nil else { return true }
     guard CGPreflightListenEventAccess() else { return false }
     let events: [CGEventType] = [
-      .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+      .keyDown, .keyUp, .flagsChanged, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+      .leftMouseUp, .rightMouseUp, .otherMouseUp,
       .scrollWheel, .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
     ]
     let mask = events.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << CGEventMask($1.rawValue)) }
@@ -66,20 +70,36 @@ public final class MacInputSource: InputCountSource {
       if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
       return
     }
-    let kind: InputEventKind
-    switch type {
-    case .keyDown: kind = .key
-    case .leftMouseDown, .rightMouseDown, .otherMouseDown: kind = .click
-    case .scrollWheel: kind = .scroll
-    case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged: kind = .move
-    default: return
-    }
-    counts.observe(kind, programMade: event.getIntegerValueField(.eventSourceUnixProcessID) != 0)
+    guard let kind = Self.kind(for: type) else { return }
+    // Never acquire key values or typed text, including while Secure Input is enabled.
+    counts.observe(InputObservation(kind: kind, timestamp: Date().timeIntervalSince1970,
+      sourcePID: event.getIntegerValueField(.eventSourceUnixProcessID),
+      button: [.click, .mouseUp, .drag].contains(kind) ? Int(event.getIntegerValueField(.mouseEventButtonNumber)) : nil,
+      scrollX: kind == .scroll ? event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2) : nil,
+      scrollY: kind == .scroll ? event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1) : nil,
+      scrollZ: kind == .scroll ? event.getIntegerValueField(.scrollWheelEventPointDeltaAxis3) : nil,
+      continuousScroll: kind == .scroll ? event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0 : nil,
+      monotonicNanoseconds: event.timestamp), retainingAtMost: Self.maximumEventsBetweenDrains)
   }
+  public static func kind(for type: CGEventType) -> InputEventKind? {
+    switch type {
+    case .keyDown: return .key
+    case .keyUp: return .keyUp
+    case .flagsChanged: return .modifiers
+    case .leftMouseDown, .rightMouseDown, .otherMouseDown: return .click
+    case .leftMouseUp, .rightMouseUp, .otherMouseUp: return .mouseUp
+    case .scrollWheel: return .scroll
+    case .mouseMoved: return .move
+    case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged: return .drag
+    default: return nil
+    }
+  }
+
   public func takeInput() -> SourceReading<InputCounts> {
     lock.lock()
     defer { lock.unlock() }
     let value = counts
+    overflowTotal += value.detailedEventOverflow
     counts = InputCounts()
     guard CGPreflightListenEventAccess() else { return .absent(.permission) }
     guard let tap else { return .absent(.unavailable) }

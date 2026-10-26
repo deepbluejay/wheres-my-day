@@ -3,6 +3,7 @@ import Foundation
 /// Every multi-read answer observes one committed privacy/settings snapshot.
 public protocol ActivityQueryStorage: TimelineStorageReader {
   func withQuerySnapshot<T>(_ body: () throws -> T) throws -> T
+  func applicationPrivacyRefusedSeconds(_ samples: [TimeSample], settings: StorageSettings, ownBundleID: String) throws -> Set<Int>
 }
 
 public enum ActivityQueryError: String, Error { case invalidArguments, unavailable, refused }
@@ -61,7 +62,7 @@ public final class ActivityQueries {
   private let now: () -> Int
   private let ownBundleID: String
   public init(storage: ActivityQueryStorage, calendar: Calendar = .current,
-    ownBundleID: String = "dev.local.ActivityProbe", now: @escaping () -> Int = { Int(Date().timeIntervalSince1970) }) {
+    ownBundleID: String = ActivityProbeIdentity.bundleID, now: @escaping () -> Int = { Int(Date().timeIntervalSince1970) }) {
     self.storage = storage; self.calendar = calendar; self.ownBundleID = ownBundleID.lowercased(); self.now = now
   }
   public func recentWork(in range: TimeRange) throws -> ActivityQueryAnswer {
@@ -123,11 +124,10 @@ public final class ActivityQueries {
     let intervals = try storage.intervals(in: range)
     let forgotten = try storage.forgottenRanges(in: range)
     let samples = try storage.samples(in: range)
-    let excluded = Set(settings.excludedApps.map { $0.lowercased() }).union([ownBundleID])
     // Excluded, own-app and partly private minutes keep the timeline's kind so every answer
     // counts the same minutes as the timeline; only their names and text stay out.
-    var hiddenMinutes = Set(samples.filter { $0.excluded || excluded.contains($0.bundleID.lowercased()) }
-      .map { floorMinute($0.ts) })
+    var hiddenMinutes = Set(try storage.applicationPrivacyRefusedSeconds(samples, settings: settings, ownBundleID: ownBundleID)
+      .map(floorMinute))
     for interval in intervals where interval.state == .private {
       for minute in stride(from: max(start, floorMinute(interval.range.start)), to: min(end, interval.range.end), by: 60) {
         hiddenMinutes.insert(minute)

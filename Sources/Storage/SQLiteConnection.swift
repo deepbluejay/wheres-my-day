@@ -16,6 +16,7 @@ public enum StorageError: Error, CustomStringConvertible {
 
 enum SQLValue {
   case integer(Int)
+  case blob(Data)
   case text(String)
   case key(String)
   case maskedText(String)
@@ -31,6 +32,9 @@ struct DatabaseRow {
       switch sqlite3_column_type(statement, index) {
       case SQLITE_NULL: values[name] = .null
       case SQLITE_INTEGER: values[name] = .integer(SQLiteConnection.int(statement, index))
+      case SQLITE_BLOB:
+        let size = Int(sqlite3_column_bytes(statement, index))
+        values[name] = .blob(sqlite3_column_blob(statement, index).map { Data(bytes: $0, count: size) } ?? Data())
       default: values[name] = .text(SQLiteConnection.text(statement, index))
       }
     }
@@ -39,6 +43,9 @@ struct DatabaseRow {
   func value(_ name: String) throws -> SQLValue {
     guard let value = values[name] else { throw StorageError("Missing column: \(name)") }
     return value
+  }
+  func data(_ name: String) throws -> Data {
+    if case .blob(let data) = try value(name) { return data }; return Data()
   }
   func int(_ name: String) throws -> Int {
     if case .integer(let value) = try value(name) { return value }
@@ -53,9 +60,31 @@ struct DatabaseRow {
 
 final class SQLiteConnection {
   var handle: OpaquePointer?
+  var collectionAccountingEnabled = false
+  var collectionCommitClock: () -> Int = { Int(Date().timeIntervalSince1970) }
+  var collectionProofs: [String: () throws -> Void] = [:]
+  var collectionRowContracts: [String: CollectionRowContract] = [:]
+  var collectionRefusalExpected: [String: Int]?
+  var collectionMaintenanceProof: CollectionMaintenanceProof?
+  var collectionMaintenanceAuthorized = false
+  var collectionBatchingAuthorized = false
+  var collectionBatchChanges = 0
+  var collectionBatchTotalBefore = 0
+  var collectionLastChanges = 0
+  var collectionCheckpointing = false
+  var collectionMaintenanceYield: (() throws -> Void)?
+  var collectionMaintenanceGap: (() throws -> Void)?
+  var collectionPrivacyProgressProof: (() throws -> Void)?
+  var collectionPrivacyChangeObserver: ((String, Int64) -> Void)?
+  var collectionWriteAuthorized = false
+  private var collectionSnapshotURL: URL?
+  private var collectionSnapshotScope: DatabaseOpenScope?
+  var verifyingCollectionMaintenance = false
+  var collectionChangeObserver: ((String, Int64) -> Void)?
   private let busyMilliseconds: Int32
   init(url: URL, readOnly: Bool = false, immutable: Bool = false, scope: DatabaseOpenScope, busyMilliseconds: Int32 = 3000) throws {
     self.busyMilliseconds = busyMilliseconds
+    collectionSnapshotURL = url; collectionSnapshotScope = scope
     guard try DatabaseOpenBoundary.open(url, scope: scope,
       readOnly: readOnly, immutable: immutable, handle: &handle) == SQLITE_OK else {
       let error = failure()
@@ -64,6 +93,43 @@ final class SQLiteConnection {
       throw error
     }
     sqlite3_busy_timeout(handle, busyMilliseconds)
+    installCollectionUpdateHook()
+    sqlite3_set_authorizer(handle, { context, action, table, _, _, trigger in
+      guard let context, let table,
+        [SQLITE_INSERT, SQLITE_UPDATE, SQLITE_DELETE].contains(action) else { return SQLITE_OK }
+      let owner = Unmanaged<SQLiteConnection>.fromOpaque(context).takeUnretainedValue()
+      let collection = CollectionMaintenanceProof.tables.contains(String(cString: table))
+      if owner.collectionMaintenanceProof != nil && !owner.collectionWriteAuthorized && trigger == nil && collection { return SQLITE_DENY }
+      // SQLite's truncate optimization skips row hooks. Force per-row DELETEs,
+      // including deletes issued by a trigger, so absence is still an effect.
+      let privacyCalls = String(cString: table) == "model_calls" && owner.collectionPrivacyChangeObserver != nil
+      if action == SQLITE_DELETE && (collection || privacyCalls) && owner.collectionMaintenanceProof != nil { return SQLITE_IGNORE }
+      return SQLITE_OK
+    }, Unmanaged.passUnretained(self).toOpaque())
+  }
+  init(temporaryCollectionProof: Void) throws {
+    busyMilliseconds = 0
+    guard sqlite3_open("", &handle) == SQLITE_OK else { throw failure() }
+    installCollectionUpdateHook()
+  }
+  func collectionEntrySnapshot() throws -> SQLiteConnection? {
+    guard let url = collectionSnapshotURL, let scope = collectionSnapshotScope else { return nil }
+    let snapshot = try SQLiteConnection(url: url, readOnly: true, scope: scope, busyMilliseconds: 0)
+    try snapshot.run("BEGIN")
+    _ = try snapshot.integer("SELECT count(*) FROM sqlite_master")
+    return snapshot
+  }
+  private func installCollectionUpdateHook() {
+    sqlite3_update_hook(handle, { context, _, database, table, row in
+      guard let context else { return }
+      let owner = Unmanaged<SQLiteConnection>.fromOpaque(context).takeUnretainedValue()
+      guard owner.collectionMaintenanceProof != nil || owner.collectionChangeObserver != nil,
+        let database, String(cString: database) == "main", let table else { return }
+      let name = String(cString: table)
+      owner.collectionMaintenanceProof?.noteChange(name, row)
+      owner.collectionChangeObserver?(name, row)
+      owner.collectionPrivacyChangeObserver?(name, row)
+    }, Unmanaged.passUnretained(self).toOpaque())
   }
   deinit { sqlite3_close(handle) }
   func close() throws {
@@ -89,6 +155,11 @@ final class SQLiteConnection {
     try rows(sql, values) { _ in }
   }
   func rows(_ sql: String, _ values: [SQLValue] = [], _ visit: (OpaquePointer) throws -> Void) throws {
+    if !collectionWriteAuthorized && sql != "ROLLBACK" { try verifyPendingCollectionChanges() }
+    if let proof = collectionMaintenanceProof {
+      let command = sql.trimmingCharacters(in: .whitespacesAndNewlines).prefix(7).uppercased()
+      if ["CREATE ", "ALTER ", "DROP "].contains(where: command.hasPrefix) { try proof.applySchema(sql) }
+    }
     var statement: OpaquePointer?
     guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw failure() }
     defer { sqlite3_finalize(statement) }
@@ -98,6 +169,8 @@ final class SQLiteConnection {
       switch value {
       case .integer(let number): result = sqlite3_bind_int64(statement, index, Int64(number))
       case .null: result = sqlite3_bind_null(statement, index)
+      case .blob(let data):
+        result = data.withUnsafeBytes { sqlite3_bind_blob(statement, index, $0.baseAddress, Int32(data.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
       case .text(let text), .key(let text), .maskedText(let text):
         // Lookup keys must retain identity. Only keys use .key; every free-text value is masked.
         let masked: String
@@ -126,10 +199,26 @@ final class SQLiteConnection {
     try rows(sql, values) { value = Self.int($0, 0) }
     return value
   }
-  func transaction<T>(write: Bool = true, _ body: () throws -> T) throws -> T {
+  func transaction<T>(write: Bool = true, collectionMaintenance: Bool = false, collectionFullBaseline: Bool = false, _ body: () throws -> T) throws -> T {
     try run(write ? "BEGIN IMMEDIATE" : "BEGIN")
+    collectionProofs.removeAll()
+    collectionRowContracts.removeAll(); collectionRefusalExpected = nil
+    defer { collectionPrivacyChangeObserver = nil; collectionPrivacyProgressProof = nil; collectionBatchingAuthorized = false; collectionBatchChanges = 0; collectionMaintenanceAuthorized = false; collectionMaintenanceProof = nil; collectionProofs.removeAll(); collectionRowContracts.removeAll(); collectionRefusalExpected = nil }
     do {
+      collectionBatchChanges = 0; collectionBatchTotalBefore = Int(sqlite3_total_changes(handle)); collectionBatchingAuthorized = false
+      collectionMaintenanceAuthorized = collectionMaintenance
+      if write { collectionMaintenanceProof = try CollectionMaintenanceProof(self, full: collectionFullBaseline) }
       let result = try body()
+      collectionCheckpointing = true
+      defer { collectionCheckpointing = false }
+      if collectionMaintenanceAuthorized, collectionMaintenanceProof?.full == false {
+        try collectionMaintenanceProof?.cleanupErasedReferences(self)
+      }
+      if write && collectionAccountingEnabled { try commitCollectionIngestion(at: collectionCommitClock()) }
+      // Accounting can fire triggers too. Nothing writes after these proofs.
+      for key in collectionProofs.keys.sorted() { try collectionProofs[key]!() }
+      try verifyCollectionMaintenance()
+      try collectionPrivacyProgressProof?()
       try run("COMMIT")
       return result
     } catch {

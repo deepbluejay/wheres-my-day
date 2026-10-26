@@ -22,6 +22,9 @@ Third-party material retains its own terms; see
 Issues and bug reports are welcome. Outside code contributions, including pull
 requests, are not accepted. Keep private activity and credentials out of reports.
 
+Collection policy, admission exceptions, native input bounds and reproducible
+stress measurements are documented in [Collection bounds](tools/CollectionBounds.md).
+
 ## Requirements
 
 - macOS 14 or later.

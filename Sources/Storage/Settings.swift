@@ -7,6 +7,7 @@ extension ActivityStorage {
     try locked {
       var result = StorageSettings()
       var apps: [String] = []
+      var appLabels: [String: String] = [:], appIdentities: [String: String] = [:]
       var initialized = false
       try connection.namedRows("SELECT key,value FROM settings ORDER BY key") {
         let key = try $0.text("key")
@@ -20,11 +21,17 @@ extension ActivityStorage {
         case "retention.screen": result.screenRetentionDays = Int(value) ?? 30
         case "retention.prompt": result.promptRetentionDays = Int(value) ?? 30
         default:
-          if key.hasPrefix("app.") { apps.append(value) }
+          if key.hasPrefix("app.") { apps.append(value); appLabels[String(key.dropFirst(4))] = value }
+          if key.hasPrefix("appIdentity.") { appIdentities[String(key.dropFirst(12))] = value }
           if key.hasPrefix("general.") { result.general[String(key.dropFirst(8))] = value }
         }
       }
-      if initialized { result.excludedApps = apps.sorted() }
+      if initialized {
+        result.excludedApps = Array(Set(apps)).sorted()
+        for (index, identity) in appIdentities {
+          if let label = appLabels[index] { result.excludedAppPrivacyIdentities[label, default: []].insert(identity) }
+        }
+      }
       return result
     }
   }
@@ -42,8 +49,11 @@ extension ActivityStorage {
       ("retention.prompt", String(settings.promptRetentionDays)),
     ]
     if let pause = settings.pausedUntil { pairs.append(("pause", String(pause))) }
-    for (index, app) in Set(settings.excludedApps.map { $0.lowercased() }).sorted().enumerated() {
-      pairs.append(("app.\(index)", app))
+    for (index, app) in settings.persistedAppExclusions.enumerated() {
+      pairs.append(("app.\(index)", app.label))
+      if app.identity != ApplicationPrivacyIdentity.digest(app.label) {
+        pairs.append(("appIdentity.\(index)", app.identity))
+      }
     }
     // Consent and its generation belong to connection transactions, never caller snapshots.
     for (key, value) in settings.general where !["chat.claude.generation", "chat.claude.connected"].contains(key) {

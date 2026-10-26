@@ -84,7 +84,7 @@ extension ActivityStorage {
       }
       check("source.integrity", 1, try integrity(old)); check("destination.integrity", 1, try integrity(connection))
       check("source.application", 0, try old.integer("PRAGMA application_id"))
-      check("source.version_supported", 1, (0...11).contains(try old.integer("PRAGMA user_version")) ? 1 : 0)
+      check("source.version_supported", 1, (0...SQLiteConnection.schemaVersion).contains(try old.integer("PRAGMA user_version")) ? 1 : 0)
       check("destination.application", SQLiteConnection.applicationID, try connection.integer("PRAGMA application_id"))
       check("destination.version", SQLiteConnection.schemaVersion, try connection.integer("PRAGMA user_version"))
       check("finished", 1, try connection.integer("SELECT count(*) FROM conversion_progress WHERE layer='finished' AND last_row=1"))

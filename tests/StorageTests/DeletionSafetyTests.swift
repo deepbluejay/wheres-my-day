@@ -27,8 +27,8 @@ extension StorageTests {
   private func deletionFixture() throws -> ActivityStorage {
     let database = folder.appendingPathComponent(UUID().uuidString + ".sqlite")
     let store = try ActivityStorage(url: database, appDataDirectory: folder, databaseScope: .directory(folder))
-    try store.saveSettings(StorageSettings(recordingEnabled: false))
     try store.appendSamples([TimeSample(ts: 61), TimeSample(ts: 181)])
+    try store.saveSettings(StorageSettings(recordingEnabled: false))
     try store.appendFixtureEvidence(["one", "two"].map {
       EvidenceText(ts: 61, kind: .prompt, source: "invented", sourceID: $0, text: "kept")
     })
@@ -112,7 +112,7 @@ extension StorageTests {
     let preview = try store.previewDeletion(in: TimeRange(60, 120))
     try store.deleteRecords(in: preview.range, confirmation: preview.confirmation)
     let after = try deletionSnapshot(store)
-    for table in before.keys where !["samples", "evidence", "intervals", "model_calls", "forgotten_ranges", "forgotten_sources"].contains(table) {
+    for table in before.keys where !["samples", "sample_observations", "evidence", "screen_payloads", "intervals", "model_calls", "forgotten_ranges", "forgotten_sources"].contains(table) {
       XCTAssertEqual(after[table], before[table], table)
     }
     let saved = try store.modelCalls(in: all)

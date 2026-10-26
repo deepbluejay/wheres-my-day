@@ -97,7 +97,7 @@ extension ActivityStorage {
             let rows = try oldBatch(table, move: move, source: source, cursor: cursor, size: batchSize)
             if rows.isEmpty { break }
             if let limit = maxBatches, batches >= limit { return result }
-            try connection.transaction {
+            try connection.transaction(collectionMaintenance: name == "samples" || name == "evidence") {
               let before = result
               for row in rows {
                 let disposition: CarryDisposition
