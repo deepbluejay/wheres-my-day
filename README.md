@@ -96,6 +96,16 @@ after moving the bundle. To unload the job and remove its plist:
 The plist is `~/Library/LaunchAgents/dev.local.ActivityProbe.recorder.plist`.
 Uninstalling the job does not erase recorded data.
 
+## Developer tools
+
+For read-only layer-1 recorder measurements, see
+[the fidelity checker](tools/FidelityCheck.md). It compares agent instructions,
+input attribution, optional history/Git/screen channels, Chrome visits, latest
+file mtimes and timestamped shell history, reporting counts and denominators
+without including private text in either JSON or its summary. It also compares
+an optional reference recorder and can export seeded, masked samples into a
+private local folder for separate judging, with a matching deletion command.
+
 ## macOS permissions
 
 Use the Permissions section in settings to open the relevant macOS privacy pane
