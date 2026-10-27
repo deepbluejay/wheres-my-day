@@ -163,7 +163,7 @@ final class ChatGPTSummaryCallerTests: XCTestCase {
     let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
     // Preview limitations: store false, stream true, the context in `input`, no unsupported field and no tools.
     XCTAssertEqual(Set(body.keys), ["model", "input", "reasoning", "store", "stream"])
-    XCTAssertEqual(body["model"] as? String, "gpt-5.6-luna"); XCTAssertEqual(body["model"] as? String, SummaryPolicy.model)
+    XCTAssertEqual(body["model"] as? String, "gpt-5.6-luna"); XCTAssertEqual(body["model"] as? String, ChatGPTSummaryCaller.model)
     XCTAssertEqual(body["store"] as? Bool, false); XCTAssertEqual(body["stream"] as? Bool, true)
     XCTAssertEqual((body["reasoning"] as? [String: String]) ?? [:], ["effort": "low"])
     let input = try XCTUnwrap(body["input"] as? [[String: String]])

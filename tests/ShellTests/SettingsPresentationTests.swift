@@ -27,7 +27,7 @@ final class SettingsPresentationTests: XCTestCase {
     XCTAssertEqual(SettingsLabel.claudeAppUse.rawValue, "Use Claude in this app")
     XCTAssertEqual(SettingsLabel.claudeMacLoginNote.rawValue, "This changes the Claude Code login for the whole Mac.")
     XCTAssertEqual(SettingsLabel.claudeAppUseNote.rawValue,
-      "Turning this off keeps your Claude Code login and only stops Claude conversations in this app.")
+      "Turning this off keeps your Claude Code login and stops summaries and Claude conversations in this app.")
   }
   private var resources: URL {
     URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

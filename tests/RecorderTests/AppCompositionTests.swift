@@ -88,12 +88,16 @@ final class AppCompositionTests: XCTestCase {
       factories.chatGPTTokens = { receive("tokens", $0); return tokens }
       factories.summary = {
         receive("summary", $0)
-        // Summaries use the recorder's token port, not a CLI login in the app's codex home.
-        XCTAssertTrue($1 === tokens)
+        // Summaries use the person's own Claude Code, never ChatGPT tokens or the app's codex home.
+        XCTAssertEqual($1.name, "claude")
+        // A test process never resolves the person's own CLI.
+        XCTAssertNil($1.resolve())
         let caller = original.summary($0, $1)
-        XCTAssertTrue(caller is ChatGPTSummaryCaller)
+        XCTAssertTrue(caller is ClaudeSummaryCaller)
+        XCTAssertEqual(caller.model, "claude-haiku-5-5")
         return caller
       }
+      factories.summaryClaude = { receive("summaryClaude", $0); return original.summaryClaude($0) }
       factories.claudeConnector = {
         receive("connectors", $0)
         let connector = original.claudeConnector($0, $1)
@@ -123,7 +127,7 @@ final class AppCompositionTests: XCTestCase {
       XCTAssertEqual(configuration.database, paths.database)
       XCTAssertEqual(configuration.toolServer, paths.queryHelper)
       _ = try composition.queryStorage()
-      XCTAssertEqual(seen, ["storage": 3, "tokens": 1, "summary": 1, "connectors": 1, "logs": 1, "conversation": 1, "query": 1])
+      XCTAssertEqual(seen, ["storage": 3, "summaryClaude": 1, "summary": 1, "connectors": 1, "logs": 1, "conversation": 1, "query": 1])
       XCTAssertFalse(FileManager.default.fileExists(atPath: paths.userHome.path))
       XCTAssertFalse(FileManager.default.fileExists(atPath: appData.appendingPathComponent("claude").path))
     }

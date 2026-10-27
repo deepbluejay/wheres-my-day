@@ -147,10 +147,11 @@ Private browser windows are not automatically detected or excluded; exclude the
 browser if its content must not be captured. Text is filtered for sensitive
 patterns, but filtering cannot guarantee that every secret is removed.
 
-Agent-log reading is optional and shares consent with subscription summaries.
-It reads supported local assistant conversation logs only while that connection
-is enabled and an eligible account is signed in. Disconnecting pauses new log
-reading and summaries; it does not delete previously stored evidence.
+Summaries use your own Claude Code login, with a Claude subscription, and
+Claude Haiku at low effort. They run only while "Use Claude in this app" is on
+and Claude Code is logged in. The summary child has no tools, no MCP servers and
+no saved session. Turning Claude use off stops new summaries; it does not delete
+previously stored evidence. Agent-log reading follows the recording controls.
 
 Account features need your own eligible provider account. Conversations also
 need the corresponding compatible command-line tool. When enabled or used,

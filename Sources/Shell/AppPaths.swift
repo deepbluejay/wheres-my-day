@@ -38,17 +38,22 @@ public struct AppFactories {
   public var storage: (AppPaths, ActivityStorage.Role, RecorderDatabaseLock?) throws -> ActivityStorage = {
     try ActivityStorage(url: $0.database, appDataDirectory: $0.appData, role: $1, databaseScope: $0.databaseScope, recorderLock: $2)
   }
-  /// Summaries on the ChatGPT plan, with the token port the recorder shares with the window's sign-in.
-  public var summary: (AppPaths, ChatGPTAccessTokens) -> SummaryCaller = {
-    ChatGPTSummaryCaller(tokens: $1, attemptLog: $0.summaryLog, legacyPrompts: $0.prompts)
+  /// Summaries on the person's own Claude Code login, found the way their terminal finds it.
+  /// ChatGPTSummaryCaller stays built but is not wired.
+  public var summary: (AppPaths, AgentExecutable) -> SummaryCaller = {
+    ClaudeSummaryCaller(command: $1, appDataDirectory: $0.appData, attemptLog: $0.summaryLog, legacyPrompts: $0.prompts)
   }
-  /// The recorder's token port: the same Keychain items and lock as the window, without a browser.
+  /// The recorder's Claude Code CLI for summaries. A test process never finds the person's own CLI.
+  public var summaryClaude: (AppPaths) -> AgentExecutable = {
+    TestPathGuard.active ? .absent("claude") : .installed("claude", environment: ProcessInfo.processInfo.environment, home: $0.userHome.path)
+  }
+  /// The conversations' token port: the same Keychain items and lock as the sign-in, without a browser.
   public var chatGPTTokens: (AppPaths) -> ChatGPTAccessTokens = { ChatGPTSignInHost.tokens(paths: $0) }
   public var claudeConnector: (AppPaths, AgentExecutable) -> SubscriptionConnector = {
     ClaudeSubscriptionConnector(command: $1, userHome: $0.userHome, loginScript: ClaudeLoginScript(appData: $0.appData),
       openTerminal: TerminalLogin.open)
   }
-  /// The Codex row's sign-in and the token port summaries and conversations use.
+  /// The Codex row's sign-in and the token port conversations use.
   public var chatGPT: (AppPaths) -> ChatGPTSession = { ChatGPTSignInHost.session(paths: $0) }
   public var logs: (AppPaths, ActivityStorage, AgentLogProcessSource) -> [AgentLogTask] = {
     RecorderConnections.makeLogTasks(database: $1, appDataDirectory: $0.appData,
@@ -96,10 +101,9 @@ public struct AppComposition {
     recorderLock: RecorderDatabaseLock? = nil) throws -> RecorderConnections {
     let recorder = try factories.storage(paths, .recorder, recorderLock)
     let client = try factories.storage(paths, .client, nil)
-    let tokens = factories.chatGPTTokens(paths)
     let logTasks = includesPassiveLogs ? factories.logs(paths, client, processes) : []
     let connections = RecorderConnections(recorder: recorder, client: client, logTasks: logTasks, fileVault: fileVault)
-    try connections.configureSummary(caller: factories.summary(paths, tokens), from: from, dayStart: dayStart, locale: locale)
+    try connections.configureSummary(caller: factories.summary(paths, factories.summaryClaude(paths)), from: from, dayStart: dayStart, locale: locale)
     return connections
   }
 }

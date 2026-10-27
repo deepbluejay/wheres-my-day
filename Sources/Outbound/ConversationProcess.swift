@@ -14,7 +14,7 @@ enum ConversationProcess {
   static let lineLimit = LinePipe.defaultLineLimit
   static func exchange(executable: URL, arguments: [String], environment: [String: String], cwd: URL,
     timeout: TimeInterval, cancellation: ConversationCancellation, cleanupLease: URL? = nil, cleanupHome: CodexProcessHome? = nil,
-    requireSuccessfulExit: Bool = false, exitErrors: [Int32: ConversationError] = [:], service: (((Data) throws -> Void) throws -> Void)? = nil, isReady: (() -> Bool)? = nil, initial: [Data] = [],
+    requireSuccessfulExit: Bool = false, exitErrors: [Int32: ConversationError] = [:], inputLineLimit: Int = LinePipe.defaultLineLimit, service: (((Data) throws -> Void) throws -> Void)? = nil, isReady: (() -> Bool)? = nil, initial: [Data] = [],
     receive: (Data, (Data) throws -> Void) throws -> Bool) throws {
     guard executable.path.hasPrefix("/"), !cancellation.cancelled else { throw ConversationError.cancelled }
     let input = Pipe(), output = Pipe()
@@ -56,7 +56,7 @@ enum ConversationProcess {
     }
     lifetime = try ConversationLifetime(group: pid, lease: cleanupLease, home: cleanupHome)
     try? input.fileHandleForReading.close(); try? output.fileHandleForWriting.close()
-    let pipe = try LinePipe(input: output.fileHandleForReading, output: input.fileHandleForWriting)
+    let pipe = try LinePipe(input: output.fileHandleForReading, output: input.fileHandleForWriting, outgoingLimit: inputLineLimit)
     let started = ProcessInfo.processInfo.systemUptime
     let deadline = started + timeout
     do {

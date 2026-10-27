@@ -13,12 +13,15 @@ public struct SummaryAnswer {
   }
 }
 public protocol SummaryCaller {
+  /// The model id model_calls records for this caller's attempts.
+  var model: String { get }
   var serviceUnavailableUntil: TimeInterval? { get }
   func beginPass() throws
   func endPass()
   func call(_ prompt: String) throws -> SummaryAnswer
 }
 extension SummaryCaller {
+  public var model: String { SummaryPolicy.model }
   public var serviceUnavailableUntil: TimeInterval? { nil }
   public func beginPass() throws {}
   public func endPass() {}
@@ -95,7 +98,7 @@ public enum SummaryPolicy {
   // Chosen values: call at a break after 30 active minutes, or after one clock hour.
   public static let shortSeconds = 1800
   public static let maximumWaitSeconds = maximumSeconds
-  public static let model = "gpt-5.6-luna"
+  public static let model = "claude-haiku-5-5"
 
   /// Missing observations do not end the input-age window. Only observed awake seconds count.
   public static func plan(samples: [TimeSample], forgotten: [TimeRange], through: Int,
@@ -390,8 +393,9 @@ public final class SummaryService {
     let historical = try storage.modelCalls(in: TimeRange(Int.min + 1, Int.max))
     health.failedRanges = SummaryHealth.unresolvedFailedRanges(in: historical)
     let settings = try storage.settings()
-    health.subscriptionConnected = settings.subscriptionConnected
-    guard settings.subscriptionConnected && RecorderPolicy.recording(settings, at: time) else { return }
+    // Summaries go to Claude: the person's consent to Claude use gates them, and the caller checks the login.
+    health.subscriptionConnected = settings.claudeConnected
+    guard settings.claudeConnected && RecorderPolicy.recording(settings, at: time) else { return }
     let planned = try plan(from: start, through: end, requested: requested)
     health.localPreparationFailed = false
     health.planUsePaused = false
@@ -403,7 +407,7 @@ public final class SummaryService {
     // Save deterministic private gaps before a call can mark their enclosing range completed.
     for piece in planned.pieces.filter(\.isPrivate) + planned.pieces.filter({ !$0.isPrivate }) {
       let current = try storage.settings()
-      guard current.subscriptionConnected && RecorderPolicy.recording(current, at: time) else { return }
+      guard current.claudeConnected && RecorderPolicy.recording(current, at: time) else { return }
       guard try storage.forgottenRanges(in: piece.range).isEmpty else { continue }
       if piece.isPrivate {
         let result = try storage.appendIntervals([NamedInterval(range: piece.range, state: .private)])
@@ -439,7 +443,7 @@ public final class SummaryService {
       for attempt in 0..<2 {
         let check = try storage.settings()
         guard try storage.forgottenRanges(in: piece.range).isEmpty else { return }
-        guard check.subscriptionConnected && RecorderPolicy.recording(check, at: time) else { return }
+        guard check.claudeConnected && RecorderPolicy.recording(check, at: time) else { return }
         var answer = SummaryAnswer(text: "")
         var parsed: [NamedInterval]?
         do { answer = try caller.call(prompt); parsed = try format.parse(answer.text, range: piece.range, sentRanges: piece.sentRanges) }
@@ -475,7 +479,7 @@ public final class SummaryService {
         }
         catch let paused as SummaryPausedAfterBilling {
           health.planUsePaused = true
-          try record(ModelCall(ts: time, range: piece.range, model: SummaryPolicy.model, inputTokens: paused.usage.inputTokens,
+          try record(ModelCall(ts: time, range: piece.range, model: caller.model, inputTokens: paused.usage.inputTokens,
             cachedTokens: paused.usage.cachedTokens, outputTokens: paused.usage.outputTokens, succeeded: false,
             tableFacts: tableFacts, pending: true, attemptID: UUID().uuidString))
           return
@@ -484,7 +488,7 @@ public final class SummaryService {
           health.unbilledExecFailures += 1
           unbilledPasses[pieceKey, default: 0] += 1
           guard unbilledPasses[pieceKey, default: 0] >= 3 else {
-            lastUnbilledCall[pieceKey] = ModelCall(ts: time, range: piece.range, model: SummaryPolicy.model,
+            lastUnbilledCall[pieceKey] = ModelCall(ts: time, range: piece.range, model: caller.model,
               succeeded: false, tableFacts: tableFacts)
             return
           }
@@ -501,7 +505,7 @@ public final class SummaryService {
         }
         catch { health.transportFailures += 1; parsed = nil }
         health.calls += 1
-        var call = ModelCall(ts: time, range: piece.range, model: SummaryPolicy.model,
+        var call = ModelCall(ts: time, range: piece.range, model: caller.model,
           inputTokens: answer.inputTokens, cachedTokens: answer.cachedTokens, outputTokens: answer.outputTokens,
           succeeded: parsed != nil, tableFacts: tableFacts, pending: true, attemptID: UUID().uuidString)
         try record(call)

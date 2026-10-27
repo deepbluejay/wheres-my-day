@@ -6,7 +6,7 @@ import MachO
 /// The running build's summary request: model, effort and the build's own identifier. A request refused
 /// as such (a 400) stays refused for this fingerprint only, so a different build tries again.
 public enum ChatGPTRequestShape {
-  public static let current = "\(SummaryPolicy.model)|\(ChatGPTSummaryCaller.effort)|\(buildID)"
+  public static let current = "\(ChatGPTSummaryCaller.model)|\(ChatGPTSummaryCaller.effort)|\(buildID)"
   /// The main executable's LC_UUID, which the linker sets anew for each build.
   static var buildID: String {
     guard let header = _dyld_get_image_header(0) else { return "unknown" }
@@ -110,7 +110,10 @@ public final class ChatGPTSummaryCaller: SummaryCaller {
   /// Chosen, not measured: the request carries only the message framing around the prompt.
   public static let fixedEnvelopeTokens = 64
   public static let inputMarginTokens = SummaryMaintenance.inputMarginTokens
+  /// Not wired: summaries use ClaudeSummaryCaller. Kept for its tests and the measurement probe.
+  public static let model = ChatSelection.codexDefaultModel
   public static let effort = "low"
+  public var model: String { Self.model }
   /// After ChatGPT reports usage or user information unavailable (503), requests wait this long, doubling
   /// for each further one up to `unavailableLongest`. Chosen values; the docs ask only for bounded backoff.
   public static let unavailableShortest: TimeInterval = 300
@@ -137,7 +140,7 @@ public final class ChatGPTSummaryCaller: SummaryCaller {
 
   /// The request body: only fields the preview accepts (docs: Preview limitations). No tools.
   public static func body(prompt: String) throws -> Data {
-    let object: [String: Any] = ["model": SummaryPolicy.model, "input": [["role": "user", "content": prompt]],
+    let object: [String: Any] = ["model": model, "input": [["role": "user", "content": prompt]],
       "reasoning": ["effort": effort], "store": false, "stream": true]
     return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
   }

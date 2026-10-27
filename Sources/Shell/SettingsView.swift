@@ -153,9 +153,7 @@ public struct SettingsPage: View {
     case .subscription:
       let row = ChatGPTRow(model: model, overview: chatGPT, isConnecting: isConnecting)
       text(row.headline).fontWeight(.medium)
-      if row.showsProblem { text(.problem) }
       ForEach(row.notes, id: \.self) { text($0).fixedSize(horizontal: false, vertical: true) }
-      text(.consent).fixedSize(horizontal: false, vertical: true)
       text(.chatGPTPlan).fixedSize(horizontal: false, vertical: true)
       if row.offersManageUsage { button(.manageUsage, manageUsage) }
       if isConnecting {
@@ -178,6 +176,10 @@ public struct SettingsPage: View {
         .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
       text(.claudeAppUse).fontWeight(.medium).padding(.top, 8)
       text(claudeUseState)
+      let summaries = ClaudeSummaryRow(model: model)
+      if summaries.showsProblem { text(.problem) }
+      ForEach(summaries.notes, id: \.self) { text($0).fixedSize(horizontal: false, vertical: true) }
+      text(.consent).fixedSize(horizontal: false, vertical: true)
       if isClaudeConnecting {
         HStack { ProgressView().controlSize(.small); text(.connecting); Spacer(); button(.cancel, cancelClaude) }
       } else if model.settings.claudeConnected { button(claudeUseAction, disconnectClaude) }

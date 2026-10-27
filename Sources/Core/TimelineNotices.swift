@@ -18,8 +18,8 @@ public struct TimelineHealth {
   /// nil means no summary health snapshot yet; the persisted connection setting still applies.
   /// The shell must fill the snapshot's subscriptionConnected from the current connection state.
   public var summary: SummaryHealth?
-  /// The ChatGPT sign-in as the window last read it; nil when not read. With consent on, any status but
-  /// `connected` means summaries wait (usage limit, not accepted, not available, refused, signed out).
+  /// The ChatGPT sign-in as the window last read it; nil when not read. Summaries use Claude, so it no
+  /// longer pauses them.
   public var chatGPT: ChatGPTConnectionStatus?
   public init(missingPermissions: Set<TimelinePermission> = [], security: DeviceSecurityHealth = DeviceSecurityHealth(),
     summary: SummaryHealth? = nil, chatGPT: ChatGPTConnectionStatus? = nil) {
@@ -59,8 +59,7 @@ public enum TimelineNotices {
   public static func resolved(settings: StorageSettings, health: TimelineHealth) -> StorageSettings? {
     let hidden = deferred(in: settings)
     var unresolved = problems(settings: settings, health: health)
-    if health.summary == nil { unresolved.formUnion([.summaryFailure, .summaryPreparation]) }
-    if health.chatGPT == nil { unresolved.insert(.summaryPaused) }
+    if health.summary == nil { unresolved.formUnion([.summaryFailure, .summaryPreparation, .summaryPaused]) }
     let remaining = hidden.intersection(unresolved.map(\.rawValue))
     guard remaining != hidden else { return nil }
     var settings = settings
@@ -72,7 +71,8 @@ public enum TimelineNotices {
   private static func problems(settings: StorageSettings, health: TimelineHealth) -> Set<TimelineNoticeKind> {
     var missing = Set<TimelineNoticeKind>()
     for permission in health.missingPermissions { missing.insert(TimelineNoticeKind(rawValue: permission.rawValue)!) }
-    if !settings.subscriptionConnected || health.summary?.subscriptionConnected == false { missing.insert(.subscription) }
+    // Summaries use Claude: Claude use must be on and the last pass must have found the login.
+    if !settings.claudeConnected || health.summary?.subscriptionConnected == false { missing.insert(.subscription) }
     switch health.security.fileVault {
     case .on: break
     case .off: missing.insert(.fileVaultOff)
@@ -81,10 +81,7 @@ public enum TimelineNotices {
     if health.security.backupExclusionFailure != nil { missing.insert(.backupExclusion) }
     if health.summary?.failedRanges.isEmpty == false { missing.insert(.summaryFailure) }
     if health.summary?.localPreparationFailed == true { missing.insert(.summaryPreparation) }
-    if settings.subscriptionConnected {
-      if health.summary?.planUsePaused == true { missing.insert(.summaryPaused) }
-      if let status = health.chatGPT, status != .connected { missing.insert(.summaryPaused) }
-    }
+    if settings.claudeConnected && health.summary?.planUsePaused == true { missing.insert(.summaryPaused) }
     return missing
   }
 

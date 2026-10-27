@@ -63,10 +63,14 @@ final class SettingsTests: XCTestCase {
     var summary = SummaryHealth(); summary.subscriptionConnected = true
     model = SettingsViewModel(settings: settings, health: TimelineHealth(summary: summary), ownBundleID: "org.example.self", now: 20)
     XCTAssertEqual(model.subscription, .connected); XCTAssertFalse(model.isPaused)
+    XCTAssertEqual(model.claudeConnection, .notConnected)
+    // Summary problems belong to Claude use, which summaries need; ChatGPT use stays connected.
     summary.localPreparationFailed = true
-    XCTAssertEqual(SettingsViewModel(settings: settings, health: TimelineHealth(summary: summary), ownBundleID: "org.example.self", now: 0).subscription, .problem)
+    settings.claudeUse = true
+    let problem = SettingsViewModel(settings: settings, health: TimelineHealth(summary: summary), ownBundleID: "org.example.self", now: 0)
+    XCTAssertEqual(problem.claudeConnection, .problem); XCTAssertEqual(problem.subscription, .connected)
     for kind in TimelineNoticeKind.allCases {
-      let expected: SettingsSection = [.subscription, .summaryFailure, .summaryPreparation, .summaryPaused].contains(kind) ? .subscription
+      let expected: SettingsSection = [.subscription, .summaryFailure, .summaryPreparation, .summaryPaused].contains(kind) ? .claude
         : [.accessibility, .inputMonitoring, .screenRecording].contains(kind) ? .permissions : .security
       XCTAssertEqual(kind.settingsSection, expected)
     }

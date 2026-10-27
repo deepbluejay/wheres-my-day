@@ -8,7 +8,8 @@ public extension TimelineNoticeKind {
   var settingsSection: SettingsSection {
     switch self {
     case .accessibility, .inputMonitoring, .screenRecording: return .permissions
-    case .subscription, .summaryFailure, .summaryPreparation, .summaryPaused: return .subscription
+    // Summaries use Claude, so their notices open the Claude section.
+    case .subscription, .summaryFailure, .summaryPreparation, .summaryPaused: return .claude
     case .fileVaultOff, .fileVaultUnknown, .backupExclusion: return .security
     }
   }
@@ -70,14 +71,16 @@ public struct SettingsViewModel {
   public var dayStartHour: Int {
     settings.dayStartHour
   }
-  public var claudeConnection: SettingsSubscriptionState { settings.claudeConnected ? .connected : .notConnected }
-  public var chatSkipApprovals: Bool { settings.chatSkipApprovals }
-  public var subscription: SettingsSubscriptionState {
-    guard settings.subscriptionConnected else { return .notConnected }
+  /// Summaries use Claude, so their problems show on the Claude row.
+  public var claudeConnection: SettingsSubscriptionState {
+    guard settings.claudeConnected else { return .notConnected }
     if let summary = health.summary,
       !summary.subscriptionConnected || summary.localPreparationFailed || summary.planUsePaused || !summary.failedRanges.isEmpty { return .problem }
     return .connected
   }
+  public var chatSkipApprovals: Bool { settings.chatSkipApprovals }
+  /// ChatGPT use, for Codex conversations only.
+  public var subscription: SettingsSubscriptionState { settings.subscriptionConnected ? .connected : .notConnected }
   public var exclusions: [SettingsExclusion] {
     let ids = Set(settings.excludedApps.map { $0.lowercased() }).subtracting([ownBundleID]).sorted()
     return [SettingsExclusion(id: ownBundleID, alwaysExcluded: true)] + ids.map { SettingsExclusion(id: $0, alwaysExcluded: false) }

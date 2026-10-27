@@ -145,9 +145,9 @@ final class AppWindowTests: XCTestCase {
     // Disconnected providers cannot start a catalog or runtime.
     await model.conversation?.loadCatalog(); XCTAssertTrue(configurations.isEmpty)
     try database.saveFixtureSettings(StorageSettings(subscriptionConnected: true))
-    // Consent on without a ChatGPT sign-in: the timeline says summaries are paused.
+    // ChatGPT consent without a ChatGPT sign-in no longer pauses summaries, which use Claude.
     await model.refresh()
-    XCTAssertTrue(model.snapshot?.day.notices.contains { $0.kind == .summaryPaused } == true)
+    XCTAssertFalse(model.snapshot?.day.notices.contains { $0.kind == .summaryPaused } == true)
     _ = try database.patchSettings(.chatSkipApprovals(true))
     await model.conversation?.loadCatalog()
     XCTAssertEqual(configurations.count, 1)
@@ -378,7 +378,7 @@ extension AppWindowTests {
     }
     let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
     let database = try store(root)
-    try database.saveFixtureSettings(StorageSettings(subscriptionConnected: true))
+    try database.saveFixtureSettings(StorageSettings(subscriptionConnected: true).withClaudeUse)
     let paths = AppPaths(userHome: root.appendingPathComponent("user"), appData: root,
       database: root.appendingPathComponent("invented.sqlite"), appBinary: root.appendingPathComponent("bin/ActivityProbe"),
       queryHelper: root.appendingPathComponent("bin/ActivityQueryServer"))
@@ -405,9 +405,12 @@ extension AppWindowTests {
     XCTAssertEqual(second.snapshot?.health.summary?.serviceUnavailableUntil, until)
     XCTAssertTrue(second.snapshot?.day.notices.contains { $0.kind == .summaryPaused } == true)
     XCTAssertTrue(second.settings.health.summary?.planUsePaused == true)
+    // Summaries use Claude: the pause shows on the Claude row, not the ChatGPT one.
     let row = ChatGPTRow(model: second.settings.model, overview: account.overview(), isConnecting: false)
-    XCTAssertTrue(row.notes.contains(.serviceUnavailableNote)); XCTAssertTrue(row.showsProblem)
+    XCTAssertFalse(row.notes.contains(.serviceUnavailableNote))
     XCTAssertFalse(row.offersContinue)
+    let summaries = ClaudeSummaryRow(model: second.settings.model)
+    XCTAssertTrue(summaries.notes.contains(.serviceUnavailableNote)); XCTAssertTrue(summaries.showsProblem)
     let before = account.reads
     now += 30; await second.refresh(); XCTAssertEqual(account.reads, before + 1)
     XCTAssertTrue(second.snapshot?.day.notices.contains { $0.kind == .summaryPaused } == true)

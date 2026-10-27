@@ -199,10 +199,10 @@ public extension AppComposition {
           let saved = try store.settings()
           dayStartHour = saved.dayStartHour
           let shown = try selectedDate.map { try TimelineDay.range(on: $0, dayStartHour: saved.dayStartHour, calendar: .current).start } ?? now
-          if current.summary != nil { current.summary?.subscriptionConnected = saved.subscriptionConnected }
+          if current.summary != nil { current.summary?.subscriptionConnected = saved.claudeConnected }
           if let until = try store.summaryUnavailableUntil(), until > Double(now) {
             if current.summary == nil { current.summary = SummaryHealth() }
-            current.summary?.subscriptionConnected = saved.subscriptionConnected
+            current.summary?.subscriptionConnected = saved.claudeConnected
             current.summary?.serviceUnavailableUntil = until
             current.summary?.planUsePaused = true
           }
@@ -210,7 +210,7 @@ public extension AppComposition {
           do {
             let range = try TimelineDay.range(containing: shown, dayStartHour: saved.dayStartHour, calendar: .current)
             let failures = SummaryHealth.unresolvedFailedRanges(in: try store.modelCalls(overlapping: range))
-            var summary = displayed.summary ?? SummaryHealth(); summary.subscriptionConnected = saved.subscriptionConnected
+            var summary = displayed.summary ?? SummaryHealth(); summary.subscriptionConnected = saved.claudeConnected
             summary.failedRanges = failures; displayed.summary = summary
           }
           return try TimelineDay.read(containing: shown, now: now, calendar: .current, storage: store, health: displayed)

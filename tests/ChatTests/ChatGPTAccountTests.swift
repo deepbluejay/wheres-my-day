@@ -460,7 +460,7 @@ extension ChatGPTSignInTests {
     // Consent is on but ChatGPT is not signed in: summaries no longer have an earlier connection to run on.
     let paused = row(consented: true, .notConnected)
     XCTAssertEqual(paused.headline, .notConnected); XCTAssertEqual(paused.notes, [.pausedUntilSignIn])
-    XCTAssertTrue(paused.offersContinue); XCTAssertTrue(paused.offersSignOut); XCTAssertFalse(paused.showsProblem)
+    XCTAssertTrue(paused.offersContinue); XCTAssertTrue(paused.offersSignOut)
     for status in [ChatGPTConnectionStatus.notConnected, .planRequired, .signInAgain] {
       let state = row(consented: true, status, registered: true)
       XCTAssertEqual(state.headline, ChatGPTRow.label(status)); XCTAssertEqual(state.notes, [.pausedUntilSignIn])
@@ -468,8 +468,9 @@ extension ChatGPTSignInTests {
     }
     let problem = row(consented: true, .signInAgain, registered: true, problem: true)
     XCTAssertEqual(problem.headline, .signInAgain)
-    XCTAssertTrue(problem.showsProblem); XCTAssertTrue(problem.offersContinue); XCTAssertTrue(problem.offersDifferentAccount)
-    XCTAssertTrue(row(consented: true, .connected, problem: true).showsProblem)
+    XCTAssertTrue(problem.offersContinue); XCTAssertTrue(problem.offersDifferentAccount)
+    // Summary problems belong to the Claude row now; the ChatGPT row says nothing about them.
+    XCTAssertEqual(row(consented: true, .connected, problem: true).notes, [])
     // A usage limit pauses summaries; signing in again cannot change it, usage settings can.
     let limited = row(consented: true, .usageLimited, registered: true)
     XCTAssertEqual(limited.headline, .usageLimited); XCTAssertEqual(limited.notes, [.usageLimitedNote])

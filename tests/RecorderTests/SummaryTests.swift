@@ -11,7 +11,7 @@ final class SummaryMemory: SummaryStorage {
   var named: [NamedInterval] = []
   var calls: [ModelCall] = []
   var forgotten: [TimeRange] = []
-  var options = StorageSettings(subscriptionConnected: true)
+  var options = StorageSettings(subscriptionConnected: true).withClaudeUse
   var refuse = false
   var throwAfterCallWrite = false
   var throwBeforeCallWrite = false
@@ -162,7 +162,7 @@ final class SummaryTests: XCTestCase {
     defer { try? FileManager.default.removeItem(at: folder) }
     let url = folder.appendingPathComponent("invented.sqlite")
     let db = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))
-    try db.saveFixtureSettings(StorageSettings(subscriptionConnected: true))
+    try db.saveFixtureSettings(StorageSettings(subscriptionConnected: true).withClaudeUse)
     try db.appendSamples([TimeSample(ts: 0, keys: 1), TimeSample(ts: 720, keys: 1)])
     let caller = SummaryFakeCaller()
     let service = SummaryService(storage: db, caller: caller, format: format)
@@ -183,7 +183,7 @@ final class SummaryTests: XCTestCase {
   func testTimelinePendingFailedPrivateAndNamedStates() throws {
     let m = SummaryMemory()
     m.rows = [TimeSample(ts: 0, keys: 1), TimeSample(ts: 120, keys: 1), TimeSample(ts: 240, keys: 1)]
-    m.options.subscriptionConnected = false
+    m.options.claudeUse = false
     var kinds = try SummaryTimeline.minutes(in: TimeRange(0, 300), storage: m)
     XCTAssertEqual(kinds[0], .unsummarized); XCTAssertEqual(kinds[60], .blank)
     m.calls = [ModelCall(ts: 300, range: TimeRange(0, 300), model: SummaryPolicy.model, succeeded: false)]
@@ -360,7 +360,7 @@ final class SummaryTests: XCTestCase {
     m.rows = [TimeSample(ts: 0, keys: 1, keepingAwake: true),
       TimeSample(ts: 60, keepingAwake: true), TimeSample(ts: 120)]
     for state in 0..<3 {
-      m.options.subscriptionConnected = state != 2
+      m.options.claudeUse = state != 2
       m.calls = state == 1 ? [ModelCall(ts: 240, range: TimeRange(0, 240),
         model: SummaryPolicy.model, succeeded: false)] : []
       let kinds = try SummaryTimeline.minutes(in: TimeRange(0, 420), storage: m)
@@ -378,7 +378,7 @@ final class SummaryTests: XCTestCase {
     let m = SummaryMemory()
     m.rows = [TimeSample(ts: 0, keys: 1), TimeSample(ts: 180, keys: 1)]
     for state in 0..<3 {
-      m.options.subscriptionConnected = state != 2
+      m.options.claudeUse = state != 2
       m.calls = state == 1 ? [ModelCall(ts: 600, range: TimeRange(0, 540),
         model: SummaryPolicy.model, succeeded: false)] : []
       let kinds = try SummaryTimeline.minutes(in: TimeRange(0, 600), storage: m)
@@ -427,7 +427,7 @@ final class SummaryTests: XCTestCase {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
     let url = root.appendingPathComponent("invented.sqlite"), db = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(root))
-    try db.saveFixtureSettings(StorageSettings(subscriptionConnected: true))
+    try db.saveFixtureSettings(StorageSettings(subscriptionConnected: true).withClaudeUse)
     try db.appendSamples([TimeSample(ts: 0, keys: 1), TimeSample(ts: 150, keys: 1)])
     let c = SummaryFakeCaller(), s = SummaryService(storage: db, caller: c, format: format)
     try s.summarize(from: 0, through: 121, dayStart: 0, locale: "en-US", requested: true, at: 1000)
@@ -774,10 +774,10 @@ final class SummaryTests: XCTestCase {
     c.replies = ["00:00\t00:01\twork\tInvented\tx", "00:02\t00:03\twork\tInvented\tx"]
     c.handler = {
       XCTAssertEqual(m.named.filter { $0.state == .private }.map(\.range), [TimeRange(60, 120)])
-      m.options.subscriptionConnected = false
+      m.options.claudeUse = false
     }
     _ = try run(m, c)
-    m.options.subscriptionConnected = true
+    m.options.claudeUse = true
     _ = try run(m, c)
     XCTAssertEqual(c.prompts.count, 2)
     XCTAssertEqual(m.named.filter { $0.state == .private }.map(\.range), [TimeRange(60, 120)])
@@ -795,7 +795,7 @@ final class SummaryTests: XCTestCase {
   func testSubscriptionOffRecordingOffAndPauseSendNothing() throws {
     for mode in 0..<3 {
       let m = SummaryMemory(), c = SummaryFakeCaller(); m.rows = rows(0, 600)
-      if mode == 0 { m.options.subscriptionConnected = false }
+      if mode == 0 { m.options.claudeUse = false }
       if mode == 1 { m.options.recordingEnabled = false }
       if mode == 2 { m.options.pausedUntil = 10001 }
       _ = try run(m, c); XCTAssertTrue(c.prompts.isEmpty); XCTAssertTrue(m.calls.isEmpty)
@@ -918,7 +918,7 @@ final class SummaryTests: XCTestCase {
   }
   func testDisconnectedBetweenAttemptsPreventsRetry() throws {
     let m = SummaryMemory(), c = SummaryFakeCaller(); m.rows = rows(0, 600)
-    c.replies = ["invalid"]; c.handler = { m.options.subscriptionConnected = false }
+    c.replies = ["invalid"]; c.handler = { m.options.claudeUse = false }
     let s = try run(m, c); XCTAssertEqual(c.prompts.count, 1); XCTAssertEqual(m.calls.map(\.inputTokens), [101])
     XCTAssertTrue(m.calls.allSatisfy(\.pending)); XCTAssertTrue(s.health.failedRanges.isEmpty)
     XCTAssertFalse(try s.plan(from: 0, through: 10000).pieces.isEmpty)
@@ -926,7 +926,7 @@ final class SummaryTests: XCTestCase {
   func testFailureHealthSurvivesServiceRestart() throws {
     let m = SummaryMemory(), c = SummaryFakeCaller(); m.rows = rows(0, 600); c.replies = ["bad", "bad"]
     _ = try run(m, c)
-    m.options.subscriptionConnected = false
+    m.options.claudeUse = false
     let s = try run(m, c); XCTAssertEqual(s.health.failedRanges, [TimeRange(0, 600)])
     XCTAssertEqual(c.prompts.count, 2)
   }
@@ -937,7 +937,7 @@ final class SummaryTests: XCTestCase {
     defer { try? FileManager.default.removeItem(at: folder) }
     let recorderDB = try ActivityStorage(url: folder.appendingPathComponent("invented.sqlite"), appDataDirectory: folder, role: .recorder, databaseScope: .directory(folder))
     let clientDB = try ActivityStorage(url: folder.appendingPathComponent("invented.sqlite"), appDataDirectory: folder, databaseScope: .directory(folder))
-    try clientDB.saveFixtureSettings(StorageSettings(subscriptionConnected: true))
+    try clientDB.saveFixtureSettings(StorageSettings(subscriptionConnected: true).withClaudeUse)
     try clientDB.appendSamples(rows(0, 600))
     let c = SummaryFakeCaller(), entered = expectation(description: "slow model entered")
     let released = expectation(description: "model released"), gate = DispatchSemaphore(value: 0)

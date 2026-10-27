@@ -177,14 +177,15 @@ public struct IsolatedRecorderConfiguration {
   public init(paths: AppPaths, isolated: Bool = true) { self.paths = paths; self.isolated = isolated }
   // Isolated mode has no passive readers or process-home discovery. App-owned home exclusions
   // in the readers remain independent and are exercised by their own invented-file suites.
-  /// An isolated recorder never reads the person's Keychain: its token port is an empty, never signed-in
-  /// account, so its summaries stay paused.
+  /// An isolated recorder never reads the person's Keychain or Claude Code login: its token port is an empty,
+  /// never signed-in account and its summaries have no Claude CLI, so they report not connected.
   public func composition(factories: AppFactories = AppFactories()) -> AppComposition {
     var factories = factories
     if isolated {
       factories.chatGPTTokens = { _ in
         ChatGPTSession(store: InMemoryChatGPTCredentialStore(), lock: ChatGPTCredentialLock(file: nil), openBrowser: { _ in false })
       }
+      factories.summaryClaude = { _ in .absent("claude") }
     }
     return AppComposition(paths: paths, factories: factories, includesPassiveLogs: !isolated)
   }

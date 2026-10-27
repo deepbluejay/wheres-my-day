@@ -16,7 +16,7 @@ final class ConversationScreenTests: XCTestCase {
       if let previous { _ = try store.patchSettings(.chatSelection(previous)) }
       let agent = ScreenAgent()
       agent.availableModels = [.init(id: "invented-first", reasoningLevels: ["high"]),
-        .init(id: SummaryPolicy.model, reasoningLevels: ["high", "low"])]
+        .init(id: ChatSelection.codexDefaultModel, reasoningLevels: ["high", "low"])]
       let controller = try ConversationController(store: store, makeAgent: { _, _ in agent })
       await controller.loadCatalog()
       XCTAssertEqual(controller.selection, .init(provider: .codex, model: "gpt-5.6-luna", reasoning: effort))
@@ -29,10 +29,10 @@ final class ConversationScreenTests: XCTestCase {
     let controller = try ConversationController(store: store, makeAgent: { _, _ in agent })
     await controller.loadCatalog()
     for generation in ["invented-switch", "invented-sign-in"] {
-      agent.availableModels = [.init(id: SummaryPolicy.model, reasoningLevels: ["high", "low"])]
+      agent.availableModels = [.init(id: ChatSelection.codexDefaultModel, reasoningLevels: ["high", "low"])]
       store.value.connectionGeneration = generation
       await controller.refreshAccountCatalogIfNeeded()
-      XCTAssertEqual(controller.catalog.map(\.id), [SummaryPolicy.model])
+      XCTAssertEqual(controller.catalog.map(\.id), [ChatSelection.codexDefaultModel])
       XCTAssertEqual(controller.selection?.reasoning, "low")
     }
   }

@@ -136,6 +136,8 @@ public struct AgentExecutable {
       AgentInstall.find(name, shellPath: UserShell.path(environment: environment), environment: environment, home: home)
     }
   }
+  /// No CLI at all: nothing is ever started. Isolated recorders use it so they never reach the person's login.
+  public static func absent(_ name: String) -> AgentExecutable { AgentExecutable(name: name) { nil } }
   /// An executable named explicitly. It is used as given, with the caller's PATH and no config folder.
   public static func fixed(_ url: URL) -> AgentExecutable {
     AgentExecutable(name: url.lastPathComponent) { AgentInstall(executable: url, origin: .fixed, childPath: nil) }

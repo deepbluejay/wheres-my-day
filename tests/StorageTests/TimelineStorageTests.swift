@@ -76,6 +76,9 @@ final class TimelineStorageTests: XCTestCase {
     try storage.saveSettings(settings, at: 0)
     let pending = try storage.patchSettings(.beginConnection)
     _ = try storage.patchSettings(.completeConnection(generation: pending.connectionGeneration))
+    // Summaries use Claude, so Claude use is what keeps the subscription notice away.
+    let claude = try storage.patchSettings(.beginClaudeConnection)
+    _ = try storage.patchSettings(.completeClaudeConnection(generation: claude.claudeConnectionGeneration))
     let start = 5 * 3600
     try storage.appendIntervals([
       NamedInterval(range: TimeRange(start - 120, start + 360), name: "Invented boundary task", kind: .work),
@@ -95,8 +98,8 @@ final class TimelineStorageTests: XCTestCase {
     XCTAssertEqual(view.entries.map(\.name), ["Invented boundary task", nil, nil])
     XCTAssertEqual(view.notices, [])
     let saved = try reopened.settings()
-    XCTAssertEqual(saved.general, settings.general)
-    XCTAssertEqual(saved.general.count, 2) // Day start plus one value for all notice deferrals.
+    XCTAssertEqual(saved.general.filter { !$0.key.hasPrefix("chat.claude.") }, settings.general)
+    XCTAssertEqual(saved.general.count, 4) // Day start, one value for all notice deferrals, and Claude use with its generation.
     XCTAssertEqual(try reopened.intervals(in: TimeRange(0, 86400)).count, 2)
     XCTAssertEqual(try reopened.samples(in: TimeRange(0, 86400)).count, 2)
     XCTAssertEqual(try reopened.modelCalls(in: TimeRange(0, 86400)).count, 0)

@@ -298,12 +298,14 @@ final class TimelineTests: XCTestCase {
     }
   }
 
+  /// Claude use on, which summaries need.
+  static let claudeUse = StorageSettings(general: ["chat.claude.connected": "1"])
   private var healthy: TimelineHealth {
     var security = DeviceSecurityHealth(); security.fileVault = .on
     return TimelineHealth(security: security)
   }
   func testEachMissingItemMakesOneSettingsNoticeAndHealthyMakesNone() {
-    let settings = StorageSettings(subscriptionConnected: true)
+    let settings = Self.claudeUse
     XCTAssertEqual(TimelineNotices.make(settings: settings, health: healthy), [])
     for permission in TimelinePermission.allCases {
       var health = healthy; health.missingPermissions = [permission]
@@ -332,40 +334,42 @@ final class TimelineTests: XCTestCase {
     }
   }
 
-  // Ideal: with consent on, every ChatGPT state that keeps summaries waiting gives one notice that leads to Settings.
+  // Ideal: with Claude use on, a paused summary pass gives one notice that leads to Settings; ChatGPT states
+  // no longer pause summaries, which use Claude.
   func testPausedSummariesGiveANotice() {
-    let settings = StorageSettings(subscriptionConnected: true)
+    let settings = Self.claudeUse
     var health = healthy
     for status in ChatGPTConnectionStatus.allCases {
       health.chatGPT = status
-      XCTAssertEqual(TimelineNotices.make(settings: settings, health: health).map(\.kind), status == .connected ? [] : [.summaryPaused],
-        status.rawValue)
+      XCTAssertEqual(TimelineNotices.make(settings: settings, health: health).map(\.kind), [], status.rawValue)
     }
-    // Without consent the subscription notice says it; no second notice.
-    health.chatGPT = .usageLimited
-    XCTAssertEqual(TimelineNotices.make(settings: StorageSettings(), health: health).map(\.kind), [.subscription])
-    XCTAssertEqual(TimelineNoticeKind.summaryPaused.settingsSection, .subscription)
-    // An unread status keeps a deferral; a status that is fine again resolves it.
+    health.summary = SummaryHealth(); health.summary?.subscriptionConnected = true; health.summary?.planUsePaused = true
+    XCTAssertEqual(TimelineNotices.make(settings: settings, health: health).map(\.kind), [.summaryPaused])
+    // Without Claude use the subscription notice says it; no second notice. ChatGPT consent alone is not enough.
+    XCTAssertEqual(TimelineNotices.make(settings: StorageSettings(subscriptionConnected: true), health: health).map(\.kind), [.subscription])
+    XCTAssertEqual(TimelineNoticeKind.summaryPaused.settingsSection, .claude)
+    // A pass that is still paused keeps the deferral; one that is not resolves it.
     var deferred = settings
     TimelineNotices.deferNotice(.summaryPaused, in: &deferred)
-    health.chatGPT = nil
-    XCTAssertNil(TimelineNotices.resolved(settings: deferred, health: health))
-    health.chatGPT = .notAccepted
     XCTAssertNil(TimelineNotices.resolved(settings: deferred, health: health))
     XCTAssertEqual(TimelineNotices.make(settings: deferred, health: health), [])
-    health.chatGPT = .connected
+    // An unread summary snapshot cannot resolve it either.
+    let unread = health.summary; health.summary = nil
+    XCTAssertNil(TimelineNotices.resolved(settings: deferred, health: health))
+    health.summary = unread
+    health.summary?.planUsePaused = false
     XCTAssertNotNil(TimelineNotices.resolved(settings: deferred, health: health))
   }
 
   func testDeferralsAreOneSettingsValueAndDoNotHideDifferentProblems() {
-    var settings = StorageSettings(subscriptionConnected: true)
+    var settings = Self.claudeUse
     var health = healthy; health.missingPermissions = [.screenRecording, .inputMonitoring]
     TimelineNotices.deferNotice(.screenRecording, in: &settings)
     TimelineNotices.deferNotice(.screenRecording, in: &settings)
-    XCTAssertEqual(settings.general.count, 1)
+    XCTAssertEqual(settings.general.count, 2)  // the deferrals and Claude use
     XCTAssertEqual(TimelineNotices.make(settings: settings, health: health).map(\.kind), [.inputMonitoring])
     TimelineNotices.deferNotice(.inputMonitoring, in: &settings)
-    XCTAssertEqual(settings.general.count, 1)
+    XCTAssertEqual(settings.general.count, 2)  // the deferrals and Claude use
     XCTAssertEqual(TimelineNotices.make(settings: settings, health: health), [])
     settings.general[TimelineNotices.deferredSettingKey] = "broken"
     XCTAssertEqual(TimelineNotices.make(settings: settings, health: health).count, 2)
@@ -377,13 +381,13 @@ final class TimelineTests: XCTestCase {
     health.summary?.subscriptionConnected = true
     health.summary?.transportFailures = 3
     health.summary?.unbilledExecFailures = 2
-    XCTAssertEqual(TimelineNotices.make(settings: StorageSettings(subscriptionConnected: true), health: health), [])
+    XCTAssertEqual(TimelineNotices.make(settings: Self.claudeUse, health: health), [])
   }
 
   // Ideal: an unread snapshot cannot resolve either deferred summary problem.
   func testUnreadSummaryHealthKeepsSummaryDeferrals() throws {
     for kind in [TimelineNoticeKind.summaryFailure, .summaryPreparation] {
-      var settings = StorageSettings(subscriptionConnected: true)
+      var settings = Self.claudeUse
       TimelineNotices.deferNotice(kind, in: &settings)
       var health = healthy
       health.summary = SummaryHealth()
@@ -404,7 +408,7 @@ final class TimelineTests: XCTestCase {
 
   // Ideal: resolving one problem clears only its deferral, and recurrence is visible again.
   func testResolvedDeferralsReturnSettingsToSaveAndRecurrenceShowsAgain() throws {
-    var settings = StorageSettings(subscriptionConnected: true, general: ["unrelated": "kept"])
+    var settings = StorageSettings(subscriptionConnected: true, general: ["unrelated": "kept", "chat.claude.connected": "1"])
     TimelineNotices.deferNotice(.screenRecording, in: &settings)
     TimelineNotices.deferNotice(.fileVaultOff, in: &settings)
     var health = healthy
@@ -414,7 +418,7 @@ final class TimelineTests: XCTestCase {
     XCTAssertEqual(TimelineNotices.make(settings: settings, health: health), [])
     health.missingPermissions = []
     settings = try XCTUnwrap(TimelineNotices.resolved(settings: settings, health: health))
-    XCTAssertEqual(settings.general.count, 2)
+    XCTAssertEqual(settings.general.count, 3)
     XCTAssertEqual(settings.general["unrelated"], "kept")
     health.missingPermissions = [.screenRecording]
     XCTAssertEqual(TimelineNotices.make(settings: settings, health: health).map(\.kind), [.screenRecording])

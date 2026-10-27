@@ -2,6 +2,8 @@ import Foundation
 
 public enum ChatProvider: String, Codable, CaseIterable { case claude, codex }
 public struct ChatSelection: Codable, Equatable {
+  /// The Codex conversation default, offered at low effort.
+  public static let codexDefaultModel = "gpt-5.6-luna"
   public var provider: ChatProvider
   public var model: String
   public var reasoning: String

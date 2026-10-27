@@ -93,7 +93,9 @@ public enum SettingsLabel: String, CaseIterable {
   case claudeRecheck = "Check again"
   case claudeOtherAccount = "Log in to a different account in Terminal"
   case claudeMacLoginNote = "This changes the Claude Code login for the whole Mac."
-  case claudeAppUseNote = "Turning this off keeps your Claude Code login and only stops Claude conversations in this app."
+  case claudeAppUseNote = "Turning this off keeps your Claude Code login and stops summaries and Claude conversations in this app."
+  case claudeSummaries = "Summaries use your Claude Code login with Claude Haiku. Only a Claude subscription login is used."
+  case claudeSummariesPaused = "Summaries are paused until Claude Code is logged in with a Claude subscription."
   case claudeAccountPlan = "%@ · Logged in with the %@ plan"
   case claudeAccountOnly = "%@ · Logged in"
   case claudePlanOnly = "Logged in with the %@ plan"
@@ -105,26 +107,26 @@ public enum SettingsLabel: String, CaseIterable {
   case claudeFolderUncertain = "The app could not learn which Claude folder your terminal uses, so it may be checking a different Claude folder than Terminal."
   case continueWithChatGPT = "Continue with ChatGPT", signOut = "Sign out"
   case planRequired = "ChatGPT Plus or Pro required", signInAgain = "Sign in again"
-  case chatGPTPlan = "Summaries and conversations use your ChatGPT sign-in. Only ChatGPT Plus and Pro plans can be used."
+  case chatGPTPlan = "Codex conversations use your ChatGPT sign-in. Only ChatGPT Plus and Pro plans can be used."
   case chatGPTWaiting = "Waiting for the browser…"
   case chatGPTDeadline = "Sign-in opens your browser and stops after at most 10 minutes."
   case chatGPTStored = "The sign-in is kept only in this Mac's Keychain. Signing out removes it."
   case chatGPTCallbackReturn = "Return to ActivityProbe to see whether sign-in finished. You can close this tab."
   case unavailable = "Not available for this account"
-  case unavailableNote = "ChatGPT plan use is not available for this account, workspace or region, so summaries stay off. Signing in again does not change this. Use a different ChatGPT account, or sign out."
+  case unavailableNote = "ChatGPT plan use is not available for this account, workspace or region, so Codex conversations stay off. Signing in again does not change this. Use a different ChatGPT account, or sign out."
   case usageLimited = "Usage limit reached"
   case notAccepted = "ChatGPT did not accept requests"
   case requestRefused = "ChatGPT refused a request"
   case requestRefusedNote = "ChatGPT refused a request from this version of ActivityProbe. That request stays off until ActivityProbe is updated; other requests may still work."
-  case pausedUntilSignIn = "Summaries and agent-log reading are paused until you continue with ChatGPT."
-  case usageLimitedNote = "ChatGPT reported a usage limit, so summaries are paused and try again later. You can check usage in ChatGPT settings."
-  case notAcceptedNote = "ChatGPT did not accept summary requests, so summaries are paused and try again later. If this continues, continue with ChatGPT to sign in again."
-  case serviceUnavailableNote = "ChatGPT is temporarily unavailable. Summaries are paused and retry automatically after a short wait."
-  case summariesOff = "Summaries and agent-log reading are off. Continue with ChatGPT to turn them on."
+  case pausedUntilSignIn = "Codex conversations are paused until you continue with ChatGPT."
+  case usageLimitedNote = "ChatGPT reported a usage limit, so Codex conversations wait until later. You can check usage in ChatGPT settings."
+  case notAcceptedNote = "ChatGPT did not accept requests. If this continues, continue with ChatGPT to sign in again."
+  case serviceUnavailableNote = "Claude is unavailable or reported a limit for now. Summaries are paused and retry automatically later."
+  case summariesOff = "Codex conversations are off. Continue with ChatGPT to turn them on."
   case differentAccount = "Use a different ChatGPT account"
   case manageUsage = "Manage usage"
   case planWelcomeTitle = "You're using your ChatGPT plan"
-  case planWelcomeMessage = "Summaries in ActivityProbe use your ChatGPT plan. You can manage usage in ChatGPT settings."
+  case planWelcomeMessage = "Codex conversations in ActivityProbe use your ChatGPT plan. You can manage usage in ChatGPT settings."
   case gotIt = "Got it"
   public static func section(_ section: SettingsSection) -> Self {
     switch section {
@@ -166,12 +168,11 @@ public struct SettingsStrings {
 }
 
 /// What the Codex row shows and offers. Pure, so every state is checked without drawing.
-/// Summaries run with consent and a ChatGPT sign-in with plan use. Local recording is independent.
+/// Codex conversations run with consent and a ChatGPT sign-in with plan use. Summaries use Claude (ClaudeSummaryRow).
 public struct ChatGPTRow: Equatable {
-  /// The ChatGPT status. With consent on but no usable sign-in, a note says summaries are paused.
+  /// The ChatGPT status. With consent on but no usable sign-in, a note says Codex conversations are paused.
   public let headline: SettingsLabel
   public let notes: [SettingsLabel]
-  public let showsProblem: Bool
   public let offersContinue: Bool
   public let offersDifferentAccount: Bool
   public let offersSignOut: Bool
@@ -187,9 +188,7 @@ public struct ChatGPTRow: Equatable {
     if status == .requestRefused { notes.append(.requestRefusedNote) }
     if status.signedInForPlanUse && !consented { notes.append(.summariesOff) }
     if status == .unavailable { notes.append(.unavailableNote) }
-    if consented, model.health.summary?.serviceUnavailableUntil != nil { notes.append(.serviceUnavailableNote) }
     self.notes = notes
-    showsProblem = model.subscription == .problem
     // Signing in again cannot change "not available", a usage limit or a refused request; offering it would
     // loop through OAuth.
     let continues = status != .unavailable && status != .requestRefused
@@ -206,5 +205,20 @@ public struct ChatGPTRow: Equatable {
     case .usageLimited: return .usageLimited; case .notAccepted: return .notAccepted
     case .requestRefused: return .requestRefused
     }
+  }
+}
+
+/// What the Claude row says about summaries, which use the person's Claude Code login.
+public struct ClaudeSummaryRow: Equatable {
+  public let showsProblem: Bool
+  public let notes: [SettingsLabel]
+  public init(model: SettingsViewModel) {
+    showsProblem = model.claudeConnection == .problem
+    var notes: [SettingsLabel] = [.claudeSummaries]
+    if model.settings.claudeConnected, let summary = model.health.summary {
+      if !summary.subscriptionConnected { notes.append(.claudeSummariesPaused) }
+      if summary.serviceUnavailableUntil != nil { notes.append(.serviceUnavailableNote) }
+    }
+    self.notes = notes
   }
 }

@@ -11153,7 +11153,7 @@
       }
     },
     "Turning this off keeps your Claude Code login and only stops Claude conversations in this app.": {
-      "extractionState": "manual",
+      "extractionState": "stale",
       "localizations": {
         "ko": {
           "stringUnit": {
@@ -11201,6 +11201,165 @@
           "stringUnit": {
             "state": "needs_review",
             "value": "Отключение сохранит вход в Claude Code и остановит только беседы с Claude в этом приложении."
+          }
+        }
+      }
+    },
+    "Turning this off keeps your Claude Code login and stops summaries and Claude conversations in this app.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "꺼도 Claude Code 로그인은 그대로이고, 이 앱의 요약과 Claude 대화만 멈춥니다."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "オフにしても Claude Code のログインは維持され、このアプリの要約と Claude との会話だけが止まります。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "关闭后保留 Claude Code 登录，仅停止此应用中的摘要和 Claude 对话。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "關閉後會保留 Claude Code 登入，只停止此 App 中的摘要和 Claude 對話。"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Beim Ausschalten bleibt Ihre Claude Code-Anmeldung erhalten. Nur Zusammenfassungen und Claude-Gespräche in dieser App werden gestoppt."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Désactiver conserve votre connexion à Claude Code et arrête seulement les résumés et les conversations Claude dans cette app."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Al desactivar se mantiene el inicio de sesión de Claude Code y solo se detienen los resúmenes y las conversaciones de Claude en esta app."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Отключение сохранит вход в Claude Code и остановит только сводки и беседы с Claude в этом приложении."
+          }
+        }
+      }
+    },
+    "Summaries use your Claude Code login with Claude Haiku. Only a Claude subscription login is used.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "요약은 Claude Code 로그인으로 Claude Haiku를 사용합니다. Claude 구독 로그인만 사용합니다."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "要約には Claude Code のログインで Claude Haiku を使用します。Claude のサブスクリプションでのログインのみ使用します。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "摘要通过 Claude Code 登录使用 Claude Haiku。仅使用 Claude 订阅登录。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "摘要透過 Claude Code 登入使用 Claude Haiku。僅使用 Claude 訂閱登入。"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Zusammenfassungen verwenden Claude Haiku über Ihre Claude Code-Anmeldung. Es wird nur eine Anmeldung mit Claude-Abonnement verwendet."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Les résumés utilisent Claude Haiku avec votre connexion Claude Code. Seule une connexion avec un abonnement Claude est utilisée."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Los resúmenes usan Claude Haiku con tu inicio de sesión de Claude Code. Solo se usa un inicio de sesión con suscripción de Claude."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Сводки используют Claude Haiku через ваш вход в Claude Code. Используется только вход с подпиской Claude."
+          }
+        }
+      }
+    },
+    "Summaries are paused until Claude Code is logged in with a Claude subscription.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code가 Claude 구독으로 로그인될 때까지 요약을 멈춥니다."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Claude Code が Claude のサブスクリプションでログインするまで、要約は一時停止します。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "在 Claude Code 使用 Claude 订阅登录之前，摘要已暂停。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "在 Claude Code 以 Claude 訂閱登入之前，摘要已暫停。"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Zusammenfassungen sind pausiert, bis Claude Code mit einem Claude-Abonnement angemeldet ist."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Les résumés sont en pause jusqu’à ce que Claude Code soit connecté avec un abonnement Claude."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Los resúmenes están en pausa hasta que Claude Code inicie sesión con una suscripción de Claude."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Сводки приостановлены, пока Claude Code не войдёт с подпиской Claude."
           }
         }
       }
@@ -12160,7 +12319,7 @@
       }
     },
     "Summaries and conversations use your ChatGPT sign-in. Only ChatGPT Plus and Pro plans can be used.": {
-      "extractionState": "manual",
+      "extractionState": "stale",
       "localizations": {
         "ko": {
           "stringUnit": {
@@ -12208,6 +12367,59 @@
           "stringUnit": {
             "state": "needs_review",
             "value": "Сводки и беседы используют ваш вход в ChatGPT. Поддерживаются только планы ChatGPT Plus и Pro."
+          }
+        }
+      }
+    },
+    "Codex conversations use your ChatGPT sign-in. Only ChatGPT Plus and Pro plans can be used.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 대화는 ChatGPT 로그인을 사용합니다. ChatGPT Plus와 Pro 요금제만 사용할 수 있습니다."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Codex との会話には ChatGPT ログインを使用します。ChatGPT Plus または Pro プランのみ利用できます。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Codex 对话使用你的 ChatGPT 登录。仅支持 ChatGPT Plus 和 Pro 套餐。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Codex 對話使用你的 ChatGPT 登入。僅支援 ChatGPT Plus 和 Pro 方案。"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Codex-Gespräche verwenden deine ChatGPT-Anmeldung. Es können nur ChatGPT Plus und Pro genutzt werden."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Les conversations Codex utilisent votre connexion ChatGPT. Seuls les forfaits ChatGPT Plus et Pro sont pris en charge."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Las conversaciones de Codex usan tu inicio de sesión de ChatGPT. Solo se admiten los planes ChatGPT Plus y Pro."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Беседы с Codex используют ваш вход в ChatGPT. Поддерживаются только планы ChatGPT Plus и Pro."
           }
         }
       }
@@ -12690,7 +12902,7 @@
       }
     },
     "ChatGPT plan use is not available for this account, workspace or region, so summaries stay off. Signing in again does not change this. Use a different ChatGPT account, or sign out.": {
-      "extractionState": "manual",
+      "extractionState": "stale",
       "localizations": {
         "ko": {
           "stringUnit": {
@@ -12742,8 +12954,61 @@
         }
       }
     },
-    "Summaries and agent-log reading are off. Continue with ChatGPT to turn them on.": {
+    "ChatGPT plan use is not available for this account, workspace or region, so Codex conversations stay off. Signing in again does not change this. Use a different ChatGPT account, or sign out.": {
       "extractionState": "manual",
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 계정, 워크스페이스 또는 지역에서는 ChatGPT 요금제를 사용할 수 없어 Codex 대화는 꺼져 있습니다. 다시 로그인해도 바뀌지 않습니다. 다른 ChatGPT 계정을 쓰거나 로그아웃하세요."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "このアカウント、ワークスペース、または地域では ChatGPT プランを利用できないため、Codex との会話はオフのままです。もう一度サインインしても変わりません。別の ChatGPT アカウントを使うか、サインアウトしてください。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "此账户、工作区或地区无法使用 ChatGPT 套餐，因此 Codex 对话保持关闭。重新登录不会改变这一点。请使用其他 ChatGPT 账户，或退出登录。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "此帳號、工作區或地區無法使用 ChatGPT 方案，因此 Codex 對話保持關閉。重新登入不會改變這一點。請使用其他 ChatGPT 帳號，或登出。"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Die Nutzung des ChatGPT-Plans ist für dieses Konto, diesen Workspace oder diese Region nicht verfügbar, daher bleiben Codex-Gespräche aus. Eine erneute Anmeldung ändert daran nichts. Verwende ein anderes ChatGPT-Konto oder melde dich ab."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "L’utilisation du forfait ChatGPT n’est pas disponible pour ce compte, cet espace de travail ou cette région : les conversations Codex restent désactivées. Se reconnecter n’y change rien. Utilisez un autre compte ChatGPT ou déconnectez-vous."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "El uso del plan de ChatGPT no está disponible para esta cuenta, espacio de trabajo o región, así que las conversaciones de Codex siguen desactivadas. Volver a iniciar sesión no cambia esto. Usa otra cuenta de ChatGPT o cierra sesión."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Использование плана ChatGPT недоступно для этого аккаунта, рабочего пространства или региона, поэтому беседы с Codex остаются выключенными. Повторный вход этого не изменит. Используйте другой аккаунт ChatGPT или выйдите."
+          }
+        }
+      }
+    },
+    "Summaries and agent-log reading are off. Continue with ChatGPT to turn them on.": {
+      "extractionState": "stale",
       "localizations": {
         "ko": {
           "stringUnit": {
@@ -12791,6 +13056,59 @@
           "stringUnit": {
             "state": "needs_review",
             "value": "Сводки и чтение журналов агентов выключены. Чтобы включить, выберите «Продолжить с ChatGPT»."
+          }
+        }
+      }
+    },
+    "Codex conversations are off. Continue with ChatGPT to turn them on.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 대화가 꺼져 있습니다. 켜려면 ChatGPT로 계속하기를 누르세요."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Codex との会話はオフです。オンにするには「ChatGPTで続ける」を押してください。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Codex 对话已关闭。要打开，请点按“使用 ChatGPT 继续”。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Codex 對話已關閉。若要開啟，請點按「使用 ChatGPT 繼續」。"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Codex-Gespräche sind aus. Zum Einschalten „Mit ChatGPT fortfahren“ wählen."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Les conversations Codex sont désactivées. Choisissez « Continuer avec ChatGPT » pour les activer."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Las conversaciones de Codex están desactivadas. Elige «Continuar con ChatGPT» para activarlas."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Беседы с Codex выключены. Чтобы включить, выберите «Продолжить с ChatGPT»."
           }
         }
       }
@@ -12955,7 +13273,7 @@
       }
     },
     "Summaries in ActivityProbe use your ChatGPT plan. You can manage usage in ChatGPT settings.": {
-      "extractionState": "manual",
+      "extractionState": "stale",
       "localizations": {
         "ko": {
           "stringUnit": {
@@ -13003,6 +13321,59 @@
           "stringUnit": {
             "state": "needs_review",
             "value": "Сводки в ActivityProbe используют ваш план ChatGPT. Использованием можно управлять в настройках ChatGPT."
+          }
+        }
+      }
+    },
+    "Codex conversations in ActivityProbe use your ChatGPT plan. You can manage usage in ChatGPT settings.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ActivityProbe의 Codex 대화는 ChatGPT 요금제를 사용합니다. 사용량은 ChatGPT 설정에서 관리할 수 있습니다."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ActivityProbe の Codex との会話には ChatGPT プランを使用します。使用状況は ChatGPT の設定で管理できます。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ActivityProbe 中的 Codex 对话使用你的 ChatGPT 套餐。你可以在 ChatGPT 设置中管理用量。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ActivityProbe 中的 Codex 對話使用你的 ChatGPT 方案。你可以在 ChatGPT 設定中管理用量。"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Codex-Gespräche in ActivityProbe verwenden deinen ChatGPT-Plan. Die Nutzung verwaltest du in den ChatGPT-Einstellungen."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Les conversations Codex dans ActivityProbe utilisent votre forfait ChatGPT. Vous pouvez gérer l’utilisation dans les réglages de ChatGPT."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Las conversaciones de Codex en ActivityProbe usan tu plan de ChatGPT. Puedes gestionar el uso en los ajustes de ChatGPT."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Беседы с Codex в ActivityProbe используют ваш план ChatGPT. Использованием можно управлять в настройках ChatGPT."
           }
         }
       }
@@ -13220,7 +13591,7 @@
       }
     },
     "Summaries and agent-log reading are paused until you continue with ChatGPT.": {
-      "extractionState": "manual",
+      "extractionState": "stale",
       "localizations": {
         "ko": {
           "stringUnit": {
@@ -13272,8 +13643,61 @@
         }
       }
     },
-    "ChatGPT reported a usage limit, so summaries are paused and try again later. You can check usage in ChatGPT settings.": {
+    "Codex conversations are paused until you continue with ChatGPT.": {
       "extractionState": "manual",
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT로 계속하기 전까지 Codex 대화를 멈춥니다."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "「ChatGPTで続ける」を選ぶまで、Codex との会話は一時停止します。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "在你选择“使用 ChatGPT 继续”之前，Codex 对话已暂停。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "在你選擇「使用 ChatGPT 繼續」之前，Codex 對話已暫停。"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Codex-Gespräche sind pausiert, bis du mit ChatGPT fortfährst."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Les conversations Codex sont en pause jusqu’à ce que vous continuiez avec ChatGPT."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Las conversaciones de Codex están en pausa hasta que continúes con ChatGPT."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Беседы с Codex приостановлены, пока вы не продолжите с ChatGPT."
+          }
+        }
+      }
+    },
+    "ChatGPT reported a usage limit, so summaries are paused and try again later. You can check usage in ChatGPT settings.": {
+      "extractionState": "stale",
       "localizations": {
         "ko": {
           "stringUnit": {
@@ -13325,8 +13749,61 @@
         }
       }
     },
-    "ChatGPT did not accept summary requests, so summaries are paused and try again later. If this continues, continue with ChatGPT to sign in again.": {
+    "ChatGPT reported a usage limit, so Codex conversations wait until later. You can check usage in ChatGPT settings.": {
       "extractionState": "manual",
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT가 사용 한도에 도달했다고 알려 Codex 대화는 나중까지 기다립니다. 사용량은 ChatGPT 설정에서 확인할 수 있습니다."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT が使用上限を報告したため、Codex との会話は後まで待ちます。使用状況は ChatGPT の設定で確認できます。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT 报告已达到使用限额，因此 Codex 对话需稍后再进行。你可以在 ChatGPT 设置中查看用量。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT 回報已達使用上限，因此 Codex 對話需稍後再進行。你可以在 ChatGPT 設定中查看用量。"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT hat ein Nutzungslimit gemeldet, daher warten Codex-Gespräche bis später. Die Nutzung findest du in den ChatGPT-Einstellungen."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT a signalé une limite d’utilisation : les conversations Codex attendent plus tard. Vous pouvez consulter l’utilisation dans les réglages de ChatGPT."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT informó de un límite de uso, así que las conversaciones de Codex esperan hasta más tarde. Puedes consultar el uso en los ajustes de ChatGPT."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT сообщил о лимите использования, поэтому беседы с Codex подождут. Использование можно проверить в настройках ChatGPT."
+          }
+        }
+      }
+    },
+    "ChatGPT did not accept summary requests, so summaries are paused and try again later. If this continues, continue with ChatGPT to sign in again.": {
+      "extractionState": "stale",
       "localizations": {
         "ko": {
           "stringUnit": {
@@ -13374,6 +13851,59 @@
           "stringUnit": {
             "state": "needs_review",
             "value": "ChatGPT не принял запросы сводок, поэтому сводки приостановлены и будут повторены позже. Если это продолжится, войдите снова через «Продолжить с ChatGPT»."
+          }
+        }
+      }
+    },
+    "ChatGPT did not accept requests. If this continues, continue with ChatGPT to sign in again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT가 요청을 받지 않았습니다. 계속되면 ChatGPT로 계속하기를 눌러 다시 로그인하세요."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT がリクエストを受け付けませんでした。続く場合は ChatGPT で続けるを選んでもう一度サインインしてください。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT 未接受请求。如果问题持续，请选择使用 ChatGPT 继续以重新登录。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT 未接受請求。若問題持續，請選擇使用 ChatGPT 繼續以重新登入。"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT hat Anfragen nicht angenommen. Wenn das anhält, melde dich mit „Mit ChatGPT fortfahren“ erneut an."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT n’a pas accepté les requêtes. Si cela continue, reconnectez-vous avec « Continuer avec ChatGPT »."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT no aceptó las solicitudes. Si continúa, vuelve a iniciar sesión con «Continuar con ChatGPT»."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ChatGPT не принял запросы. Если это продолжится, войдите снова через «Продолжить с ChatGPT»."
           }
         }
       }
@@ -13697,7 +14227,7 @@
       }
     },
     "ChatGPT is temporarily unavailable. Summaries are paused and retry automatically after a short wait.": {
-      "extractionState": "manual",
+      "extractionState": "stale",
       "localizations": {
         "en": {
           "stringUnit": {
@@ -13751,6 +14281,59 @@
           "stringUnit": {
             "state": "needs_review",
             "value": "ChatGPT временно недоступен. Сводки приостановлены, повторная попытка начнётся автоматически после небольшой паузы."
+          }
+        }
+      }
+    },
+    "Claude is unavailable or reported a limit for now. Summaries are paused and retry automatically later.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "지금은 Claude를 사용할 수 없거나 한도에 도달했습니다. 요약을 멈추고 나중에 자동으로 다시 시도합니다."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "現在 Claude は利用できないか、上限を報告しています。要約を一時停止し、後で自動的に再試行します。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Claude 目前不可用或已报告达到限额。摘要已暂停，稍后会自动重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Claude 目前無法使用或已回報達到上限。摘要已暫停，稍後會自動重試。"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Claude ist gerade nicht verfügbar oder hat ein Limit gemeldet. Zusammenfassungen sind pausiert und werden später automatisch erneut versucht."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Claude est indisponible ou a signalé une limite pour le moment. Les résumés sont en pause et reprendront automatiquement plus tard."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Claude no está disponible o informó de un límite por ahora. Los resúmenes están en pausa y se reintentarán automáticamente más tarde."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Claude сейчас недоступен или сообщил о лимите. Сводки приостановлены, повторная попытка начнётся автоматически позже."
           }
         }
       }

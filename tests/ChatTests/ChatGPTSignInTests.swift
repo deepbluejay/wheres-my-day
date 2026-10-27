@@ -515,11 +515,11 @@ final class ChatGPTSignInTests: XCTestCase {
       "사용 한도 도달", "ChatGPT가 요청을 받지 않음", "ChatGPT가 요청을 거절했습니다"])
     XCTAssertEqual(ko.text(.continueWithChatGPT), "ChatGPT로 계속하기")
     XCTAssertEqual([ko.text(.differentAccount), ko.text(.manageUsage), ko.text(.planWelcomeTitle), ko.text(.gotIt), ko.text(.pausedUntilSignIn)],
-      ["다른 ChatGPT 계정 사용", "사용량 관리", "ChatGPT 요금제를 사용 중", "확인", "ChatGPT로 계속하기 전까지 요약과 에이전트 로그 읽기가 멈춰 있습니다."])
+      ["다른 ChatGPT 계정 사용", "사용량 관리", "ChatGPT 요금제를 사용 중", "확인", "ChatGPT로 계속하기 전까지 Codex 대화를 멈춥니다."])
     // The pause and switch texts have Korean translations in the catalog.
     let added: [String] = [SettingsMessage.chatGPTDifferentAccountWithoutPlan, .chatGPTDifferentAccountWithoutPlanUnconfirmed,
       .chatGPTUnusedRevocationUnconfirmed].map(\.rawValue)
-      + [SettingsLabel.usageLimitedNote, .notAcceptedNote].map(\.rawValue)
+      + [SettingsLabel.usageLimitedNote, .notAcceptedNote, .claudeSummaries, .claudeSummariesPaused, .serviceUnavailableNote].map(\.rawValue)
     for key in added { XCTAssertNotEqual(ko.text(key: key), key, key) }
     XCTAssertTrue(SettingsMessage.chatGPTDifferentAccount.rawValue.hasSuffix("choose " + SettingsLabel.differentAccount.rawValue + "."))
   }

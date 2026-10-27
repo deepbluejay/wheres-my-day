@@ -33,7 +33,7 @@ final class CollectionFidelityTests: XCTestCase {
   override func tearDownWithError() throws { store = nil; try FileManager.default.removeItem(at: folder) }
   let all = TimeRange(0, 100_000)
   func testSummaryCallerReceivesNovelFirstCandidateViewOnly() throws {
-    try store.saveFixtureSettings(StorageSettings(excludedApps: [], subscriptionConnected: true))
+    try store.saveFixtureSettings(StorageSettings(excludedApps: [], subscriptionConnected: true).withClaudeUse)
     try store.appendSamples([TimeSample(ts: 120, keys: 1), TimeSample(ts: 180, keys: 1)])
     try store.appendScreenCapture(text: "Invented repeated version 1", at: 120, source: "invented", knownKeys: [])
     try store.appendScreenCapture(payload: ScreenTextPayload(text: "Invented repeated version 2",

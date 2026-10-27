@@ -87,7 +87,7 @@ public typealias ConversationAgentFactory = (ChatSelection, Bool) -> Conversatio
       if let saved, catalog.contains(where: { $0.accepts(saved) }) { selection = saved }
       // A saved level the catalog stopped offering keeps its model and takes that model's first level.
       else if let model = saved.flatMap({ saved in catalog.first { $0.id == saved.model } })
-        ?? (requested == .codex ? catalog.first { $0.id == SummaryPolicy.model } : nil) ?? catalog.first,
+        ?? (requested == .codex ? catalog.first { $0.id == ChatSelection.codexDefaultModel } : nil) ?? catalog.first,
         let reasoning = (saved?.model != model.id && requested == .codex && model.reasoningLevels.contains("low") ? "low" : model.reasoningLevels.first) {
         choose(model: model.id, reasoning: reasoning)
       }

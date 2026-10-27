@@ -40,7 +40,7 @@ public struct ChatGPTAccountModels: ChatGPTModels {
         let name = entry["display_name"] as? String, !name.isEmpty, name.utf8.count <= 256 else { throw ConversationError.incompatible }
       // The Responses reasoning guide documents medium as the default. Codex metadata replaces this
       // conservative single choice when present; Luna keeps the product's documented low default.
-      return ChatModel(id: slug, reasoningLevels: slug == SummaryPolicy.model ? ["low", "medium", "high"] : ["medium"], displayName: name)
+      return ChatModel(id: slug, reasoningLevels: slug == ChatSelection.codexDefaultModel ? ["low", "medium", "high"] : ["medium"], displayName: name)
     }
   }
 }

@@ -196,6 +196,7 @@ public typealias SettingsDeadlineSchedule = @MainActor (Int, @escaping @MainActo
       try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { connector.cancel() })
       guard !claudeCancelled && !Task.isCancelled else { claudeError = .cancelled; refresh(); return }
       committed(try store.patchSettings(.completeClaudeConnection(generation: generation)))
+      if health.summary != nil { health.summary?.subscriptionConnected = true }
       claudeLogin = .loggedIn
     } catch {
       claudeError = claudeCancelled || Task.isCancelled ? .cancelled : SettingsMessage(error: error)
@@ -243,7 +244,10 @@ public typealias SettingsDeadlineSchedule = @MainActor (Int, @escaping @MainActo
   public func cancelClaudeConnection() { claudeCancelled = true; claudeConnector?.cancel() }
   public func disconnectClaude() {
     if isClaudeConnecting { cancelClaudeConnection() }
-    do { committed(try store.patchSettings(.disconnectClaude)); claudeError = nil }
+    do {
+      committed(try store.patchSettings(.disconnectClaude)); claudeError = nil
+      if health.summary != nil { health.summary?.subscriptionConnected = false }
+    }
     catch { claudeError = .saveFailed }
   }
   public func connect() async {
@@ -251,7 +255,7 @@ public typealias SettingsDeadlineSchedule = @MainActor (Int, @escaping @MainActo
     await connect { try connector.connect() }
   }
   /// Signs in to another ChatGPT account; the saved one is replaced only once the new one validates and
-  /// grants plan use. A failed or cancelled switch leaves the saved account as it was, so summaries go on
+  /// grants plan use. A failed or cancelled switch leaves the saved account as it was, so conversations go on
   /// as before. The grant left unused is revoked in the background after the attempt has returned.
   public func connectDifferentAccount() async {
     guard let account else { return }
@@ -275,7 +279,6 @@ public typealias SettingsDeadlineSchedule = @MainActor (Int, @escaping @MainActo
       // A switch that returned has already replaced the account; a Cancel that came too late is not a cancel.
       guard switching || (!cancelled && !Task.isCancelled) else { error = .cancelled; errorSection = .subscription; refresh(); return }
       committed(try store.patchSettings(.completeConnection(generation: generation)))
-      if health.summary != nil { health.summary?.subscriptionConnected = true }
     } catch {
       errorSection = .subscription
       self.error = cancelled || Task.isCancelled ? .cancelled : SettingsMessage(error: error)
@@ -303,7 +306,7 @@ public typealias SettingsDeadlineSchedule = @MainActor (Int, @escaping @MainActo
     if chatGPT.status == .connected && chatGPT.conversationRequestRefused { chatGPT.status = .requestRefused }
     // A grant a quit or crash left queued is revoked now, in the background, and reported if unconfirmed.
     if chatGPT.revocationPending && !isConnecting && !revoking { Task { await revokeUnusedGrants() } }
-    // Shown once, after plan use is first enabled and summaries are on. A status read that started before
+    // Shown once, after plan use is first enabled and ChatGPT use is on. A status read that started before
     // the person dismissed it must not bring it back.
     if chatGPT.planWelcomePending && settings.subscriptionConnected && !planWelcomeDismissed { showsPlanWelcome = true }
   }
@@ -314,7 +317,7 @@ public typealias SettingsDeadlineSchedule = @MainActor (Int, @escaping @MainActo
     await Task.detached { account.acknowledgePlanWelcome() }.value
     await refreshChatGPTStatus()
   }
-  /// Stops summaries at once, then revokes and clears the ChatGPT tokens in the background.
+  /// Stops ChatGPT use at once, then revokes and clears the ChatGPT tokens in the background.
   public func signOut() async {
     disconnect()
     guard let account else { return }
@@ -328,7 +331,6 @@ public typealias SettingsDeadlineSchedule = @MainActor (Int, @escaping @MainActo
     do {
       // Retain the login saved in the app's own folders; the fresh persisted generation revokes pending connections.
       committed(try store.patchSettings(.disconnect)); error = nil
-      if health.summary != nil { health.summary?.subscriptionConnected = false }
     } catch { self.error = .saveFailed; errorSection = section }
   }
 }

@@ -32,7 +32,7 @@ final class SummaryAccountingTests: XCTestCase {
   }
   let all = TimeRange(0, 10000)
   func seed(_ store: ActivityStorage, through: Int) throws {
-    try store.saveFixtureSettings(StorageSettings(subscriptionConnected: true), at: 0)
+    try store.saveFixtureSettings(StorageSettings(subscriptionConnected: true).withClaudeUse, at: 0)
     try store.appendSamples((0..<through).map { TimeSample(ts: $0, app: "Invented", keys: 1) })
   }
 
@@ -91,7 +91,7 @@ final class SummaryAccountingTests: XCTestCase {
     let summaries = service(memory, caller)
     XCTAssertThrowsError(try run(summaries, through: 600, requested: true))
     XCTAssertEqual(caller.requests, 1)
-    memory.options.subscriptionConnected = false
+    memory.options.claudeUse = false
     try run(summaries, through: 600, requested: true)
     XCTAssertEqual(memory.calls.map(\.inputTokens), [120]); XCTAssertEqual(caller.requests, 1)
   }
@@ -104,7 +104,7 @@ final class SummaryAccountingTests: XCTestCase {
     let summaries = service(memory, caller)
     XCTAssertThrowsError(try run(summaries, through: 600, requested: true))
     XCTAssertTrue(memory.calls.isEmpty); XCTAssertEqual(caller.requests, 1)
-    memory.options.subscriptionConnected = false
+    memory.options.claudeUse = false
     try run(summaries, through: 600, requested: true)
     XCTAssertEqual(memory.calls.map(\.inputTokens), [120]); XCTAssertEqual(caller.requests, 1)
   }
@@ -184,7 +184,7 @@ extension SummaryAccountingTests {
     try run(resumed, through: 600, requested: true)
     XCTAssertEqual(try store.modelCalls(in: all).map(\.inputTokens), [120])
     XCTAssertEqual(caller.requests, 1)
-    try store.saveFixtureSettings(StorageSettings(subscriptionConnected: true))
+    try store.saveFixtureSettings(StorageSettings(subscriptionConnected: true).withClaudeUse)
     caller.answers = [.success(SummaryAnswer(text: "", inputTokens: 10, cachedTokens: 2, outputTokens: 3))]
     try run(resumed, through: 600, requested: true)
     XCTAssertEqual(try store.modelCalls(in: all).map(\.inputTokens), [120, 10])
