@@ -74,8 +74,9 @@ public enum Redaction {
   private static let recoveryLabel = #"(?!(?<=\p{Ll})(?:"# + recoveryNames + "))(?i:" + recoveryNames + ")"
   // The separator after a label. A quote may close the label first, bare or escaped: JSON
   // written inside a line ({"password":"…"} and {\"password\":\"…\"}).
-  private static let labelEnd = #"(?:\\?["'])?\s*[:=：]"#
-  private static let labelValue = #"\s*(?:"[^"\r\n]+"|'[^'\r\n]+'|\S+)"#
+  private static let shapeWhitespace = #"\s"#
+  private static let labelEnd = #"(?:\\?["'])?"# + shapeWhitespace + #"*[:=：]"#
+  private static let labelValue = shapeWhitespace + #"*(?:"[^"\r\n]+"|'[^'\r\n]+'|[^"# + shapeWhitespace + #"]+)"#
   private static let gluedLabel = try! NSRegularExpression(pattern: "token" + gluedToken + labelEnd + labelValue)
 
   private static let patterns: [(rule: String, regex: NSRegularExpression)] = [
@@ -95,7 +96,7 @@ public enum Redaction {
     ("wallet-recovery", recoveryLabel + #"[ \t]*[:=：][ \t]*["']?([A-Za-z]{3,8}(?:[ \t]+[A-Za-z]{3,8}){11}(?:(?:[ \t]+[A-Za-z]{3,8}){3}){0,4})(?![A-Za-z0-9_\-]|[ \t]+[A-Za-z0-9_\-])"#),
     // Quoted values can contain spaces; unquoted values retain the existing non-whitespace rule.
     ("labeled-secret", secretLabel + labelEnd + labelValue),
-    ("url-credential", #"(?i)(?<![a-z0-9+.-])(?>(?:[a-z0-9+.-]*?)(\b[a-z]))[a-z0-9+.-]*://[^\s/@]+@"#),
+    ("url-credential", #"(?i)(?<![a-z0-9+.-])(?>(?:[a-z0-9+.-]*?)(\b[a-z]))[a-z0-9+.-]*://[^"# + shapeWhitespace + #"/@]+@"#),
     ("email", #"(?<![\p{L}\p{N}._%+\-])[\p{L}\p{N}._%+\-]+@[\p{L}\p{N}](?:[\p{L}\p{N}.\-]*\.)[\p{L}\p{N}\-]{2,}(?![\p{L}\p{N}\-])"#),
     // OCR often loses "@". Start only at a whole prefix run or the preceding match's end
     // (\G preserves adjacent matches after an @). Retrying at every prefix character was
@@ -615,11 +616,81 @@ public enum Redaction {
     apply(text, includeRandomValues: false)
   }
 
+  // The streaming Git reader groups complete lexical units before applying the exact
+  // sanitizer. These are the rules which can also span whitespace between those units.
+  static func gitContextMasks(_ text: String) -> (ranges: [NSRange], continuingLabel: Bool) {
+    guard mayMatch(text) else { return ([], false) }
+    let previous = Thread.current.threadDictionary[gitTraceKey]
+    let trace = GitTrace(text)
+    Thread.current.threadDictionary[gitTraceKey] = trace
+    defer {
+      if let previous { Thread.current.threadDictionary[gitTraceKey] = previous }
+      else { Thread.current.threadDictionary.removeObject(forKey: gitTraceKey) }
+    }
+    let first = plain(text, guarded: true).text
+    _ = plain(first, guarded: true)
+    return (trace.kept.removedRanges, trace.continuingLabel)
+  }
+  static func gitLabelTail(_ text: String) -> Bool {
+    guard hasLabelEnd(text) else { return false }
+    let range = NSRange(location: 0, length: (text as NSString).length)
+    return [patterns[7].regex, gluedLabel].contains { regex in
+      regex.matches(in: text, range: range).contains { NSMaxRange($0.range) == range.length }
+    }
+  }
+  /// The exact path tokenizer and streaming certificate share directory recognition.
+  struct GitDirectoryCertificate {
+    private var count = 0
+    private var asciiDirectory = true
+    mutating func appendASCII(_ byte: UInt8, count: Int = 1) {
+      self.count += count
+      asciiDirectory = asciiDirectory && ((byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) || byte == 95 || byte == 45)
+    }
+    mutating func append(_ scalar: Unicode.Scalar) {
+      if scalar.value < 128 { appendASCII(UInt8(scalar.value)) }
+      else { count += 1; asciiDirectory = false }
+    }
+    var isReadable: Bool { count >= 2 && asciiDirectory }
+  }
+
+  private static let shapeWhitespaceRegex = try! NSRegularExpression(pattern: "^(?:" + shapeWhitespace + ")$")
+  private static let shapeWhitespaceASCII: [Bool] = (0..<128).map {
+    shapeWhitespaceRegex.firstMatch(in: String(UnicodeScalar($0)!), range: NSRange(location: 0, length: 1)) != nil
+  }
+  private static let shapeWhitespaceCache: NSCache<NSNumber, NSNumber> = {
+    let cache = NSCache<NSNumber, NSNumber>(); cache.countLimit = 128; return cache
+  }()
+  @inline(__always) static func gitShapeASCIIWhitespace(_ byte: UInt8) -> Bool { shapeWhitespaceASCII[Int(byte)] }
+  /// Use the exact shape rules' ICU class, which differs from entropy boundaries
+  /// for ASCII controls U+001C...U+001F. Cache only scalar numbers, never source text.
+  static func gitShapeWhitespace(_ scalar: Unicode.Scalar) -> Bool {
+    if scalar.value < 128 { return gitShapeASCIIWhitespace(UInt8(scalar.value)) }
+    let key = NSNumber(value: scalar.value)
+    if let result = shapeWhitespaceCache.object(forKey: key) { return result.boolValue }
+    let result = shapeWhitespaceRegex.firstMatch(in: String(scalar), range: NSRange(location: 0, length: scalar.value > 65535 ? 2 : 1)) != nil
+    shapeWhitespaceCache.setObject(NSNumber(value: result), forKey: key)
+    return result
+  }
+
+  /// Shared lexical boundary for exact random-value masking and bounded Git preparation.
+  @inline(__always) static func gitASCIIWhitespace(_ byte: UInt8) -> Bool {
+    byte == 32 || (byte >= 9 && byte <= 13) || (byte >= 28 && byte <= 31)
+  }
+  static func gitWhitespace(_ scalar: Unicode.Scalar) -> Bool {
+    scalar.value <= 127 ? gitASCIIWhitespace(UInt8(scalar.value)) : scalar.properties.isWhitespace
+  }
+
+  static func gitUnitHasSecret(_ text: String) -> Bool {
+    guard (text as NSString).length >= 6 else { return false }
+    if !mayMatch(text) { return !RandomValueMask.ranges(text).isEmpty }
+    return plain(text, guarded: true).text != text
+  }
+
   private static func apply(_ text: String, includeRandomValues: Bool) -> (text: String, rules: [String]) {
     // Keep the existing bare hex/list identity exemption ahead of both kinds of rules.
     if identifierLike(text) { return (text, []) }
     guard (text as NSString).length >= 6 else { return (text, []) }
-    if includeRandomValues, let previous = cache.object(forKey: text as NSString) { return (previous.text, previous.rules) }
+    if includeRandomValues, !gitTracing, let previous = cache.object(forKey: text as NSString) { return (previous.text, previous.rules) }
     let jsonStart = text.utf8.first == 123 || text.utf8.first == 91
     let result: (text: String, rules: [String]) = jsonStart || mayMatch(text) ? uncached(text, guarded: true, includeRandomValues: includeRandomValues)
       : includeRandomValues ? randomValues(text) : (text, [])
@@ -738,6 +809,8 @@ public enum Redaction {
     // Every match holds the small-letter word and a separator.
     guard !guarded || (holds(text, "token") && hasLabelEnd(text)) else { return nil }
     let matches = gluedLabel.matches(in: text, range: NSRange(location: 0, length: (text as NSString).length))
+    if let trace = Thread.current.threadDictionary[gitTraceKey] as? GitTrace, trace.text == text,
+      matches.contains(where: { NSMaxRange($0.range) == (text as NSString).length }) { trace.continuingLabel = true }
     guard !matches.isEmpty else { return nil }
     return replacing(matches.map { ($0.range, secretMark) }, in: text)
   }
@@ -754,7 +827,32 @@ public enum Redaction {
       at = NSMaxRange(edit.range)
     }
     out.append(whole.substring(from: at))
+    if let trace = Thread.current.threadDictionary[gitTraceKey] as? GitTrace, trace.text == text {
+      trace.kept.replace(edits.map { ($0.range, ($0.with as NSString).length) })
+      trace.text = out as String
+    }
     return out as String
+  }
+
+  private static var gitTracing: Bool {
+    return Thread.current.threadDictionary[gitTraceKey] != nil
+  }
+  private static let gitTraceKey = "ActivityProbe.inventedGitMaskTrace"
+  private final class GitTrace {
+    var text: String
+    var kept: Kept
+    var continuingLabel = false
+    init(_ text: String) { self.text = text; kept = Kept(length: (text as NSString).length) }
+  }
+  /// Test oracle for plain input. It observes actual replacements in the exact sanitizer,
+  /// including all rereadings, without inferring positions from repeated marker strings.
+  static func gitTracePlain(_ input: String, _ mask: () -> String) -> (String, [NSRange]) {
+    let trace = GitTrace(input)
+    Thread.current.threadDictionary[gitTraceKey] = trace
+    defer { Thread.current.threadDictionary.removeObject(forKey: gitTraceKey) }
+    let output = mask()
+    precondition(output == trace.text, "Plain tracing cannot map JSON canonicalization")
+    return (output, trace.kept.removedRanges)
   }
 
   /// The rules without the glued credential-word pass: what was masked before that pass
@@ -826,7 +924,17 @@ public enum Redaction {
   private struct Kept {
     private var runs: [(now: Int, then: Int, length: Int)]
     private var length: Int
-    init(length: Int) { runs = [(0, 0, length)]; self.length = length }
+    private let originalLength: Int
+    init(length: Int) { runs = [(0, 0, length)]; self.length = length; originalLength = length }
+    var removedRanges: [NSRange] {
+      var result: [NSRange] = [], end = 0
+      for run in runs {
+        if run.then > end { result.append(NSRange(location: end, length: run.then - end)) }
+        end = run.then + run.length
+      }
+      if end < originalLength { result.append(NSRange(location: end, length: originalLength - end)) }
+      return result
+    }
 
     /// `edits`: ranges of the text as it is now, in order and apart, each with the length of
     /// what replaces it. One pass over the runs.
@@ -907,6 +1015,8 @@ public enum Redaction {
       guard !guarded || triggers[index](result) else { continue }
       let ns = result as NSString
       let matches = regex.matches(in: result, range: NSRange(location: 0, length: ns.length))
+      if rule == "labeled-secret", let trace = Thread.current.threadDictionary[gitTraceKey] as? GitTrace,
+        trace.text == result, matches.contains(where: { NSMaxRange($0.range) == ns.length }) { trace.continuingLabel = true }
       replace(matches.compactMap { match in
         let credential = rule == "wallet-recovery" ? match.range(at: 1) : rule == "url-credential"
           ? NSRange(location: match.range(at: 1).location, length: NSMaxRange(match.range) - match.range(at: 1).location) : match.range
@@ -991,7 +1101,7 @@ enum RandomValueMask {
       default: classes |= 8
       }
     }
-    guard classes.nonzeroBitCount >= 2, classes & 12 != 0 else { return false }
+    guard qualifyingClasses(classes) else { return false }
     let n = Double(range.count)
     let h = counts.reduce(0.0) { sum, count in
       guard count > 0 else { return sum }
@@ -999,6 +1109,13 @@ enum RandomValueMask {
       return sum - p * log2(p)
     }
     return h >= 4
+  }
+
+  private static func qualifyingClasses(_ classes: Int) -> Bool {
+    classes.nonzeroBitCount >= 2 && classes & 12 != 0
+  }
+  static var lettersAreEntropyExempt: Bool {
+    !qualifyingClasses(1) && !qualifyingClasses(2) && !qualifyingClasses(3)
   }
 
   private struct Scalars: RandomAccessCollection {
@@ -1074,10 +1191,9 @@ enum RandomValueMask {
       return range.allSatisfy { isWord(chars[$0]) || chars[$0] == "-" } && entropy(chars, range) < 3.5
     }
     func readableDirectory(_ range: Range<Int>) -> Bool {
-      range.count >= 2 && range.allSatisfy {
-        let c = chars[$0].value
-        return (65...90).contains(c) || (97...122).contains(c) || c == 95 || c == 45
-      }
+      var proof = Redaction.GitDirectoryCertificate()
+      for index in range { proof.append(chars[index]) }
+      return proof.isReadable
     }
     func base64(_ range: Range<Int>) -> Bool {
       guard range.count >= 20 else { return false }
@@ -1231,9 +1347,7 @@ enum RandomValueMask {
     else {
       var start = 0
       for i in chars.indices {
-        let c = chars[i].value
-        let space = c <= 127 ? c == 32 || (9...13).contains(c) || (28...31).contains(c)
-          : chars[i].properties.isWhitespace
+        let space = Redaction.gitWhitespace(chars[i])
         if space { run(start..<i); start = i + 1 }
       }
       run(start..<chars.count)

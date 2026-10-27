@@ -12,6 +12,7 @@ import tempfile
 REPO = Path(__file__).resolve().parent.parent
 PREVIOUS = "8a575902e45808c96d2a25190820af66c0451ac6"
 MAIN14 = "3bca053"
+MAIN15 = "1763e0b"
 BROKEN = "bbd9d5267cd4cdea5498579813109c8cde43b8cb"
 TABLES = ("evidence", "sample_observations", "screen_payloads", "collection_blobs", "input_batches", "collection_metadata")
 
@@ -88,22 +89,12 @@ def main():
         current = export("HEAD", scratch / "current")
         for directory in ("Sources", "Plugins"):
             shutil.copytree(REPO / directory, current / directory, dirs_exist_ok=True)
-        future = scratch / "future"
-        shutil.copytree(current, future)
-        schema = future / "Sources/Storage/Schema.swift"
-        text = schema.read_text().replace("static let schemaVersion = 15", "static let schemaVersion = 16")
-        marker = "      if version < 11 { try backfillCollectionNovelty() }"
-        assert marker in text
-        text = text.replace(marker, '''      for table in ["evidence", "input_batches", "collection_metadata"] {
-        try run("ALTER TABLE \\(table) ADD COLUMN invented_future_column TEXT")
-      }
-''' + marker)
-        schema.write_text(text)
+        main15_source = export(MAIN15, scratch / "main15")
         main14 = build(main14_source, scratch / "build-main14", scratch)
+        main15 = build(main15_source, scratch / "build-main15", scratch)
         old = build(old_source, scratch / "build13", scratch)
         broken = build(broken_source, scratch / "build14before", scratch)
-        fixed = build(current, scratch / "build14fixed", scratch)
-        next_version = build(future, scratch / "build15", scratch)
+        fixed = build(current, scratch / "build16fixed", scratch)
         cases = 0
         for kind in ("screen", "input", "metadata", "observation"):
             root = scratch / ("upgrade-" + kind)
@@ -114,18 +105,30 @@ def main():
                 result = json.loads(run([broken, "recover", negative, kind]))
                 assert result["ready"] >= 2 and result["failures"] > 0
                 print(f"BEFORE {kind} ready={result['ready']} failures={result['failures']}", flush=True)
-            recover(fixed, root, kind, 15, before)
-            cases += 1
-            for label, writer in (("historical-excluded", old), ("current-excluded", fixed)):
+            # Schema 13 is an unsupported origin. Refusal must
+            # precede writes, including ready-file replay and version changes.
+            for label, writer in (("unsupported13", old),):
+                rejected = scratch / (label + "-" + kind)
+                crash(writer, rejected, kind)
+                database = rejected / "invented.sqlite"
+                original = database.read_bytes()
+                child = subprocess.run([fixed, "expect-refusal", rejected, kind], capture_output=True, check=True)
+                assert json.loads(child.stdout) == {"refused": 1}
+                assert database.read_bytes() == original
+                assert len(list(Path(str(database) + '.collection').glob('*.json'))) == 1
+                print(f"PASS refused {label} {kind} database-bytes=unchanged ready=1", flush=True)
+                cases += 1
+            for label, writer in (("main14-excluded", main14), ("main15-excluded", main15), ("current-excluded", fixed)):
                 control = scratch / (label + "-" + kind)
                 original = crash(writer, control, kind)
-                recover(fixed, control, kind, 15, original, excluded=True)
+                recover(fixed, control, kind, 16, original, excluded=True)
                 cases += 1
             for label, writer, reader, version in (("13-to-13", old, old, 13),
-                                                   ("old14-to-fixed15", broken, fixed, 15),
-                                                   ("15-to-15", fixed, fixed, 15),
-                                                   ("14-to-15", main14, fixed, 15),
-                                                   ("15-to-16", fixed, next_version, 16)):
+                                                   ("historical-main14-to-16", broken, fixed, 16),
+                                                   ("14-to-16", main14, fixed, 16),
+                                                   ("15-to-15", main15, main15, 15),
+                                                   ("15-to-16", main15, fixed, 16),
+                                                   ("16-to-16", fixed, fixed, 16)):
                 control = scratch / (label + "-" + kind)
                 original = crash(writer, control, kind)
                 recover(reader, control, kind, version, original)

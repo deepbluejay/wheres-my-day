@@ -10,7 +10,7 @@ extension StorageTests {
     let request = AXProbeRequest(run: run, time: now, window: WindowIdentity(processID: 10, windowID: 20), bundleID: "invented.app", isBrowser: false)
     return AXProbePair(request: request, ax: AXProbeResult(status: .completed), ocrStatus: "completed", ocr: "Invented OCR", imageRequest: nil, imageReturn: nil, ocrCompletion: 0)
   }
-  func testAXProbeVersionEightMigrationAddsContentTablesWithoutRewritingLegacyPayload() throws {
+  func testAXProbeUnsupportedVersionEightLeavesLegacyPayloadUnchanged() throws {
     let store = try ActivityStorage(url: url, appDataDirectory: folder, databaseScope: .directory(folder))
     let pair = try resourcePair(store)
     let legacy = String(decoding: try JSONEncoder().encode(pair), as: UTF8.self)
@@ -19,11 +19,12 @@ extension StorageTests {
     for trigger in ["ax_probe_content_delete", "ax_probe_unref", "ax_probe_blob_delete", "ax_probe_content_refused"] { try store.connection.run("DROP TRIGGER \(trigger)") }
     for table in ["ax_probe_parts", "ax_probe_refs", "ax_probe_chunks", "ax_probe_blobs"] { try store.connection.run("DROP TABLE \(table)") }
     try store.connection.run("PRAGMA user_version=8")
-    let upgraded = try ActivityStorage(url: url, appDataDirectory: folder, databaseScope: .directory(folder))
-    XCTAssertEqual(try upgraded.connection.integer("PRAGMA user_version"), SQLiteConnection.schemaVersion)
+    XCTAssertThrowsError(try ActivityStorage(url: url, appDataDirectory: folder, databaseScope: .directory(folder)))
+    let upgraded = try ActivityStorage(url: url, appDataDirectory: folder, readOnly: true, databaseScope: .directory(folder))
+    XCTAssertEqual(try upgraded.connection.integer("PRAGMA user_version"), 8)
     XCTAssertEqual(try upgraded.connection.integer("SELECT probe_version FROM ax_probe_runs"), 2)
     try upgraded.connection.rows("SELECT payload FROM ax_probe_attempts") { XCTAssertEqual(SQLiteConnection.text($0, 0), legacy) }
-    XCTAssertEqual(try upgraded.connection.integer("SELECT count(*) FROM ax_probe_blobs"), 0)
+    XCTAssertEqual(try upgraded.connection.integer("SELECT count(*) FROM sqlite_master WHERE name='ax_probe_blobs'"), 0)
   }
   func testAXProbeStatusReportsCurrentRetainedBytesAddedWithinTwentyFourHours() throws {
     let store = try ActivityStorage(url: url, appDataDirectory: folder, databaseScope: .directory(folder))

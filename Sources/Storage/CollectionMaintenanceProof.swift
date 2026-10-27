@@ -81,15 +81,7 @@ final class CollectionMaintenanceProof {
       let id = sqlite3_column_int64(row, 0)
       guard loaded[table, default: []].insert(id).inserted else { return }
       identities[table, default: []].insert(id)
-      let columns = (1..<sqlite3_column_count(row)).map { "\"" + String(cString: sqlite3_column_name(row, $0)) + "\"" }
-      let placeholders = Array(repeating: "?", count: Int(sqlite3_column_count(row))).joined(separator: ",")
-      var insert: OpaquePointer?
-      guard sqlite3_prepare_v2(expected.handle, "INSERT INTO \(table)(rowid,\(columns.joined(separator: ","))) VALUES(\(placeholders))", -1, &insert, nil) == SQLITE_OK else { throw expected.failure() }
-      defer { sqlite3_finalize(insert) }
-      for column in 0..<sqlite3_column_count(row) {
-        guard sqlite3_bind_value(insert, column + 1, sqlite3_column_value(row, column)) == SQLITE_OK else { throw expected.failure() }
-      }
-      guard sqlite3_step(insert) == SQLITE_DONE else { throw expected.failure() }
+      try expected.insertCollectionProofRow(row, table: table)
     }
   }
   private func seed(_ source: SQLiteConnection, table: String, predicate: String, values: [SQLValue] = []) throws {

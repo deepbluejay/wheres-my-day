@@ -29,7 +29,7 @@ enum AgentLogRecord {
     data.withUnsafeBytes { raw in
       var reader = Reader(bytes: raw.bindMemory(to: UInt8.self), identity: identity)
       reader.output.reserveCapacity(data.count)
-      let value = reader.value(path: select ? "" : nil, depth: depth, hidden: false)
+      let value = reader.value(path: select ? "" : nil, depth: depth, hidden: false, tracePath: AgentLogEventParser.gitTracingJSON ? [] : nil)
       return Result(line: value as? [String: Any] ?? [:],
         payload: String(decoding: reader.output, as: UTF8.self), flags: reader.flagsByScope.values.flatMap { $0.map { $0.key + ":" + $0.value } })
     }
@@ -75,10 +75,10 @@ enum AgentLogRecord {
         (try? JSONSerialization.jsonObject(with: Data(bytes[start..<index]), options: [.fragmentsAllowed])) as? String ?? ""
       }
     }
-    mutating func value(path: String?, depth: Int, hidden: Bool) -> Any? {
+    mutating func value(path: String?, depth: Int, hidden: Bool, tracePath: [String]?) -> Any? {
       whitespace()
       let suppressed = hidden || depth >= 12
-      if suppressed && !hidden { quoted(Redaction.secretMark) }
+      if suppressed && !hidden { AgentLogEventParser.gitTraceValue(tracePath); quoted(Redaction.secretMark) }
       let selected = path != nil
       if let path, AgentLogRecord.scopes.contains(path) {
         for scope in AgentLogRecord.scopes where scope == path || scope.hasPrefix(path + ".") {
@@ -96,7 +96,7 @@ enum AgentLogRecord {
           if !first { index += 1; whitespace() }
           let key = string()
           whitespace(); index += 1
-          let safeKey = suppressed ? "" : autoreleasepool { AgentLogEventParser.sanitizedString(key, depth: depth + 1, identity: identity) }
+          let safeKey = suppressed ? "" : autoreleasepool { AgentLogEventParser.gitTraceString(key, depth: depth + 1, identity: identity, path: tracePath.map { $0 + ["key:" + key] }) }
           if !suppressed {
             if !first { output.append(44) }
             quoted(safeKey); output.append(58)
@@ -111,8 +111,8 @@ enum AgentLogRecord {
           let flag = path.map { AgentLogRecord.scopes.contains($0) && AgentLogRecord.flags.contains(key) } ?? false
           let flagStart = output.count
           let conceal = !suppressed && autoreleasepool { AgentLogEventParser.credentialKey(safeKey) }
-          if conceal { quoted(Redaction.secretMark) }
-          let child = value(path: childPath, depth: depth + 1, hidden: suppressed || conceal)
+          if conceal { AgentLogEventParser.gitTraceValue(tracePath.map { $0 + ["k:" + key] }); quoted(Redaction.secretMark) }
+          let child = value(path: childPath, depth: depth + 1, hidden: suppressed || conceal, tracePath: suppressed || conceal ? nil : tracePath.map { $0 + ["k:" + key] })
           if selected, childPath != nil { object[key] = child ?? NSNull() }
           if flag, !suppressed {
             flagsByScope[path!, default: [:]][key] = String(decoding: output[flagStart..<output.count], as: UTF8.self)
@@ -127,12 +127,14 @@ enum AgentLogRecord {
         if !suppressed { output.append(91) }
         let content = path == "content" || path == "message.content" || path == "payload.item.content"
         var projection = Content()
+        var element = 0
         var first = true
         whitespace()
         while bytes[index] != 93 {
           if !first { index += 1 }
           if !suppressed, !first { output.append(44) }
-          let child = value(path: content ? "block" : nil, depth: depth + 1, hidden: suppressed)
+          let child = value(path: content ? "block" : nil, depth: depth + 1, hidden: suppressed, tracePath: suppressed ? nil : tracePath.map { $0 + ["a:\(element)"] })
+          element += 1
           if content {
             if let block = child as? [String: Any] {
               let type = block["type"] as? String ?? ""
@@ -151,7 +153,7 @@ enum AgentLogRecord {
         return content ? projection : selected ? NSNull() : nil
       case 34:
         let text = string()
-        if !suppressed { quoted(autoreleasepool { AgentLogEventParser.sanitizedString(text, depth: depth + 1, identity: identity) }) }
+        if !suppressed { quoted(autoreleasepool { AgentLogEventParser.gitTraceString(text, depth: depth + 1, identity: identity, path: suppressed ? nil : tracePath) }) }
         return selected ? text : nil
       default:
         let start = index

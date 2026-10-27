@@ -16,6 +16,7 @@ public struct AgentLogEvent {
   public var parseStatus: String
   public var byteCount: Int
   public var prompt: EvidenceText?
+  public var workingFolder: String? = nil // Transient, never persisted.
   public var canonicalIdentity: AgentLogInstructionIdentity? = nil
   public var legacyRefusal = AgentLogLegacyRefusal()
   // Explicit attribution on this record, independent of either metadata cursor.
@@ -23,7 +24,7 @@ public struct AgentLogEvent {
   public var facts: AgentLogRecordFacts? = nil
   /// Includes conservative per-value/Foundation overhead and the separately retained projection.
   public var retainedByteEstimate: Int {
-    1024 + payload.utf8.count + (session?.utf8.count ?? 0) + project.utf8.count
+    1024 + (workingFolder?.utf8.count ?? 0) + payload.utf8.count + (session?.utf8.count ?? 0) + project.utf8.count
       + type.utf8.count + role.utf8.count + parseStatus.utf8.count
       + flags.reduce(0) { $0 + 64 + $1.utf8.count }
       + identities.reduce(0) { $0 + 64 + $1.utf8.count }
@@ -59,7 +60,7 @@ public enum AgentLogEventParser {
     let message = line["message"] as? [String: Any] ?? [:]
     let item = payload["item"] as? [String: Any] ?? [:]
     let type = line["type"] as? String ?? "unknown"
-    let stamp = timestamp(line["timestamp"] ?? attachment["timestamp"])
+    let stamp = timestamp(line["timestamp"] ?? attachment["timestamp"]) ?? scanned.nativeTimestamp
     let facts = scanned.facts(tool: tool)
     let explicitSession = facts?.session.subject
     AgentLogTransitionReducer.apply(facts, tool: tool, state: &state)
@@ -124,6 +125,7 @@ public enum AgentLogEventParser {
       session: state.session, project: safeString(state.project), type: safeString(type), role: safeString(role),
       flags: flags.sorted().map(safeString), identities: Array(Set(ids)).sorted(),
       payload: safePayload, parseStatus: status, byteCount: byteCount, prompt: prompt)
+    event.workingFolder = scanned.workingFolder
     event.explicitSession = explicitSession
     event.facts = facts
     event.legacyRefusal = legacyRefusal

@@ -1,20 +1,30 @@
 import Foundation
 
 extension SQLiteConnection {
-  static let schemaVersion = 15
+  static let schemaVersion = 16
   static let applicationID = 0x4150_5342
 
   /// Later schema changes go in this function, before the version is advanced.
-  func createSchema() throws {
+  func validateSchemaOrigin() throws -> Int {
     let version = try integer("PRAGMA user_version")
-    guard version != 10 && version != 11 && version != 12 else {
-      throw StorageError("Unsupported undeployed agent-log schema")
+    guard [0, 9, 14, 15, Self.schemaVersion].contains(version) else {
+      throw StorageError("Unsupported database schema \(version): supported origins are a fresh database and main schemas 9, 14 and 15 (current \(Self.schemaVersion))")
     }
     let application = try integer("PRAGMA application_id")
     guard version <= Self.schemaVersion else { throw StorageError("Database version is newer than this storage") }
     let tableCount = try integer("SELECT count(*) FROM sqlite_master WHERE type='table'")
-    guard application == Self.applicationID || (version == 0 && application == 0 && tableCount == 0)
+    guard (version > 0 && application == Self.applicationID) || (version == 0 && application == 0 && tableCount == 0)
     else { throw StorageError("Use conversion to import an old database into a separate new database") }
+    if version == 14 || version == 15 {
+      guard try integer("SELECT count(*) FROM sqlite_master WHERE name='collection_metadata'") == 1,
+        try integer("SELECT count(*) FROM sqlite_master WHERE name='git_repositories'") == 0 else {
+        throw StorageError("Unsupported undeployed Git schema")
+      }
+    }
+    return version
+  }
+  func createSchema() throws {
+    let version = try validateSchemaOrigin()
     try run("PRAGMA secure_delete=ON")
     try run("PRAGMA journal_mode=WAL")
     if version == Self.schemaVersion {
@@ -24,6 +34,25 @@ extension SQLiteConnection {
           AND instr(sql,'general.axProbe.reviewLease')=0
         UNION ALL SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM pragma_table_info('ax_probe_pid') WHERE name='failure_policy'))
         """) > 0 { try transaction { try createAXProbeSchema() } }
+      if try integer("SELECT count(*) FROM sqlite_master WHERE name IN ('git_commit_text','git_text_cleanup','git_value_text','git_files_text_cleanup','git_commit_refs_text_cleanup','git_refs_text_cleanup','git_working_folders_text_cleanup','git_ref_frontier','git_ref_repo_id','git_commit_completion','git_privacy_revision','git_source_revision','log_positions_git_recovery','git_ref_pending_insert','git_ref_pending_delete','git_ref_pending_update','git_abandoned_commits','git_abandoned_folders','git_incomplete_commits','git_incomplete_folders','git_file_commit','git_commit_ref_owner','git_retention_progress','git_backfill_progress','git_backfill_progress_event','git_backfill_progress_clamp')") != 26
+        || integer("SELECT count(*) FROM pragma_table_info('git_repositories') WHERE name='frontier'") != 1
+        || integer("SELECT count(*) FROM pragma_table_info('git_repositories') WHERE name='pending_frontier'") != 1
+        || integer("SELECT count(*) FROM pragma_table_info('git_repositories') WHERE name='pending_ref_count'") != 1
+        || integer("SELECT count(*) FROM pragma_table_info('git_refs') WHERE name='frontier'") != 1
+        || integer("SELECT count(*) FROM pragma_table_info('git_working_folders') WHERE name='complete'") != 1
+        || integer("SELECT count(*) FROM pragma_table_info('git_working_folders') WHERE name='ownership_authority'") != 1
+        || integer("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'git_revision_%'") != 33
+        || integer("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'git_source_revision_%'") != 21 {
+        try transaction { try createGitTextSchema() }
+      }
+      collectionAccountingEnabled = true
+      return
+    }
+    if version == 15 {
+      try transaction {
+        try createGitSchema()
+        try run("PRAGMA user_version=\(Self.schemaVersion)")
+      }
       collectionAccountingEnabled = true
       return
     }
@@ -35,6 +64,7 @@ extension SQLiteConnection {
         try createAgentLogBaselineSchema()
         try legacyLogAdapter.createSchema()
         try legacyLogAdapter.adoptNativeIdentities()
+        try createGitSchema()
         try run("PRAGMA user_version=\(Self.schemaVersion)")
       }
       collectionAccountingEnabled = true
@@ -134,6 +164,7 @@ extension SQLiteConnection {
       try createAXProbeSchema()
       try createAgentLogSchema()
       try createAgentLogBaselineSchema()
+      try createGitSchema()
       try legacyLogAdapter.createSchema()
       if version > 0 && version < 15 { try legacyLogAdapter.adoptNativeIdentities() }
       var hasTableFacts = false

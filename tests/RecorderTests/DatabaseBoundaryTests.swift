@@ -282,22 +282,21 @@ final class DatabaseBoundaryTests: XCTestCase {
       if approved == self.root.deletingLastPathComponent() { XCTAssertEqual(scope,context.databaseScope) }
     }
     defer { DatabaseOpenBoundary.beforeOpen = nil }
-    for args in [["stop"],["status"],
-      ["privacy","verdicts"],["selftest"],["leaktest"]] {
+    // Origin validation, Git preparation and collection proofs each use approved read-only snapshots.
+    for (args, count) in [(["stop"],3),(["status"],1),
+      (["privacy","verdicts"],1),(["selftest"],20),(["leaktest"],20)] {
       opened = []
       let result = RetainedCommands.run(args,paths:context,now:1000)
-      let expectedOpens = ["stop":2,"status":1,"verdicts":1,"selftest":14,"leaktest":14]
-      let route = args.last!
-      XCTAssertEqual(result.status,0,result.output); XCTAssertEqual(opened.count,expectedOpens[route],args.joined(separator:" "))
+      XCTAssertEqual(result.status,0,result.output); XCTAssertEqual(opened.count,count,args.joined(separator:" "))
     }
     opened = []
     let preview = RetainedCommands.run(["privacy","forget","60","120"],paths:context,now:1000)
-    XCTAssertEqual(preview.status,0); XCTAssertEqual(opened.count,1)
+    XCTAssertEqual(preview.status,0); XCTAssertEqual(opened.count,2)
     let line = try XCTUnwrap(preview.output.components(separatedBy:"\n").first{$0.hasPrefix("Confirmation code: ")})
     let code = String(line.dropFirst("Confirmation code: ".count))
     opened = []
     XCTAssertEqual(RetainedCommands.run(["privacy","forget","60","120","--confirm",code],paths:context,now:1000).status,0)
-    XCTAssertEqual(opened.count,2) // Destination plus a read-only proof snapshot.
+    XCTAssertEqual(opened.count,5) // Destination, origin preflight, Git preparation and collection proof snapshots.
     opened = []
     do {
       let owner = try RecorderStartupGuard(paths:context)
@@ -305,13 +304,13 @@ final class DatabaseBoundaryTests: XCTestCase {
       let configuration = IsolatedRecorderConfiguration(paths:context)
       let connections = try configuration.composition(factories:factories).recorder(processes:NoAgentLogProcesses(),
         fileVault:BoundaryVault(),from:0,dayStart:{$0},locale:{"en"},recorderLock:owner.recorderLock)
-      XCTAssertEqual(opened.count,4) // Preflight, recorder, maintenance client and proof snapshot.
+      XCTAssertEqual(opened.count,6) // Startup and per-writer preflights, recorder, client and proof snapshot.
       withExtendedLifetime((owner,connections)){}
     }
     let destination = root.appendingPathComponent("conversion.sqlite")
     // Four source opens remain. Destination write transactions also establish
     // independently approved read-only entry snapshots.
-    for count in [10,9] { // A repeat also performs read-only destination preflight.
+    for count in [10,10] { // A repeat also performs read-only destination preflight.
       opened = []
       let result = convert(source,to:destination)
       XCTAssertEqual(result.status,0,result.output); XCTAssertEqual(opened.count,count)

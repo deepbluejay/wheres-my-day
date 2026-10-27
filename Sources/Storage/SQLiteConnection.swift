@@ -20,6 +20,7 @@ enum SQLValue {
   case text(String)
   case key(String)
   case maskedText(String)
+  case maskedBlob(Data)
   case null
 }
 
@@ -60,6 +61,7 @@ struct DatabaseRow {
 
 final class SQLiteConnection {
   var handle: OpaquePointer?
+  private var gitBusyReceipt: GitBusyReceipt?
   var collectionAccountingEnabled = false
   var collectionCommitClock: () -> Int = { Int(Date().timeIntervalSince1970) }
   var collectionProofs: [String: () throws -> Void] = [:]
@@ -93,6 +95,19 @@ final class SQLiteConnection {
       throw error
     }
     sqlite3_busy_timeout(handle, busyMilliseconds)
+    do {
+      // TEMP defaults can retain tens of MiB before spilling masked ref chunks.
+      // Apply the same working set to writers and private maintenance snapshots.
+      try run("PRAGMA main.cache_size=-1024")
+      try run("PRAGMA main.cache_spill=256")
+      try run("PRAGMA temp_store=FILE")
+      try run("PRAGMA temp.cache_size=-1024")
+      try run("PRAGMA temp.cache_spill=256")
+    } catch {
+      sqlite3_close(handle)
+      handle = nil
+      throw error
+    }
     installCollectionUpdateHook()
     sqlite3_set_authorizer(handle, { context, action, table, _, _, trigger in
       guard let context, let table,
@@ -107,10 +122,28 @@ final class SQLiteConnection {
       return SQLITE_OK
     }, Unmanaged.passUnretained(self).toOpaque())
   }
+  static func originPreflight(url: URL, scope: DatabaseOpenScope, busyMilliseconds: Int32 = 3000) throws -> SQLiteConnection {
+    // A completed backup can retain the WAL header without any sidecars. Immutable
+    // reading can inspect that committed image without creating a journal first.
+    let standalone = ["-wal", "-shm", "-journal"].allSatisfy { !FileManager.default.fileExists(atPath: url.path + $0) }
+    return try SQLiteConnection(url: url, readOnly: true, immutable: standalone, scope: scope, busyMilliseconds: busyMilliseconds)
+  }
   init(temporaryCollectionProof: Void) throws {
     busyMilliseconds = 0
     guard sqlite3_open("", &handle) == SQLITE_OK else { throw failure() }
     installCollectionUpdateHook()
+  }
+  func insertCollectionProofRow(_ row: OpaquePointer, table: String) throws {
+    guard collectionSnapshotURL == nil else { throw StorageError("Proof copy requires a temporary database") }
+      let columns = (1..<sqlite3_column_count(row)).map { "\"" + String(cString: sqlite3_column_name(row, $0)) + "\"" }
+      let placeholders = Array(repeating: "?", count: Int(sqlite3_column_count(row))).joined(separator: ",")
+      var insert: OpaquePointer?
+      guard sqlite3_prepare_v2(handle, "INSERT INTO \(table)(rowid,\(columns.joined(separator: ","))) VALUES(\(placeholders))", -1, &insert, nil) == SQLITE_OK else { throw failure() }
+      defer { sqlite3_finalize(insert) }
+      for column in 0..<sqlite3_column_count(row) {
+        guard sqlite3_bind_value(insert, column + 1, sqlite3_column_value(row, column)) == SQLITE_OK else { throw failure() }
+      }
+      guard sqlite3_step(insert) == SQLITE_DONE else { throw failure() }
   }
   func collectionEntrySnapshot() throws -> SQLiteConnection? {
     guard let url = collectionSnapshotURL, let scope = collectionSnapshotScope else { return nil }
@@ -145,6 +178,45 @@ final class SQLiteConnection {
     let result = sqlite3_wal_checkpoint_v2(handle, nil, SQLITE_CHECKPOINT_TRUNCATE, &logFrames, &checkpointed)
     return result == SQLITE_OK && logFrames == 0 && checkpointed == 0
   }
+  /// Git admission polls the task receipt rather than sleeping in SQLite's default
+  /// multi-second handler. A canceled task has one shared 100 ms invalidation grace.
+  func withGitAdmission<T>(_ cancellation: GitTaskCancellation?, _ body: () throws -> T) throws -> T {
+    guard let cancellation else { return try body() }
+    let context = GitBusyReceipt(cancellation, milliseconds: busyMilliseconds)
+    let previous = gitBusyReceipt
+    gitBusyReceipt = context
+    installGitBusyHandler(context)
+    defer {
+      gitBusyReceipt = previous
+      if let previous { installGitBusyHandler(previous) }
+      else { sqlite3_busy_timeout(handle, busyMilliseconds) }
+    }
+    do { return try body() }
+    catch {
+      try cancellation.checkCleanup()
+      throw error
+    }
+  }
+  private func installGitBusyHandler(_ context: GitBusyReceipt) {
+    sqlite3_busy_handler(handle, { pointer, _ in
+      guard let pointer else { return 0 }
+      let receipt = Unmanaged<GitBusyReceipt>.fromOpaque(pointer).takeUnretainedValue()
+      guard receipt.mayWait else { return 0 }
+      Thread.sleep(forTimeInterval: 0.001)
+      return 1
+    }, Unmanaged.passUnretained(context).toOpaque())
+  }
+  private final class GitBusyReceipt {
+    let cancellation: GitTaskCancellation
+    let deadline: TimeInterval
+    init(_ cancellation: GitTaskCancellation, milliseconds: Int32) {
+      self.cancellation = cancellation
+      deadline = ProcessInfo.processInfo.systemUptime + Double(milliseconds) / 1000
+    }
+    var mayWait: Bool {
+      (try? cancellation.checkCleanup()) != nil && ProcessInfo.processInfo.systemUptime < deadline
+    }
+  }
   func failure() -> StorageError {
     let message = handle.flatMap { sqlite3_errmsg($0) }.map { String(cString: $0) } ?? "Database unavailable"
     let code = sqlite3_errcode(handle)
@@ -169,7 +241,7 @@ final class SQLiteConnection {
       switch value {
       case .integer(let number): result = sqlite3_bind_int64(statement, index, Int64(number))
       case .null: result = sqlite3_bind_null(statement, index)
-      case .blob(let data):
+      case .maskedBlob(let data), .blob(let data):
         result = data.withUnsafeBytes { sqlite3_bind_blob(statement, index, $0.baseAddress, Int32(data.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
       case .text(let text), .key(let text), .maskedText(let text):
         // Lookup keys must retain identity. Only keys use .key; every free-text value is masked.

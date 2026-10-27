@@ -3,11 +3,14 @@ import Foundation
 /// Launches register before starting a child. Hash-only receipts persist ownership without log content.
 /// One file per receipt avoids a shared read/modify/write race between the app and recorder processes.
 public struct AgentLogOwnSources {
+  public enum AuthorityError: Error { case invalidReceipt }
   public static let folderName = "own-agent-log-sources"
   private let directory: URL
   private let digest: (Data) -> String
+  private let receiptExists: ((URL) throws -> Bool)?
   private let retainedReceipt: (String) throws -> Bool
-  public init(appDataDirectory: URL, digest: @escaping (Data) -> String, retainedReceipt: @escaping (String) throws -> Bool = { _ in false }) {
+  public init(appDataDirectory: URL, digest: @escaping (Data) -> String, retainedReceipt: @escaping (String) throws -> Bool = { _ in false }, receiptExists: ((URL) throws -> Bool)? = nil) {
+    self.receiptExists = receiptExists
     self.retainedReceipt = retainedReceipt
     self.digest = digest
     directory = appDataDirectory.appendingPathComponent(Self.folderName)
@@ -19,6 +22,7 @@ public struct AgentLogOwnSources {
   }
   private func exists(_ url: URL) throws -> Bool {
     if try retainedReceipt(url.lastPathComponent) { return true }
+    if let receiptExists { return try receiptExists(url) }
     do { return try url.checkResourceIsReachable() }
     catch {
       let failure = error as NSError
@@ -70,6 +74,37 @@ public struct AgentLogOwnSources {
   }
   public func registerPath(_ path: URL, tool: AgentLogTool) throws {
     try register("path", path.resolvingSymlinksInPath().standardizedFileURL.path, tool: tool)
+  }
+  /// Hash-only candidates retain exact raw path ownership after masking persistence.
+  public func authority(path: String, sessions: [AgentLogSessionSubject], tool: AgentLogTool) -> [String] {
+    var candidates = sessions.map { receipt("session", $0.storedKey, tool: tool).lastPathComponent }
+    var url = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
+    candidates.append(receipt("path", url.path, tool: tool).lastPathComponent)
+    for part in url.pathComponents {
+      let stem = (part as NSString).deletingPathExtension
+      candidates.append(receipt("session", AgentLogIdentity.decoded(stem).component.storedKey, tool: tool).lastPathComponent)
+      if tool == .codex, stem.count >= 36 {
+        candidates.append(receipt("session", AgentLogIdentity.decoded(String(stem.suffix(36))).component.storedKey, tool: tool).lastPathComponent)
+      }
+    }
+    while url.path != "/" {
+      candidates.append(receipt("home", url.path, tool: tool).lastPathComponent)
+      url.deleteLastPathComponent()
+    }
+    return Array(Set(candidates)).sorted()
+  }
+  public func containsAuthority(_ candidates: [String]) throws -> Bool {
+    guard !candidates.isEmpty else { throw AuthorityError.invalidReceipt }
+    guard candidates.allSatisfy({ candidate in
+      candidate.utf8.count == 64 && candidate.utf8.allSatisfy({
+        (48...57).contains($0) || (97...102).contains($0)
+      })
+    }) else { throw AuthorityError.invalidReceipt }
+    // An absent registry proves every candidate absent at this admission check.
+    for candidate in candidates {
+      if try exists(directory.appendingPathComponent(candidate)) { return true }
+    }
+    return false
   }
   public func containsSession(_ input: AgentLogIdentity.DecodedInput, tool: AgentLogTool) throws -> Bool {
     try containsSession(input.session.subject, tool: tool)

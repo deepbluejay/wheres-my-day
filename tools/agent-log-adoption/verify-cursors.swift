@@ -4,6 +4,7 @@ import Inbound
 @testable import Storage
 
 let base = URL(fileURLWithPath: CommandLine.arguments[1])
+let modern = CommandLine.arguments.last == "15"
 let fixtures = try JSONSerialization.jsonObject(with: Data(contentsOf: base.appendingPathComponent("cursor-cases.json"))) as! [[String: Any]]
 func require(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
   if try !condition() { throw NSError(domain: "InventedCursorAdoption", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
@@ -36,9 +37,18 @@ for entry in fixtures {
         try storage.appendLogEvents(batch.events, evidence: batch.evidence, position: batch.position)
         try require(try storage.evidence(in: TimeRange(0, 1000)) == prompts, "Historical evidence changed")
         let old = historical[file.path]!
-        try require(try storage.connection.integer("SELECT count(*) FROM log_positions WHERE path=? AND device=? AND inode=? AND offset=? AND state=?",
-          [.key(file.path), .integer(old.device), .integer(old.inode), .integer(old.offset), .text(old.state)]) == 1,
-          "Historical cursor changed")
+        if modern {
+          let current = try storage.logPosition(path: file.path)!
+          let before = try AgentLogState.decode(old.state), after = try AgentLogState.decode(current.state)
+          try require(current.device == old.device && current.inode == old.inode && current.offset == old.offset,
+            "Historical physical cursor changed")
+          try require(before.session == after.session && before.project == after.project && before.metadataVersion == after.metadataVersion,
+            "Historical cursor attribution changed")
+        } else {
+          try require(try storage.connection.integer("SELECT count(*) FROM log_positions WHERE path=? AND device=? AND inode=? AND offset=? AND state=?",
+            [.key(file.path), .integer(old.device), .integer(old.inode), .integer(old.offset), .text(old.state)]) == 1,
+            "Historical cursor changed")
+        }
         recovering = batch.ownershipDeferred
         deferred += recovering ? 1 : 0
         storage = nil
@@ -47,9 +57,9 @@ for entry in fixtures {
       }
     }
     storage = try ActivityStorage(url: database, appDataDirectory: folder, databaseScope: .directory(folder))
-    try require(try storage.connection.integer("SELECT count(*) FROM log_positions") == files.count * 2, "Unexpected cursor count")
+    try require(try storage.connection.integer("SELECT count(*) FROM log_positions") == files.count * (modern ? 1 : 2), "Unexpected cursor count")
     try require(try storage.connection.integer("SELECT count(*) FROM agent_log_events") == 0, "Replayed historical event")
     storage = nil
   }
 }
-print("Actual-main cursor adoption: \(fixtures.count) fixtures, \(lookups) lookup/restart checks, \(deferred) partial-metadata deferrals, zero replay; historical cursors/evidence unchanged")
+print("Actual-main cursor adoption: \(fixtures.count) fixtures, \(lookups) lookup/restart checks, \(deferred) partial-metadata deferrals, zero replay; historical cursor identity/attribution and evidence unchanged")

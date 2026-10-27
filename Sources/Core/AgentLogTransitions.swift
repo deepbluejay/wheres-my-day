@@ -7,6 +7,7 @@ public struct AgentLogRecordFacts {
   public var sessionExact: Bool
   public var legacySession: AgentLogLegacyProof?
   public var project: String?
+  public var projectTimestamp: Int? = nil
   public var projectOwned: Bool
   public var headerOrigin: AgentLogIgnore?
   public var ownMarker: Bool
@@ -40,7 +41,11 @@ public enum AgentLogTransitionReducer {
     if let project = facts.project, !project.isEmpty {
       if state.ownWorkingFolder == nil { state.ownWorkingFolder = facts.projectOwned }
       state.ownWorkingFolder = state.ownWorkingFolder == true || facts.projectOwned
-      if state.project.isEmpty { state.project = project }
+      if state.project.isEmpty {
+        state.project = project
+        state.cwdSession = facts.session.subject ?? state.session
+        state.cwdObservedAt = facts.projectTimestamp
+      }
     }
     if facts.ownMarker {
       if let session = facts.session.subject ?? state.session { state.ownedSession = session }

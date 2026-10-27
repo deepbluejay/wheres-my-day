@@ -8,6 +8,16 @@ import SQLite3
 let mode = CommandLine.arguments[1], root = URL(fileURLWithPath: CommandLine.arguments[2])
 let kind = CommandLine.arguments[3]
 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+if mode == "expect-refusal" {
+  do {
+    _ = try ActivityStorage(url: root.appendingPathComponent("invented.sqlite"), appDataDirectory: root,
+      databaseScope: .directory(root))
+    fatalError("Unsupported origin was accepted")
+  } catch is StorageError {
+    print("{\"refused\":1}")
+    exit(0)
+  }
+}
 let store = try ActivityStorage(url: root.appendingPathComponent("invented.sqlite"), appDataDirectory: root,
   databaseScope: .directory(root))
 if mode == "crash" {

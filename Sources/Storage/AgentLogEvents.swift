@@ -1,6 +1,7 @@
 import Core
 import CryptoKit
 import Foundation
+import Darwin
 import SQLite3
 
 extension SQLiteConnection {
@@ -136,6 +137,15 @@ extension ActivityStorage {
       SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined()
     }, retainedReceipt: { key in
       try self.connection.integer("SELECT EXISTS(SELECT 1 FROM agent_log_own_baseline WHERE receipt=?)", [.key(key)]) != 0
+    }, receiptExists: { url in
+      var info = stat()
+      while true {
+        if stat(url.path, &info) == 0 { return true }
+        let code = errno
+        if code == EINTR { continue }
+        if code == ENOENT { return false }
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+      }
     })
   }
   // Deduplication retains every permitted physical provenance, using explicit IDs only.
@@ -189,6 +199,9 @@ extension ActivityStorage {
     }
     let identity = session
     guard identity.isUsable else { return }
+    try connection.run("DELETE FROM git_working_folders WHERE tool=? AND session=?",
+      [.key(tool.rawValue), .key(identity)])
+    if sqlite3_changes(connection.handle) > 0 { try cleanGitOrphans() }
     // This receipt commits only after all revocations and the discovering checkpoint succeed.
     // Admission checks this database receipt as well as the filesystem ownership registry.
     guard try connection.integer("SELECT count(*) FROM agent_log_revoked_sessions WHERE tool=? AND session_id=?",
@@ -217,6 +230,7 @@ extension ActivityStorage {
     return [.key(stem + ":"), .key(stem + ";")]
   }
   func purgeOwnLogSource(_ position: LogPosition, tool: AgentLogTool, sourceKey: AgentLogPhysicalSource) throws {
+    try purgeOwnGitSource(position, tool: tool, sourceKey: sourceKey)
     let values: [SQLValue] = [.key(tool.rawValue), .integer(position.device), .integer(position.inode),
       .key(sourceKey)]
     // Remember proven origin ownership without copying a historical raw path into a new row.
@@ -261,6 +275,7 @@ extension AgentLogEvent {
   func maskedForPersistence() -> AgentLogEvent {
     var safe = self
     let mask = AgentLogEventParser.safeString
+    safe.workingFolder = nil
     safe.session = session
     safe.explicitSession = explicitSession
     safe.canonicalIdentity = canonicalIdentity

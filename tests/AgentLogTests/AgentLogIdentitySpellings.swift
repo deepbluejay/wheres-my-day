@@ -21,3 +21,12 @@ extension AgentLogOwnSources {
     return try containsSession(AgentLogIdentity.decoded(decoded), tool: tool)
   }
 }
+
+@testable import Storage
+
+extension ActivityStorage {
+  func purgeOwnLogSession(_ decoded: String, tool: AgentLogTool) throws {
+    guard let session = AgentLogIdentity.decoded(decoded).session.subject else { return }
+    try purgeOwnLogSession(session, tool: tool)
+  }
+}

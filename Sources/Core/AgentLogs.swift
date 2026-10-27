@@ -62,7 +62,7 @@ extension AgentLogReader {
 public enum AgentLogIgnore: String, Codable, CaseIterable {
   case meta, compactSummary, transcriptOnly, sidechain, subagent
   case taskNotification, peer, automation, nonHumanOrigin, toolUseResult, toolResult
-  case imported, ownWindow, localCommandOutput, shellOutput, interruption, empty
+  case timestampUnknownCwd, imported, ownWindow, localCommandOutput, shellOutput, interruption, empty
 }
 
 public enum AgentLogPolicy {
@@ -95,6 +95,9 @@ public struct AgentLogState: Codable, Equatable {
   public var legacySession: AgentLogLegacyProof?
   public var ownWorkingFolder: Bool?
   public var project = ""
+  public var gitOwnershipAuthority: [String]?
+  public var cwdObservedAt: Int?
+  public var cwdSession: AgentLogSessionSubject?
   public var ignoredSession: AgentLogIgnore?
   public var metadataRead = false
   public var ownershipScanOffset = 0
@@ -124,6 +127,7 @@ public struct AgentLogState: Codable, Equatable {
     metadataRecoveryScanner = AgentLogMetadata()
   }
   private enum CodingKeys: String, CodingKey {
+    case gitOwnershipAuthority, cwdObservedAt, cwdSession
     case metadataVersion, unusableMetadataValues, tool, session, sessionExact, legacySession, project, folder, threadID, queued, legacyRefusalQueue, ignoredSession, metadataRead, ownWorkingFolder, ownershipScanOffset, ownershipSession, ownedSession, metadataRecoveryOffset, metadataRecoveryScanner
   }
   public init(from decoder: Decoder) throws {
@@ -133,6 +137,9 @@ public struct AgentLogState: Codable, Equatable {
       throw DecodingError.dataCorruptedError(forKey: .metadataVersion, in: values,
         debugDescription: "Unsupported undeployed agent-log checkpoint")
     }
+    gitOwnershipAuthority = try values.decodeIfPresent([String].self, forKey: .gitOwnershipAuthority)
+    cwdObservedAt = try values.decodeIfPresent(Int.self, forKey: .cwdObservedAt)
+    cwdSession = try values.decodeIfPresent(AgentLogSessionSubject.self, forKey: .cwdSession)
     unusableMetadataValues = try values.decodeIfPresent(Int.self, forKey: .unusableMetadataValues) ?? 0
     tool = try values.decodeIfPresent(String.self, forKey: .tool)
     session = try values.decodeIfPresent(AgentLogSessionSubject.self, forKey: .session)
@@ -155,6 +162,9 @@ public struct AgentLogState: Codable, Equatable {
   }
   public func encode(to encoder: Encoder) throws {
     var values = encoder.container(keyedBy: CodingKeys.self)
+    try values.encodeIfPresent(gitOwnershipAuthority, forKey: .gitOwnershipAuthority)
+    try values.encodeIfPresent(cwdObservedAt, forKey: .cwdObservedAt)
+    try values.encodeIfPresent(cwdSession, forKey: .cwdSession)
     try values.encode(metadataVersion, forKey: .metadataVersion)
     try values.encode(unusableMetadataValues, forKey: .unusableMetadataValues)
     try values.encodeIfPresent(tool.map { AgentLogIdentityCodec.component($0).storedKey }, forKey: .tool)

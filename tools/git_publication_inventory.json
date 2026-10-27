@@ -1,0 +1,698 @@
+{
+  "notes": "Reviewed nonpublication mutations: schema/adoption, irreversible privacy erasure/markers, bounded debt invalidation/disposal, and masked TEMP deletion selection. Gate-internal refusal/abandonment writes are part of authorization, not caller bypasses. Any change requires reviewing this inventory. CollectionFileCursor owns a private empty-filename SQLite manifest; its complete source digest pins the isolated adapter. Collection proof copies are restricted to SQLiteConnection temporary proof databases. Backfill progress marks (git_backfill_progress) only skip occurrences already offered to discovery; they never authorize a publication, and deleting the largest agent-log event id lowers them. Forget narrows its TEMP selection in the final unit so rows published in a batch gap are not cascaded.",
+  "gated_sites": 20,
+  "nonpublication": [
+    {
+      "file": "Sources/Storage/AXProbeStorage.swift",
+      "function": "deleteAXProbe",
+      "sql": "DELETE FROM \\(table) WHERE run_id=?"
+    },
+    {
+      "file": "Sources/Storage/ActivityStorage.swift",
+      "function": "cleanRetention",
+      "sql": "INSERT INTO git_retention_progress VALUES(1,?) ON CONFLICT(id) DO UPDATE SET maintained_at=max(maintained_at,excluded.maintained_at)"
+    },
+    {
+      "file": "Sources/Storage/AgentLogEvents.swift",
+      "function": "purgeOwnLogSession",
+      "sql": "DELETE FROM git_working_folders WHERE tool=? AND session=?"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "function": "apply",
+      "sql": "UPDATE"
+    },
+    {
+      "file": "Sources/Storage/Deletion.swift",
+      "function": "deleteRecords",
+      "sql": "DELETE FROM \\(table) WHERE \\(selection)"
+    },
+    {
+      "file": "Sources/Storage/Deletion.swift",
+      "function": "deleteRecords",
+      "sql": "DELETE FROM \\(table) WHERE \\(selection)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "abandonGitCommit",
+      "sql": "UPDATE git_commits SET complete=-1 WHERE id=? AND complete=0"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "cleanGitCancelledWork",
+      "sql": "UPDATE git_repositories SET pending_frontier='',pending_ref_count=0 WHERE id=? AND pending_frontier!=''"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "cleanGitFrontiers",
+      "sql": "DELETE FROM git_refs WHERE id=? AND repo_id=? AND frontier!=(SELECT frontier FROM git_repositories WHERE id=?) AND frontier!=(SELECT pending_frontier FROM git_repositories WHERE id=?)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "cleanGitFrontiers",
+      "sql": "DELETE FROM git_value_text WHERE id IN (SELECT id FROM git_value_text WHERE kind=3 AND owner_id=? AND EXISTS(SELECT 1 FROM git_refs r JOIN git_repositories p ON p.id=r.repo_id WHERE r.id=? AND r.repo_id=? AND r.frontier!=p.frontier AND r.frontier!=p.pending_frontier) LIMIT 16)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "cleanGitOrphans",
+      "sql": "DELETE FROM git_repositories WHERE NOT EXISTS(SELECT 1 FROM git_working_folders WHERE repo_id=git_repositories.id)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "cleanGitRetention",
+      "sql": "DELETE FROM git_commits WHERE ts<? OR author_ts<?"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "cleanGitRetention",
+      "sql": "DELETE FROM git_refs WHERE ts<?"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "cleanGitRetention",
+      "sql": "DELETE FROM git_working_folders WHERE last_seen<?"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "clearGitRefStage",
+      "sql": "DELETE FROM \\(table) WHERE rowid IN (SELECT rowid FROM \\(table) WHERE repo_id=? LIMIT 32)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "copyGitDeletionSelections",
+      "sql": "DELETE FROM \\(table) WHERE rowid IN (SELECT rowid FROM \\(table) LIMIT 256)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "copyGitDeletionSelections",
+      "sql": "INSERT INTO \\(table) VALUES(?)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "createGitTextSchema",
+      "sql": "INSERT OR IGNORE INTO git_privacy_revision VALUES(1,0)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "createGitTextSchema",
+      "sql": "INSERT OR IGNORE INTO git_source_revision VALUES(1,0)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "discardGitCommitContent",
+      "sql": "DELETE FROM \\(table) WHERE id=? AND commit_id=? AND EXISTS(SELECT 1 FROM git_commits WHERE id=? AND complete=-1)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "discardGitCommitContent",
+      "sql": "DELETE FROM git_commit_text WHERE id IN (SELECT id FROM git_commit_text WHERE commit_id=? AND EXISTS(SELECT 1 FROM git_commits WHERE id=? AND complete=-1) LIMIT 16)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "discardGitCommitContent",
+      "sql": "DELETE FROM git_commits WHERE id=? AND complete=-1"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "discardGitCommitContent",
+      "sql": "DELETE FROM git_value_text WHERE id IN (SELECT id FROM git_value_text WHERE kind=? AND owner_id=? AND EXISTS(SELECT 1 FROM git_commits WHERE id=? AND complete=-1) LIMIT 16)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "discardGitFolderPreparation",
+      "sql": "DELETE FROM git_value_text WHERE id IN (SELECT id FROM git_value_text WHERE kind=4 AND owner_id=? AND EXISTS(SELECT 1 FROM git_working_folders WHERE id=? AND complete=-1) LIMIT 16)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "discardGitFolderPreparation",
+      "sql": "DELETE FROM git_working_folders WHERE id=? AND complete=-1"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "discardGitFolderPreparation",
+      "sql": "UPDATE git_working_folders SET complete=-1 WHERE id=? AND complete!=1"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "finishGitRead",
+      "sql": "UPDATE git_repositories SET pending_frontier='',pending_ref_count=0 WHERE id=?"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "finishGitRead",
+      "sql": "UPDATE git_repositories SET pending_frontier='',pending_ref_count=0 WHERE id=? AND pending_frontier=?"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "markGitDeletion",
+      "sql": "INSERT OR IGNORE INTO git_discovery_tombstones SELECT hash FROM git_deletion_discoveries"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "markGitDeletion",
+      "sql": "INSERT OR IGNORE INTO git_tombstones SELECT hash FROM git_deletion_hashes"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "narrowGitDeletion",
+      "sql": "DELETE FROM git_deletion_commits WHERE id NOT IN (SELECT id FROM git_commits WHERE (ts>=? AND ts<?) OR (author_ts>=? AND author_ts<?) OR repo_id IN git_deletion_repos)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "narrowGitDeletion",
+      "sql": "DELETE FROM git_deletion_folders WHERE id NOT IN (SELECT id FROM git_working_folders WHERE (last_seen>=? AND ts<?) OR repo_id IN git_deletion_repos)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "narrowGitDeletion",
+      "sql": "DELETE FROM git_deletion_refs WHERE id NOT IN (SELECT id FROM git_refs WHERE (ts>=? AND ts<?) OR repo_id IN git_deletion_repos)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "narrowGitDeletion",
+      "sql": "DELETE FROM git_deletion_repos WHERE id NOT IN (SELECT repo_id FROM git_working_folders WHERE repo_id IS NOT NULL GROUP BY repo_id HAVING MIN(last_seen)>=? AND MAX(ts)<?) OR EXISTS(SELECT 1 FROM git_working_folders f WHERE f.repo_id=git_deletion_repos.id AND f.id NOT IN git_deletion_folders) OR EXISTS(SELECT 1 FROM git_commits c WHERE c.repo_id=git_deletion_repos.id AND c.id NOT IN git_deletion_commits) OR EXISTS(SELECT 1 FROM git_refs r WHERE r.repo_id=git_deletion_repos.id AND r.id NOT IN git_deletion_refs)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "DELETE FROM git_deletion_\\(table)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "DELETE FROM git_deletion_checkpoints"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "DELETE FROM git_deletion_discoveries"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "DELETE FROM git_deletion_hashes"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "INSERT INTO git_deletion_checkpoints VALUES(?)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "INSERT INTO git_deletion_commits SELECT id FROM git_commits WHERE (ts>=? AND ts<?) OR (author_ts>=? AND author_ts<?) OR repo_id IN git_deletion_repos"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "INSERT INTO git_deletion_folders SELECT id FROM git_working_folders WHERE (last_seen>=? AND ts<?) OR repo_id IN git_deletion_repos"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "INSERT INTO git_deletion_hashes SELECT hash FROM git_commits WHERE id IN git_deletion_commits"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "INSERT INTO git_deletion_refs SELECT id FROM git_refs WHERE (ts>=? AND ts<?) OR repo_id IN git_deletion_repos"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "INSERT INTO git_deletion_repos SELECT repo_id FROM git_working_folders WHERE repo_id IS NOT NULL GROUP BY repo_id HAVING MIN(last_seen)>=? AND MAX(ts)<?"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "INSERT OR IGNORE INTO git_deletion_discoveries SELECT discovery FROM git_working_folders WHERE id IN git_deletion_folders AND discovery!=''"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "INSERT OR IGNORE INTO git_deletion_discoveries VALUES(?)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "INSERT OR IGNORE INTO git_deletion_discoveries VALUES(?)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "purgeOwnGitSource",
+      "sql": "DELETE FROM git_working_folders WHERE tool=? AND device=? AND inode=? AND source=?"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "saveGitBackfillProgress",
+      "sql": "INSERT INTO git_backfill_progress(source,event_id) VALUES(?,?) ON CONFLICT(source) DO UPDATE SET event_id=max(event_id,excluded.event_id)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "validateGitObservation",
+      "sql": "INSERT OR IGNORE INTO agent_log_tool_own_sources VALUES(?,?,?,?)"
+    },
+    {
+      "file": "Sources/Storage/GitPublication.swift",
+      "function": "gitPublicationRefusal",
+      "sql": "INSERT OR IGNORE INTO git_tombstones VALUES(?)"
+    },
+    {
+      "file": "Sources/Storage/GitPublication.swift",
+      "function": "gitPublicationRefusal",
+      "sql": "INSERT OR IGNORE INTO git_tombstones VALUES(?)"
+    },
+    {
+      "file": "Sources/Storage/GitPublication.swift",
+      "function": "publishGit",
+      "sql": "UPDATE git_commits SET complete=-1 WHERE id=? AND complete=0"
+    },
+    {
+      "file": "Sources/Storage/GitPublication.swift",
+      "function": "reconcileGitOwnership",
+      "sql": "DELETE FROM git_working_folders WHERE id=?"
+    },
+    {
+      "file": "Sources/Storage/SQLiteConnection.swift",
+      "function": "insertCollectionProofRow",
+      "sql": "INSERT INTO \\(table)(rowid,\\(columns.joined(separator:"
+    }
+  ],
+  "dynamic_executions": [
+    {
+      "file": "Sources/Storage/AXProbeContent.swift",
+      "call": "run(sql)"
+    },
+    {
+      "file": "Sources/Storage/AXProbeStorage.swift",
+      "call": "run(sql)"
+    },
+    {
+      "file": "Sources/Storage/AgentLogEvents.swift",
+      "call": "run(sql)"
+    },
+    {
+      "file": "Sources/Storage/AgentLogEvents.swift",
+      "call": "run(sql)"
+    },
+    {
+      "file": "Sources/Storage/AgentLogEvents.swift",
+      "call": "namedRows(Self.ownLogSessionSourcesSQL, Self.ownLogSessionSourceValues(identity, tool: tool))"
+    },
+    {
+      "file": "Sources/Storage/AgentLogEvents.swift",
+      "call": "collectionWrite(Self.legacyOccurrenceCleanupSQL, Self.legacyOccurrenceCleanupValues(position, tool: tool))"
+    },
+    {
+      "file": "Sources/Storage/AgentLogLegacyAdapter.swift",
+      "call": "namedRows(query, values)"
+    },
+    {
+      "file": "Sources/Storage/CollectionAccounting.swift",
+      "call": "run($0)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "call": "run(schema)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "call": "run($0.text(\"sql\"))"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "call": "run(sql)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "call": "rows(args + \"SELECT rowid FROM \\(table)\\(indexHint) WHERE \\(predicate)\", values)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "call": "rows(preparedRow + \"SELECT rowid FROM \\(table) WHERE (\\(key.predicate)) AND \\(predicate)\", values)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "call": "rows(args + \"SELECT \\(owner)\", values)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "call": "run(sql, values)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "call": "run(sql)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "call": "rows(args + \"SELECT rowid FROM \\(table) WHERE (\\(predicate))\" + after + order + \" LIMIT 64\", values)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "call": "run(sql, values)"
+    },
+    {
+      "file": "Sources/Storage/CollectionObservations.swift",
+      "call": "run(sql)"
+    },
+    {
+      "file": "Sources/Storage/CollectionObservations.swift",
+      "call": "run(sql)"
+    },
+    {
+      "file": "Sources/Storage/CollectionPolicy.swift",
+      "call": "namedRows(sql, values)"
+    },
+    {
+      "file": "Sources/Storage/CollectionProof.swift",
+      "call": "rows(sql, values)"
+    },
+    {
+      "file": "Sources/Storage/Deletion.swift",
+      "call": "rows(query, selectionValues(range))"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "call": "run(sql)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "call": "namedRows(query, values)"
+    },
+    {
+      "file": "Sources/Storage/SQLiteConnection.swift",
+      "call": "rows(sql, values)"
+    },
+    {
+      "file": "Sources/Storage/SQLiteConnection.swift",
+      "call": "rows(sql, values)"
+    },
+    {
+      "file": "Sources/Storage/SQLiteConnection.swift",
+      "call": "rows(sql, values)"
+    },
+    {
+      "file": "Sources/Storage/SQLiteConnection.swift",
+      "call": "run(write ? \"BEGIN IMMEDIATE\" : \"BEGIN\")"
+    },
+    {
+      "file": "Sources/Storage/Schema.swift",
+      "call": "run(sql)"
+    },
+    {
+      "file": "Sources/Storage/ScreenMetadata.swift",
+      "call": "rows(sql, values)"
+    }
+  ],
+  "publications": [
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "touchGitFolder",
+      "sql": "UPDATE git_working_folders SET last_seen=max(last_seen,?),ownership_authority=? WHERE id=? AND (last_seen<? OR ownership_authority!=?)",
+      "gated": true,
+      "operation": "publishGit(.discovery(context), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "rememberGitFolder",
+      "sql": "INSERT OR IGNORE INTO git_repositories(identity,common_dir,ts,reopen_blocked) VALUES(?,?,?,?)",
+      "gated": true,
+      "operation": "publishGit(.discovery(context), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "rememberGitFolder",
+      "sql": "INSERT INTO git_working_folders(identity,source,device,inode,session,folder,repo_id,top_level,branch,head,ts,last_seen,attempt_ts,status,failures,tool,discovery,complete,ownership_authority) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(identity) DO UPDATE SET repo_id=excluded.repo_id,top_level=excluded.top_level,branch=excluded.branch,head=excluded.head, attempt_ts=excluded.attempt_ts,status=excluded.status,failures=git_working_folders.failures+excluded.failures,complete=excluded.complete,ownership_authority=excluded.ownership_authority",
+      "gated": true,
+      "operation": "publishGit(.discovery(context), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "rememberGitFolder",
+      "sql": "INSERT INTO git_value_text(kind,owner_id,field,ordinal,payload) VALUES(4,?,0,?,?)",
+      "gated": true,
+      "operation": "publishGit(.discovery(chunkContext), now: now,"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "rememberGitFolder",
+      "sql": "UPDATE git_working_folders SET complete=1 WHERE id=?",
+      "gated": true,
+      "operation": "publishGit(.discovery(chunkContext), now: now,"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "gitFolderPresence",
+      "sql": "UPDATE git_working_folders SET status=? WHERE id=? AND repo_id IS NOT NULL AND complete=1",
+      "gated": true,
+      "operation": "publishGit(.diagnostic(.folder(id)), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "gitReopenBlocked",
+      "sql": "UPDATE git_repositories SET reopen_blocked=? WHERE id=?",
+      "gated": true,
+      "operation": "publishGit(.diagnostic(.repository(repo)), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "stageGitRef",
+      "sql": "INSERT OR REPLACE INTO git_next_refs VALUES(?,?,?,?)",
+      "gated": true,
+      "operation": "publishGit(.frontier(.staging(repo)), now: now,"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "stageGitRef",
+      "sql": "INSERT OR REPLACE INTO git_next_ref_text VALUES(?,?,?,?)",
+      "gated": true,
+      "operation": "publishGit(.frontier(.staging(repo)), now: now,"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "finishGitRead",
+      "sql": "UPDATE git_repositories SET pending_frontier=?,pending_ref_count=0 WHERE id=?",
+      "gated": true,
+      "operation": "publishGit(.frontier(.begin(repo)), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "finishGitRead",
+      "sql": "INSERT INTO git_refs(repo_id,identity,name,tip,ts,frontier) VALUES(?,?,?,?,?,?)",
+      "gated": true,
+      "operation": "publishGit(.frontier(.row(repo, frontier)), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "finishGitRead",
+      "sql": "INSERT INTO git_value_text(kind,owner_id,field,ordinal,payload) VALUES(3,?,0,?,?)",
+      "gated": true,
+      "operation": "publishGit(.frontier(.chunk(repo, frontier, id)), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "finishGitRead",
+      "sql": "UPDATE git_repositories SET last_read=?,frontier=?,pending_frontier='',pending_ref_count=0 WHERE id=?",
+      "gated": true,
+      "operation": "publishGit(.frontier(.certify(repo, frontier, published)), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "finishGitRead",
+      "sql": "UPDATE git_repositories SET failures=failures+1 WHERE id=?",
+      "gated": true,
+      "operation": "publishGit(.frontier(.nativeFailure(repo)), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "publishGitCommit",
+      "sql": "INSERT INTO git_commits(repo_id,hash,author_ts,ts,author,email,message) VALUES(?,?,?,?,?,?,?)",
+      "gated": true,
+      "operation": "publishGit(.commitParent(receipt), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "beginGitCommit",
+      "sql": "INSERT INTO git_commit_text(commit_id,field,ordinal,payload) VALUES(?,?,?,?)",
+      "gated": true,
+      "operation": "publishGit(.commitUnit(id), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "appendGitFile",
+      "sql": "INSERT INTO git_files(commit_id,old_path,path,added,deleted) VALUES(?,?,?,?,?)",
+      "gated": true,
+      "operation": "publishGit(.commitUnit(commit), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "appendGitValue",
+      "sql": "INSERT INTO git_value_text(kind,owner_id,field,ordinal,payload) VALUES(?,?,?,?,?)",
+      "gated": true,
+      "operation": "publishGit(.commitUnit(commit), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "appendGitCommitRef",
+      "sql": "INSERT OR IGNORE INTO git_commit_refs(commit_id,identity,name) VALUES(?,?,?)",
+      "gated": true,
+      "operation": "publishGit(.commitUnit(commit), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "finishGitCommit",
+      "sql": "UPDATE git_commits SET complete=1 WHERE id=? AND complete=0",
+      "gated": true,
+      "operation": "publishGit(.commitCompletion(id), now: now)"
+    }
+  ],
+  "schema_triggers": [
+    {
+      "file": "Sources/Storage/AXProbeContent.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS ax_probe_content_delete AFTER DELETE ON ax_probe_attempts BEGIN DELETE FROM ax_probe_parts WHERE attempt_row=OLD.id; DELETE FROM ax_probe_refs WHERE attempt_row=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/AXProbeContent.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS ax_probe_unref AFTER DELETE ON ax_probe_refs BEGIN DELETE FROM ax_probe_blobs WHERE hash=OLD.hash AND NOT EXISTS(SELECT 1 FROM ax_probe_refs WHERE hash=OLD.hash); END"
+    },
+    {
+      "file": "Sources/Storage/AXProbeContent.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS ax_probe_blob_delete AFTER DELETE ON ax_probe_blobs BEGIN DELETE FROM ax_probe_chunks WHERE hash=OLD.hash; END"
+    },
+    {
+      "file": "Sources/Storage/AXProbeContent.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS ax_probe_content_refused AFTER UPDATE OF payload ON ax_probe_attempts WHEN json_extract(NEW.payload,'$.ax.status')='policyRefused' BEGIN DELETE FROM ax_probe_parts WHERE attempt_row=NEW.id; DELETE FROM ax_probe_refs WHERE attempt_row=NEW.id; END"
+    },
+    {
+      "file": "Sources/Storage/AXProbeStorage.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS ax_probe_evidence_delete AFTER DELETE ON evidence BEGIN DELETE FROM ax_probe_attempts WHERE evidence_id=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/AXProbeStorage.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS ax_probe_attempt_delete AFTER DELETE ON ax_probe_attempts BEGIN DELETE FROM ax_probe_review WHERE attempt_row=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/AXProbeStorage.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS ax_probe_review_no_enable BEFORE INSERT ON settings WHEN NEW.key='general.axProbe.enabled' AND NEW.value='1' AND EXISTS(SELECT 1 FROM settings WHERE key='general.axProbe.reviewLease' AND json_valid(value) AND CAST(strftime('%s','now') AS REAL)>=json_extract(value,'$.issuedWall') AND CAST(strftime('%s','now') AS REAL)<json_extract(value,'$.deadlineWall')) BEGIN SELECT RAISE(ABORT,'Close probe review first'); END"
+    },
+    {
+      "file": "Sources/Storage/AXProbeStorage.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS ax_probe_review_immutable BEFORE UPDATE ON ax_probe_review WHEN EXISTS(SELECT 1 FROM ax_probe_review_state WHERE run_id=OLD.run_id AND sealed=1) BEGIN SELECT RAISE(ABORT,'Review sealed'); END"
+    },
+    {
+      "file": "Sources/Storage/AgentLogEvents.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS agent_log_source_evidence_cleanup AFTER DELETE ON evidence BEGIN DELETE FROM agent_log_source_evidence WHERE evidence_id=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/AgentLogEvents.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS agent_log_payload_cleanup AFTER DELETE ON agent_log_events BEGIN DELETE FROM agent_log_event_identities WHERE event_id=OLD.id; DELETE FROM agent_log_payloads WHERE id=OLD.payload_id AND NOT EXISTS(SELECT 1 FROM agent_log_events WHERE payload_id=OLD.payload_id); END"
+    },
+    {
+      "file": "Sources/Storage/AgentLogEvents.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS agent_log_evidence_origin_cleanup AFTER DELETE ON evidence BEGIN DELETE FROM agent_log_evidence_origins WHERE evidence_id=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/AgentLogEvents.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS agent_log_owned_evidence_origin_cleanup AFTER DELETE ON evidence BEGIN DELETE FROM agent_log_owned_evidence_origins WHERE evidence_id=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/AgentLogEvents.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS agent_log_inherited_session_cleanup AFTER DELETE ON agent_log_events BEGIN DELETE FROM agent_log_inherited_sessions WHERE event_id=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/AgentLogEvents.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS agent_log_event_session_cleanup AFTER DELETE ON agent_log_events BEGIN DELETE FROM agent_log_event_sessions WHERE event_id=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/AgentLogLegacyAdapter.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS agent_log_content_cleanup AFTER DELETE ON evidence BEGIN DELETE FROM agent_log_content_keys WHERE evidence_id=OLD.id; DELETE FROM agent_log_legacy_compatibility WHERE digest IN (SELECT digest FROM agent_log_legacy_evidence_keys WHERE evidence_id=OLD.id) AND NOT EXISTS(SELECT 1 FROM agent_log_legacy_refusals r WHERE r.digest=agent_log_legacy_compatibility.digest) AND NOT EXISTS(SELECT 1 FROM agent_log_legacy_evidence_keys k WHERE k.digest=agent_log_legacy_compatibility.digest AND k.evidence_id<>OLD.id); DELETE FROM agent_log_legacy_evidence_keys WHERE evidence_id=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/CollectionAccounting.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS ingestion_\\(table) AFTER INSERT ON \\(table) WHEN \\(filter) BEGIN UPDATE collection_ingestion_pending SET bytes=bytes+(\\(size)) WHERE id=1; END"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS collection_unref"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "sql": "CREATE TRIGGER"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS ingestion_"
+    },
+    {
+      "file": "Sources/Storage/CollectionObservations.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS collection_legacy_delete AFTER DELETE ON sample_observations BEGIN DELETE FROM collection_legacy_times WHERE observation_row=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/CollectionObservations.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS screen_payload_update_owner BEFORE UPDATE OF evidence_id ON screen_payloads WHEN NEW.evidence_id!=OLD.evidence_id OR NOT EXISTS(SELECT 1 FROM evidence WHERE id=NEW.evidence_id) BEGIN SELECT RAISE(ABORT,'Screen ownership is immutable'); END"
+    },
+    {
+      "file": "Sources/Storage/CollectionObservations.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS screen_payload_owner BEFORE INSERT ON screen_payloads WHEN NOT EXISTS(SELECT 1 FROM evidence WHERE id=NEW.evidence_id) BEGIN SELECT RAISE(ABORT,'Missing screen occurrence'); END"
+    },
+    {
+      "file": "Sources/Storage/CollectionObservations.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS screen_payload_delete AFTER DELETE ON evidence BEGIN DELETE FROM screen_payloads WHERE evidence_id=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/CollectionObservations.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS collection_unref AFTER DELETE ON screen_payloads BEGIN DELETE FROM collection_blobs WHERE hash IN (OLD.text_hash,OLD.payload_hash) AND NOT EXISTS(SELECT 1 FROM screen_payloads WHERE text_hash=hash OR payload_hash=hash); END"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS git_backfill_progress_clamp AFTER DELETE ON agent_log_events WHEN OLD.id>(SELECT COALESCE(max(id),0) FROM agent_log_events) BEGIN UPDATE git_backfill_progress SET event_id=(SELECT COALESCE(max(id),0) FROM agent_log_events) WHERE event_id>(SELECT COALESCE(max(id),0) FROM agent_log_events); END"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS git_text_cleanup AFTER DELETE ON git_commits BEGIN DELETE FROM git_commit_text WHERE commit_id=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS \\(table)_text_cleanup AFTER DELETE ON \\(table) BEGIN DELETE FROM git_value_text WHERE kind=\\(kind) AND owner_id=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS git_ref_pending_insert AFTER INSERT ON git_refs BEGIN UPDATE git_repositories SET pending_ref_count=pending_ref_count+1 WHERE id=NEW.repo_id AND pending_frontier=NEW.frontier; END"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS git_ref_pending_delete AFTER DELETE ON git_refs BEGIN UPDATE git_repositories SET pending_ref_count=pending_ref_count-1 WHERE id=OLD.repo_id AND pending_frontier=OLD.frontier; END"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS git_ref_pending_update AFTER UPDATE OF repo_id,frontier ON git_refs BEGIN UPDATE git_repositories SET pending_ref_count=pending_ref_count-1 WHERE id=OLD.repo_id AND pending_frontier=OLD.frontier; UPDATE git_repositories SET pending_ref_count=pending_ref_count+1 WHERE id=NEW.repo_id AND pending_frontier=NEW.frontier; END"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS git_revision_\\(table)_\\(action.lowercased()) AFTER \\(action) ON \\(table) BEGIN UPDATE git_privacy_revision SET value=value+1 WHERE id=1; END"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS git_source_revision_\\(table)_\\(action.lowercased()) AFTER \\(action) ON \\(table) BEGIN UPDATE git_source_revision SET value=value+1 WHERE id=1; END"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS git_commit_cleanup AFTER DELETE ON git_commits BEGIN DELETE FROM git_files WHERE commit_id=OLD.id; DELETE FROM git_commit_refs WHERE commit_id=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS git_repo_cleanup AFTER DELETE ON git_repositories BEGIN DELETE FROM git_commits WHERE repo_id=OLD.id; DELETE FROM git_refs WHERE repo_id=OLD.id; DELETE FROM git_working_folders WHERE repo_id=OLD.id; END"
+    },
+    {
+      "file": "Sources/Storage/Schema.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS intervals_no_overlap BEFORE INSERT ON intervals WHEN EXISTS(SELECT 1 FROM intervals WHERE start_ts<NEW.end_ts AND end_ts>NEW.start_ts) BEGIN SELECT RAISE(ABORT,'One minute belongs to at most one interval'); END"
+    },
+    {
+      "file": "Sources/Storage/Schema.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS intervals_no_rewrite BEFORE UPDATE ON intervals BEGIN SELECT RAISE(ABORT,'Earlier intervals cannot be rewritten'); END"
+    }
+  ],
+  "temporary_sqlite_adapters": {
+    "CollectionFileCursor.swift": "7a1a2c6a98ad74cbaff13b5fe9a1d8eed87f91ad088ccb21641737be87b4f4f2"
+  }
+}

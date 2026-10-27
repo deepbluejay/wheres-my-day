@@ -111,6 +111,7 @@ public enum AgentLogFiles {
         batch.ownershipDeferred = true
         return batch
       }
+
     }
     let checkpointSubjects = [state.ownershipSession].compactMap { $0 }
     try evaluateOwnership(&state, sessions: checkpointSubjects, file: file.path, tool: tool, ownSources: ownSources)

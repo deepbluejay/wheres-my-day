@@ -44,9 +44,12 @@ public struct RecorderHealth {
 public struct RecorderMaintenanceTask {
   public let name: String
   public let run: (Int) throws -> Void
-  public init(name: String, run: @escaping (Int) throws -> Void) {
+  public let cancel: () -> Void
+  public let finish: (@escaping () -> Void) -> Void
+  public init(name: String, cancel: @escaping () -> Void = {}, finish: @escaping (@escaping () -> Void) -> Void = { $0() }, run: @escaping (Int) throws -> Void) {
     self.name = name
     self.run = run
+    self.cancel = cancel; self.finish = finish
   }
 }
 
@@ -174,12 +177,14 @@ public final class RecorderLoop {
   /// The shell must call stop before release. Deinit alone discards pending work without counting it.
   public func stop() {
     precondition(Thread.isMainThread)
+    let cancelMaintenance = !stopped
     inboxLock.lock()
     stopped = true; captureGeneration += 1
     probeInbox.removeAll()
     health.droppedCaptures += activeCaptures.count
     activeCaptures.removeAll()
     inboxLock.unlock()
+    if cancelMaintenance { for task in maintenanceTasks { task.cancel() } }
     (screen as? AXProbeScreenSource)?.invalidateProbe()
     probePending.removeAll(); probeEvidence.removeAll(); probePipeline?.discardWaiting()
     timer?.invalidate()
@@ -210,8 +215,12 @@ public final class RecorderLoop {
   /// A barrier lets the host retain the connections until owned maintenance has finished.
   public func finishMaintenance(_ completion: @escaping () -> Void) {
     maintenanceQueue.async {
-      if let pipeline = self.probePipeline { pipeline.drain { DispatchQueue.main.async { completion() } } }
-      else { DispatchQueue.main.async { completion() } }
+      let group = DispatchGroup()
+      for task in self.maintenanceTasks { group.enter(); task.finish { group.leave() } }
+      group.notify(queue: self.maintenanceQueue) {
+        if let pipeline = self.probePipeline { pipeline.drain { DispatchQueue.main.async { completion() } } }
+        else { DispatchQueue.main.async { completion() } }
+      }
     }
   }
   public func setSuspended(_ value: Bool) {

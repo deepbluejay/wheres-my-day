@@ -21,6 +21,9 @@ public struct AgentLogHealth {
   public var folderFailures = 0
   public var discoveryFailures = 0
   public var ownershipDeferredBatches = 0
+  /// Batches appended while Secure Input (or a Git error) deferred their Git observation.
+  public var gitDeferredBatches = 0
+  public var gitFailures = 0
   public var acquiredEvents = 0
   public var acquiredBytes = 0
   public var ignored: [AgentLogIgnore: Int] = [:]
@@ -29,10 +32,12 @@ public struct AgentLogHealth {
 /// Scan runs on the maintenance queue. The lock makes health readable from the shell's main thread.
 public final class AgentLogTask {
   private let reader: AgentLogReader
+  let git: GitCollectionTask?
   let storage: AgentLogStorage
   private let lock = NSLock()
   private var status = AgentLogHealth()
-  public init(reader: AgentLogReader, storage: AgentLogStorage) {
+  public init(reader: AgentLogReader, storage: AgentLogStorage, git: GitCollectionTask? = nil) {
+    self.git = git
     self.reader = reader
     self.storage = storage
   }
@@ -77,9 +82,23 @@ public final class AgentLogTask {
           guard try recordingAllowed(at: time) else { return }
           let batch = try reader.read(file, position: position, at: time)
           guard try recordingAllowed(at: time) else { return }
+          // Offer the raw cwd before its masked checkpoint advances. A deferral or Git
+          // error never holds the append back: retained occurrences are offered again,
+          // with their native times, once the Git queue recovers this source.
+          var gitDeferred = false, gitFailed = false
+          if !batch.ownershipDeferred, let git {
+            do { gitDeferred = try git.observe(batch.events, position: batch.position) == .deferred }
+            catch { gitFailed = true }
+          }
           let result = try storage.appendLogEvents(batch.events, evidence: batch.evidence, position: batch.position)
+          if !batch.ownershipDeferred, let git { git.requestRecovery(batch.position, afterDeferral: gitDeferred || gitFailed) }
           lock.lock()
           if batch.ownershipDeferred { status.ownershipDeferredBatches += 1 }
+          if gitDeferred || gitFailed { status.gitDeferredBatches += 1 }
+          if gitFailed { status.gitFailures += 1 }
+          if git != nil {
+            status.ignored[.timestampUnknownCwd, default: 0] += batch.events.filter { $0.workingFolder != nil && $0.timestamp == nil }.count
+          }
           status.acquiredEvents += batch.events.count
           status.acquiredBytes += batch.events.reduce(0) { $0 + $1.byteCount }
           status.persistedEvents += result.logGrowth.events
@@ -135,6 +154,7 @@ public final class RecorderConnections {
   public let client: ActivityStorage
   public let logTasks: [AgentLogTask]
   public let securityTask: SecurityHealthTask
+  public let gitTask: GitCollectionTask?
   public private(set) var summaryTask: SummaryTask?
   public init(database: URL, appDataDirectory: URL, userHome: String, processes: AgentLogProcessSource, summaryCodexHome: URL? = nil,
     fileVault: FileVaultStatusSource = FileVaultReader(), databaseScope: DatabaseOpenScope) throws {
@@ -142,18 +162,22 @@ public final class RecorderConnections {
     // Retention/log batches must not hold the recorder object's in-process lock and delay a tick.
     client = try ActivityStorage(url: database, appDataDirectory: appDataDirectory, role: .client, databaseScope: databaseScope)
     securityTask = SecurityHealthTask(fileVault: fileVault, storage: recorder.securityHealth)
+    let git = GitCollectionTask(storage: client)
+    gitTask = git
     logTasks = Self.makeLogTasks(database: client, appDataDirectory: appDataDirectory, userHome: userHome,
-      processes: processes, summaryCodexHome: summaryCodexHome)
+      processes: processes, summaryCodexHome: summaryCodexHome, git: git)
   }
   init(recorder: ActivityStorage, client: ActivityStorage, logTasks: [AgentLogTask], fileVault: FileVaultStatusSource) {
     self.recorder = recorder; self.client = client; self.logTasks = logTasks
+    gitTask = logTasks.compactMap(\.git).first
     securityTask = SecurityHealthTask(fileVault: fileVault, storage: recorder.securityHealth)
   }
   static func makeLogTasks(database: ActivityStorage, appDataDirectory: URL, userHome: String,
-    processes: AgentLogProcessSource, summaryCodexHome: URL?) -> [AgentLogTask] {
-    [
-      AgentLogTask(reader: ClaudeAgentLogReader(userHome: userHome, processes: processes, appDataDirectory: appDataDirectory), storage: database),
-      AgentLogTask(reader: CodexAgentLogReader(userHome: userHome, processes: processes, summaryCodexHome: summaryCodexHome, appDataDirectory: appDataDirectory), storage: database),
+    processes: AgentLogProcessSource, summaryCodexHome: URL?, git: GitCollectionTask? = nil) -> [AgentLogTask] {
+    let git = git ?? GitCollectionTask(storage: database)
+    return [
+      AgentLogTask(reader: ClaudeAgentLogReader(userHome: userHome, processes: processes, appDataDirectory: appDataDirectory), storage: database, git: git),
+      AgentLogTask(reader: CodexAgentLogReader(userHome: userHome, processes: processes, summaryCodexHome: summaryCodexHome, appDataDirectory: appDataDirectory), storage: database, git: git),
     ]
   }
   public func configureSummary(caller: SummaryCaller, from start: Int,
@@ -163,7 +187,7 @@ public final class RecorderConnections {
     summaryTask = SummaryTask(storage: client, caller: caller, from: start, dayStart: dayStart, locale: locale, publish: client.saveSummaryUnavailableUntil)
   }
   public var maintenanceTasks: [RecorderMaintenanceTask] {
-    logTasks.map(\.maintenanceTask) + [securityTask.maintenanceTask] + (summaryTask.map { [$0.maintenanceTask] } ?? [])
+    logTasks.map(\.maintenanceTask) + (gitTask.map { [$0.maintenanceTask] } ?? []) + [securityTask.maintenanceTask] + (summaryTask.map { [$0.maintenanceTask] } ?? [])
   }
   public func makeLoop(
     clock: RecorderClock, input: InputCountSource, front: FrontWindowSource,

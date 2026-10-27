@@ -126,7 +126,7 @@ final class SummaryAccountingTests: XCTestCase {
     XCTAssertTrue(try store.modelCalls(in: all).isEmpty)
   }
 
-  func testSchemaFourMigratesBillingWithoutChangingExistingRows() throws {
+  func testUnsupportedSchemaFourLeavesBillingRowsUnchanged() throws {
     let old = ModelCall(ts: 600, range: TimeRange(0, 600), model: "invented", inputTokens: 12, succeeded: true)
     do {
       let store = try database(); try store.appendModelCall(old)
@@ -135,12 +135,11 @@ final class SummaryAccountingTests: XCTestCase {
       try store.connection.run("ALTER TABLE model_calls DROP COLUMN attempt_id")
       try store.connection.run("PRAGMA user_version=4")
     }
-    let store = try database()
-    XCTAssertEqual(try store.modelCalls(in: all), [old])
-    let pending = ModelCall(ts: 700, range: TimeRange(600, 660), model: "invented", inputTokens: 20,
-      succeeded: false, pending: true, attemptID: "invented-attempt")
-    try store.appendModelCall(pending); try store.appendModelCall(pending)
-    XCTAssertEqual(try store.modelCalls(in: all), [old, pending])
+    XCTAssertThrowsError(try database())
+    let connection = try SQLiteConnection(url: root.appendingPathComponent("invented.sqlite"), readOnly: true, scope: .directory(root))
+    XCTAssertEqual(try connection.integer("PRAGMA user_version"), 4)
+    XCTAssertEqual(try connection.integer("SELECT count(*) FROM model_calls WHERE ts=600 AND input_tokens=12 AND succeeded=1"), 1)
+    XCTAssertEqual(try connection.integer("SELECT count(*) FROM pragma_table_info('model_calls') WHERE name IN ('pending','attempt_id')"), 0)
   }
 }
 

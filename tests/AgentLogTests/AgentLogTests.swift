@@ -526,7 +526,7 @@ final class AgentLogTests: XCTestCase {
       let previous = try ActivityStorage(url: database, appDataDirectory: database.deletingLastPathComponent(), databaseScope: .directory(root))
       try previous.saveFixtureSettings(StorageSettings(pausedUntil: 120, subscriptionConnected: true), at: 100)
       try previous.connection.run("DROP TABLE log_recording_history")
-      try previous.connection.run("PRAGMA user_version=1")
+      try makeMainLogOrigin(previous)
     }
     let migrated = try ActivityStorage(url: database, appDataDirectory: database.deletingLastPathComponent(), databaseScope: .directory(root))
     let history = try migrated.logRecordingHistory()
@@ -563,7 +563,7 @@ final class AgentLogTests: XCTestCase {
     for task in connections.logTasks {
       XCTAssertTrue((task.storage as AnyObject) === connections.client)
     }
-    XCTAssertEqual(connections.maintenanceTasks.map(\.name), ["claude-logs", "codex-logs", "security-health"])
+    XCTAssertEqual(connections.maintenanceTasks.map(\.name), ["claude-logs", "codex-logs", "git-history", "security-health"])
     // Holding the background object's in-process lock must not block recorder settings reads.
     let held = expectation(description: "client lock held")
     let release = DispatchSemaphore(value: 0)

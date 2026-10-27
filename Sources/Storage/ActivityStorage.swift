@@ -10,6 +10,15 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
   public enum Role { case client, recorder }
   let connection: SQLiteConnection
   let lock = NSRecursiveLock()
+  let deletionPreparationLock = NSLock()
+  var beforeGitSourcePublication: (() throws -> Void)?
+  var beforeDeletionPublication: (() throws -> Void)?
+  var beforeGitFrontierPublication: (() throws -> Void)?
+  var beforeGitFolderCompletion: (() throws -> Void)?
+  var beforeGitCommitCompletion: (() throws -> Void)?
+  var afterGitFolderStarted: ((Int) throws -> Void)?
+  var afterGitUnit: ((String) throws -> Void)?
+  let gitCancellationKey = "ActivityProbe.GitStorageCancellation." + UUID().uuidString
   let url: URL
   let databaseScope: DatabaseOpenScope
   let ownBundleID: String
@@ -19,6 +28,14 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
   private let backupMarker: (URL) throws -> Void
   private var recorderLock: RecorderDatabaseLock?
   // These receipts belong to this storage instance only; reopening cannot recover an old worker.
+  var gitSecureInput: () -> Bool? = { nil }
+  var gitSecureInputRefusalEpoch: UInt64 = 0
+  var gitFolderPreparations: [String: GitFolderPreparation] = [:]
+  var gitCommitReads: [Int: GitCommitPublication] = [:]
+  var gitReads: [Int: GitReadPublication] = [:]
+  var gitStageConnection: SQLiteConnection?
+  var gitStageCancellation: GitTaskCancellation?
+  let gitStageLock = NSRecursiveLock()
   var collectionWriterFactory: (() throws -> ActivityStorage)?
   var collectionPublicationFault: ((String) throws -> Void)?
   var collectionPeakReadBytes = 0
@@ -48,6 +65,12 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
     }
     self.url = url; self.appDataDirectory = appDataDirectory; self.backupMarker = excludeFromBackup
     let parent = url.deletingLastPathComponent()
+    if !readOnly && FileManager.default.fileExists(atPath: url.path) {
+      // Refuse unsupported origins before opening a writer, including WAL recovery.
+      let preflight = try SQLiteConnection.originPreflight(url: url, scope: databaseScope,
+        busyMilliseconds: busyMilliseconds ?? (role == .recorder ? 0 : 3000))
+      _ = try preflight.validateSchemaOrigin()
+    }
     if readOnly {
       guard role == .client else { throw StorageError("Read-only recorder refused") }
     } else if try FileLocation.same(parent, appDataDirectory) {
@@ -443,7 +466,18 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
   }
 
   public func saveLogPosition(_ p: LogPosition) throws {
-    try insertLogPosition(p, state: .maskedText(try maskedLogState(p.state)))
+    let fallback = SQLValue.maskedText(try maskedLogState(p.state))
+    // Atomic legacy conversion already owns a writer snapshot, including uncommitted rows.
+    let converted = try locked { () throws -> Bool in
+      guard sqlite3_get_autocommit(connection.handle) == 0 else { return false }
+      try insertLogPosition(p, state: fallback); return true
+    }
+    if converted { return }
+    let prepared = try prepareGitCheckpointState(p, fallback: fallback)
+    try locked { try connection.transaction {
+      guard try gitSourceRevision() == prepared.revision else { throw StorageError.busy("Log metadata changed; retry preparation") }
+      try insertLogPosition(p, state: prepared.state)
+    } }
   }
   private func insertLogPosition(_ p: LogPosition, state: SQLValue) throws {
     try locked {
@@ -464,13 +498,14 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
   @discardableResult public func appendLogEvents(_ events: [AgentLogEvent], evidence: [EvidenceText], position: LogPosition) throws -> AppendResult {
     let prepared = evidence.map(maskEvidence)
     let preparedEvents = try events.map(PreparedAgentLogEvent.init)
-    let state = SQLValue.maskedText(try maskedLogState(position.state))
+    let state = try prepareGitCheckpointState(position, fallback: .maskedText(try maskedLogState(position.state)), events: events)
+    let decodedCheckpoint = try? AgentLogState.decode(position.state)
     return try locked {
       try connection.transaction {
+        guard try gitSourceRevision() == state.revision else { throw StorageError.busy("Log metadata changed; retry preparation") }
         let days = try settings().promptRetentionDays
         let (cutoff, overflow) = position.seenAt.subtractingReportingOverflow(days * 86400)
         let oldest = overflow ? Int.min : cutoff
-        let decodedCheckpoint = try? AgentLogState.decode(position.state)
         let checkpoint = decodedCheckpoint?.tool.flatMap(AgentLogTool.init(rawValue:)) == nil ? nil : decodedCheckpoint
         let tool = checkpoint?.tool.flatMap(AgentLogTool.init(rawValue:)) ?? events.first?.tool
         guard events.allSatisfy({ $0.tool == tool }) else { throw StorageError("Mixed agent-log tool namespaces") }
@@ -490,7 +525,7 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
           for key in legacyLogAdapter.sourceKeys(path: position.path) {
             try purgeOwnLogSource(position, tool: tool, sourceKey: key)
           }
-          try insertLogPosition(position, state: state)
+          try insertLogPosition(position, state: state.state)
           return AppendResult(stored: 0, refused: prepared.count)
         case .content(let admitted):
           plan = admitted
@@ -513,7 +548,7 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
                 .key(AgentLogIdentity.decodedPath(position.path)), .integer(id)])
           }
         }
-        try insertLogPosition(position, state: state)
+        try insertLogPosition(position, state: state.state)
         result.logGrowth = growth
         return result
       }
@@ -615,6 +650,8 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
         let settings = try self.settings()
         try connection.run("DELETE FROM ax_probe_attempts WHERE ts<?", [.integer(now - settings.screenRetentionDays * 86400)])
         try connection.run("DELETE FROM agent_log_events WHERE ts<?", [.integer(now - settings.promptRetentionDays * 86400)])
+        try cleanGitRetention(oldest: now - settings.promptRetentionDays * 86400)
+        try connection.run("INSERT INTO git_retention_progress VALUES(1,?) ON CONFLICT(id) DO UPDATE SET maintained_at=max(maintained_at,excluded.maintained_at)", [.integer(now)])
         let priorCutoff = try connection.integer("SELECT COALESCE(MAX(screen_cutoff),-9223372036854775808) FROM collection_retention")
         let cutoff = max(now - settings.screenRetentionDays * 86400, priorCutoff)
         try connection.collectionWrite("INSERT INTO collection_retention VALUES(1,?) ON CONFLICT(id) DO UPDATE SET screen_cutoff=MAX(screen_cutoff,excluded.screen_cutoff)", [.integer(cutoff)])

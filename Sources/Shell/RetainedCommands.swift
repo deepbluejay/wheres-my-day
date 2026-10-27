@@ -73,7 +73,7 @@ public enum RetainedCommands {
       return AppCommandResult(0, "Forgot [\(request.range.start),\(request.range.end)): \(result.preview.counts.values.reduce(0,+)) rows deleted.\nwal_truncated=\(result.walTruncated ? 1 : 0)\n" + retained + "\nDeletion is immediate and irreversible. No undo.")
     }
     var lines = ["Preview only. Nothing deleted.", "Range: [\(ForgetCommandRequest.local(request.range.start, zone: zone)), \(ForgetCommandRequest.local(request.range.end, zone: zone)))", "Unix seconds: [\(request.range.start),\(request.range.end))"]
-    for table in ["samples", "evidence", "intervals", "ax_probe_attempts", "ax_probe_review"] { lines.append("\(table): \(preview.counts[table, default: 0]) rows") }
+    for table in ["samples", "evidence", "intervals", "ax_probe_attempts", "ax_probe_review", "agent_log_events", "git_repositories", "git_working_folders", "git_refs", "git_commits", "git_commit_refs", "git_files", "git_commit_text", "git_value_text"] { lines.append("\(table): \(preview.counts[table, default: 0]) rows") }
     if let extent = preview.intervalExtent { lines.append("Whole interval extent (Unix seconds): [\(extent.start),\(extent.end))") }
     lines += ["Overlapping intervals are removed whole, including portions outside this range.", retained,
       "Deletion is immediate and irreversible. No undo. A code validates the snapshot, not human approval.",

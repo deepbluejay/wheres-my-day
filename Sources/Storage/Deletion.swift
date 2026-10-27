@@ -28,7 +28,7 @@ extension ActivityStorage {
       ("model_calls", "pending=1 AND end_ts>? AND start_ts<?"),
     ]
     // A read-only preview can precede the first version-6 migration.
-    return selections.filter { table, _ in
+    return gitDeletionSelections + selections.filter { table, _ in
       !(table.hasPrefix("ax_probe_") || table.hasPrefix("agent_log_") || ["sample_observations", "input_batches", "collection_legacy_times", "collection_metadata"].contains(table)) || (try? connection.integer(
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", [.key(table)])) != 0
     }
@@ -36,20 +36,22 @@ extension ActivityStorage {
   private func selectionValues(_ range: TimeRange) -> [SQLValue] {
     [.integer(range.start), .integer(range.end)]
   }
-  private func snapshotDeletion(_ range: TimeRange, journal: ModelCallJournal) throws -> DeletionPreview {
+  private func snapshotDeletion(_ range: TimeRange, journal: ModelCallJournal, gitPrepared: GitDeletionFingerprint? = nil) throws -> DeletionPreview {
     var info = stat()
     guard stat(url.path, &info) == 0 else { throw StorageError("Database file disappeared") }
     // SQLite's file descriptor is private; remember the file identity for the storage lifetime.
     guard let identity = openedIdentity, identity == [UInt64(info.st_dev), UInt64(info.st_ino)] else {
       throw StorageError("Database file was replaced; reopen and request a new preview")
     }
+    let git = try gitPrepared ?? fingerprintGitDeletion(range)
     var digest = SHA256()
     digest.update(
       data: Data(
-        "delete-v1|\(try FileLocation.key(url))|\(info.st_dev)|\(info.st_ino)|\(range.start)|\(range.end)".utf8
+        "delete-v2|\(try FileLocation.key(url))|\(info.st_dev)|\(info.st_ino)|\(range.start)|\(range.end)".utf8
       ))
-    var counts: [String: Int] = [:]
-    for (table, selection) in deletionSelections {
+    digest.update(data: git.digest)
+    var counts = git.counts
+    for (table, selection) in deletionSelections where !table.hasPrefix("git_") {
       digest.update(data: Data(table.utf8))
       var count = 0
       try connection.rows("SELECT * FROM \(table) WHERE \(selection) ORDER BY id", selectionValues(range)) { s in
@@ -200,6 +202,7 @@ extension ActivityStorage {
   private func verifyDeletionEndState(
     in range: TimeRange, expectedCalls: [DeletionCallState]
   ) throws {
+    try verifyGitDeletion()
     try legacyLogAdapter.verifyRefusals()
     // Check after all writes, so later triggers cannot undo an earlier erasure or marker.
     for (table, selection) in deletionSelections {
@@ -220,21 +223,38 @@ extension ActivityStorage {
 
   public func previewDeletion(in range: TimeRange, allowOver24Hours: Bool = false) throws -> DeletionPreview {
     try validateDeletion(range, allowOver24Hours: allowOver24Hours)
-    return try locked {
-      let journal = try ModelCallJournal(database: url)
-      return try journal.withAccountingLock { try connection.transaction(write: false) { try snapshotDeletion(range, journal: journal) } }
+    let snapshot = try ActivityStorage(url: url, appDataDirectory: appDataDirectory, readOnly: true, databaseScope: databaseScope)
+    guard snapshot.openedIdentity == openedIdentity else { throw StorageError("Database file was replaced; reopen and request a new preview") }
+    // Keep snapshot traversal measurements on the calling adapter.
+    defer {
+      locked {
+        collectionEnumerationVisits += snapshot.collectionEnumerationVisits
+        collectionPeakReadBytes = max(collectionPeakReadBytes, snapshot.collectionPeakReadBytes)
+      }
     }
+    let journal = try ModelCallJournal(database: url)
+    return try journal.withAccountingLock { try snapshot.connection.transaction(write: false) { try snapshot.snapshotDeletion(range, journal: journal) } }
   }
   @discardableResult public func deleteRecords(
     in range: TimeRange, confirmation: String, allowOver24Hours: Bool = false
   ) throws -> DeletionResult {
     try validateDeletion(range, allowOver24Hours: allowOver24Hours)
+    deletionPreparationLock.lock(); defer { deletionPreparationLock.unlock() }
+    let snapshot = try ActivityStorage(url: url, appDataDirectory: appDataDirectory, readOnly: true, databaseScope: databaseScope)
+    guard snapshot.openedIdentity == openedIdentity else { throw StorageError("Database file was replaced; reopen and request a new preview") }
+    let prepared = try snapshot.connection.transaction(write: false) { () throws -> GitDeletionFingerprint in
+      let prepared = try snapshot.fingerprintGitDeletion(range)
+      try copyGitDeletionSelections(from: snapshot)
+      return prepared
+    }
+    try beforeDeletionPublication?()
     return try locked {
       let journal = try ModelCallJournal(database: url)
       return try journal.withMaintenanceLock(connection) {
         let result = try connection.transaction(collectionMaintenance: true) {
           try requireAXProbeReviewClosed()
-          let preview = try snapshotDeletion(range, journal: journal)
+          guard try gitDeletionRevision() == prepared.revision else { throw StorageError("Records changed; request a new preview") }
+          let preview = try snapshotDeletion(range, journal: journal, gitPrepared: prepared)
           guard preview.confirmation == confirmation else { throw StorageError("Records changed; request a new preview") }
           try resolveDeletionIdentities(range)
           try connection.run("""
@@ -246,6 +266,7 @@ extension ActivityStorage {
             INSERT OR IGNORE INTO agent_log_refusals
             SELECT tool,device,inode,byte_offset,'forgotten' FROM agent_log_events WHERE ts>=? AND ts<?
             """, selectionValues(range))
+          try markGitDeletion()
           let childIDs = try collectionPayloadIDs(in: range)
           var observationIDs: [CollectionErasureTarget] = []
           if let (_, selection) = deletionSelections.first(where: { $0.0 == "sample_observations" }) {
@@ -283,7 +304,7 @@ extension ActivityStorage {
           try connection.enableCollectionMaintenanceBatches()
           try preserveCollectionMetadata(in: range)
           let scrubbedObservations = try scrubObservationMetadata(in: range)
-          for (table, selection) in deletionSelections {
+          for (table, selection) in deletionSelections where !table.hasPrefix("git_") {
             try connection.collectionWrite("DELETE FROM \(table) WHERE \(selection)", selectionValues(range))
             if table == "model_calls" {
               changedCalls.formUnion(removedCalls)
@@ -297,15 +318,24 @@ extension ActivityStorage {
             try connection.run("UPDATE model_calls SET table_facts=? WHERE id=?", [value, .integer(expected.id)])
             expectedAtCheckpoint[expected.id] = expected; changedCalls.insert(expected.id)
           }
-          // Refresh the progress marker after the last planned writes. Removing
-          // and reinserting this operation's row is atomic within the final batch.
-          try connection.run("DELETE FROM forgotten_ranges WHERE rowid=?", [.integer(progressID)])
-          try connection.run("INSERT INTO forgotten_ranges(rowid,start_ts,end_ts) VALUES(?,?,?)", markerValues)
-          try verifyScrubbedObservationMetadata(count: scrubbedObservations)
-          try verifySampleMetadataErasure(expectedSampleMetadata)
-          try verifyScreenMetadataErasure(expectedMetadata)
-          try verifyCollectionErasure(ids: childIDs, observationIDs: observationIDs)
-          try verifyDeletionEndState(in: range, expectedCalls: expectedCalls)
+          // Collection rows may commit in batches, but Git erasure must not: a
+          // checkpoint between Git tables would expose a half-erased commit. Git
+          // erasure, the final marker and end-state checks form one last batch.
+          try connection.withCollectionMaintenanceUnit {
+            try narrowGitDeletion(range)
+            for (table, selection) in gitDeletionSelections {
+              try connection.collectionWrite("DELETE FROM \(table) WHERE \(selection)", selectionValues(range))
+            }
+            // Refresh the progress marker after the last planned writes. Removing
+            // and reinserting this operation's row is atomic within the final batch.
+            try connection.run("DELETE FROM forgotten_ranges WHERE rowid=?", [.integer(progressID)])
+            try connection.run("INSERT INTO forgotten_ranges(rowid,start_ts,end_ts) VALUES(?,?,?)", markerValues)
+            try verifyScrubbedObservationMetadata(count: scrubbedObservations)
+            try verifySampleMetadataErasure(expectedSampleMetadata)
+            try verifyScreenMetadataErasure(expectedMetadata)
+            try verifyCollectionErasure(ids: childIDs, observationIDs: observationIDs)
+            try verifyDeletionEndState(in: range, expectedCalls: expectedCalls)
+          }
           return preview
         }
         if let (call, _) = try journal.read(), call.range.start < range.end && call.range.end > range.start {

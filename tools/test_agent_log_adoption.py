@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Compile pinned main's real parser/storage, then test additive adoption on invented DBs."""
+import argparse
 import io
 import json
 import sqlite3
+import shutil
 from pathlib import Path
 import subprocess
 import tarfile
@@ -112,12 +114,12 @@ def fixtures():
     return cases
 
 
-def check_origin(revision, version):
+def check_origin(revision, version, debug=None):
     with tempfile.TemporaryDirectory(prefix="activityprobe-actual-main-") as temporary:
         base = Path(temporary)
         old = base / "main"
         old.mkdir()
-        archive = subprocess.check_output(["git", "archive", revision, "Sources/Core", "Sources/Storage"], cwd=REPO)
+        archive = subprocess.check_output(["git", "archive", revision, "Sources/Core", "Sources/Storage"] + (["Sources/Inbound"] if version == 15 else []), cwd=REPO)
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
             tar.extractall(old, filter="data")
         with (base / "compile.log").open("w") as log:
@@ -128,20 +130,33 @@ def check_origin(revision, version):
                     args += ["-lCore", "-lsqlite3"]
                 run(args + sorted((old / "Sources" / module).glob("*.swift")), stdout=log, stderr=log)
             run(["swiftc", "-I", old, "-L", old, "-lCore", "-lStorage", "-lsqlite3", "-Xlinker", "-rpath", "-Xlinker", old,
-                 HELPERS / "seed.swift", "-o", base / "seed", *(["-D", "MAIN14"] if version == 14 else [])], stdout=log, stderr=log)
+                 HELPERS / "seed.swift", "-o", base / "seed", *(["-D", "MAIN14"] if version >= 14 else [])], stdout=log, stderr=log)
             run(["swiftc", "-I", old, "-L", old, "-lCore", "-lStorage", "-lsqlite3", "-Xlinker", "-rpath", "-Xlinker", old,
                  HELPERS / "seed-cursors.swift", "-o", base / "seed-cursors"], stdout=log, stderr=log)
-            debug = Path(subprocess.check_output(["swift", "build", "--show-bin-path"], cwd=REPO, text=True).strip())
+            if version == 15:
+                run(["swiftc", "-parse-as-library", "-emit-library", "-emit-module", "-enable-testing", "-module-name", "Inbound",
+                     "-I", old, "-L", old, "-lCore", "-o", old / "libInbound.dylib", *sorted((old / "Sources/Inbound").glob("*.swift"))], stdout=log, stderr=log)
+                run(["swiftc", "-I", old, "-L", old, "-lCore", "-lStorage", "-lInbound", "-lsqlite3", "-Xlinker", "-rpath", "-Xlinker", old,
+                     HELPERS / "verify.swift", "-o", base / "verify-control"], stdout=log, stderr=log)
+            debug = debug or Path(subprocess.check_output(["swift", "build", "--show-bin-path"], cwd=REPO, text=True).strip())
             objects = [p for module in ("Core", "Storage", "Inbound") for p in sorted((debug / f"{module}.build").glob("*.swift.o"))]
             run(["swiftc", "-I", debug / "Modules", HELPERS / "verify.swift", *objects, "-lsqlite3", "-o", base / "verify"], stdout=log, stderr=log)
             run(["swiftc", "-I", debug / "Modules", HELPERS / "verify-cursors.swift", *objects, "-lsqlite3", "-o", base / "verify-cursors"], stdout=log, stderr=log)
             run(["swiftc", "-I", debug / "Modules", HELPERS / "open-only.swift", *objects, "-lsqlite3", "-o", base / "open-only"], stdout=log, stderr=log)
         run([base / "seed-cursors", base])
-        run([base / "verify-cursors", base])
+        run([base / "verify-cursors", base, version])
         (base / "cases.json").write_text(json.dumps(fixtures()))
         run([base / "seed", base, version])
+        if version == 15:
+            control = base / "pinned-control"
+            control.mkdir()
+            independent = [case for case in fixtures() if case.get("independent")]
+            (control / "cases.json").write_text(json.dumps(independent))
+            for case in independent:
+                shutil.copytree(base / case["name"], control / case["name"])
+            run([base / "verify-control", control, version, "--control"])
         prove_additive(base, base / "open-only", version)
-        run([base / "verify", base])
+        run([base / "verify", base, version])
     print("Actual-main temporary folder deleted")
 
 
@@ -163,7 +178,7 @@ def prove_additive(base, binary, version):
                 db.execute(f"CREATE TRIGGER {quote('invented_guard_' + table + operation)} BEFORE {operation} ON {quote(table)} BEGIN SELECT RAISE(ABORT,'Historical mutation'); END")
     run([binary, database.parent])
     with sqlite3.connect(database) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (15,)
+        assert db.execute("PRAGMA user_version").fetchone() == (16,)
         for table, (columns, selection, rows) in original.items():
             assert db.execute(f'SELECT {selection} FROM {quote(table)} ORDER BY {selection}').fetchall() == rows, table
             added = {r[1] for r in db.execute(f"PRAGMA table_info({quote(table)})")} - set(columns)
@@ -172,12 +187,53 @@ def prove_additive(base, binary, version):
             for operation in ("INSERT", "UPDATE", "DELETE"):
                 db.execute(f"DROP TRIGGER {quote('invented_guard_' + table + operation)}")
         assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-    print(f"Additive schema {version}->15: {len(tables)} original tables guarded for INSERT/UPDATE/DELETE; bytes/types unchanged; added columns NULL", flush=True)
+    print(f"Additive schema {version}->16: {len(tables)} original tables guarded for INSERT/UPDATE/DELETE; bytes/types unchanged; added columns NULL", flush=True)
+
+
+def check_rejected_branch_origin(debug=None):
+    with tempfile.TemporaryDirectory(prefix="activityprobe-actual-branch-") as temporary:
+        base = Path(temporary)
+        old = base / "branch"
+        old.mkdir()
+        archive = subprocess.check_output(["git", "archive", "7094865", "Sources/Core", "Sources/Storage"], cwd=REPO)
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            tar.extractall(old, filter="data")
+        with (base / "compile.log").open("w") as log:
+            for module in ("Core", "Storage"):
+                args = ["swiftc", "-parse-as-library", "-emit-library", "-emit-module", "-enable-testing", "-module-name", module,
+                        "-I", old, "-L", old, "-o", old / f"lib{module}.dylib"]
+                if module == "Storage": args += ["-lCore", "-lsqlite3"]
+                run(args + sorted((old / "Sources" / module).glob("*.swift")), stdout=log, stderr=log)
+            run(["swiftc", "-I", old, "-L", old, "-lCore", "-lStorage", "-lsqlite3", "-Xlinker", "-rpath", "-Xlinker", old,
+                 HELPERS / "seed.swift", "-o", base / "seed"], stdout=log, stderr=log)
+            debug = debug or Path(subprocess.check_output(["swift", "build", "--show-bin-path"], cwd=REPO, text=True).strip())
+            objects = [p for module in ("Core", "Storage") for p in sorted((debug / f"{module}.build").glob("*.swift.o"))]
+            run(["swiftc", "-I", debug / "Modules", HELPERS / "open-only.swift", *objects, "-lsqlite3", "-o", base / "open-only"], stdout=log, stderr=log)
+        (base / "cases.json").write_text("[]")
+        run([base / "seed", base, 14])
+        database = base / "invented-proof" / "invented.sqlite"
+        with sqlite3.connect(database) as db:
+            tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+            for index, table in enumerate(tables):
+                quoted = '"' + table.replace('"', '""') + '"'
+                for operation in ("INSERT", "UPDATE", "DELETE"):
+                    db.execute(f"CREATE TRIGGER invented_guard_{index}_{operation} BEFORE {operation} ON {quoted} BEGIN SELECT RAISE(ABORT,'Historical mutation'); END")
+        for version in (10, 11, 12, 13, 14):
+            with sqlite3.connect(database) as db: db.execute(f"PRAGMA user_version={version}")
+            before = database.read_bytes()
+            run([base / "open-only", database.parent, "--refuse"])
+            assert database.read_bytes() == before, version
+        print(f"Actual branch schema 14 and versions 10/11/12/13 refused before writes: {len(tables)} original tables guarded; database bytes unchanged", flush=True)
+    print("Actual-branch temporary folder deleted", flush=True)
 
 
 def main():
-    for revision, version in (("45312a9", 9), ("3bca053", 14)):
-        check_origin(revision, version)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--build-path", type=Path, help="Existing current Swift debug bin directory")
+    args = parser.parse_args()
+    for revision, version in (("45312a9", 9), ("3bca053", 14), ("1763e0b", 15)):
+        check_origin(revision, version, args.build_path)
+    check_rejected_branch_origin(args.build_path)
 
 
 if __name__ == "__main__":

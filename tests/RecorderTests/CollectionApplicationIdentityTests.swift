@@ -340,7 +340,7 @@ final class CollectionApplicationIdentityTests: XCTestCase {
     })
     XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM input_batches WHERE application_identity=?", [.key(ApplicationPrivacyIdentity.digest(source))]), 1)
   }
-  func testSchemaThirteenAdoptionAddsNullIdentitiesWithoutTouchingHistoricalBytes() throws {
+  func testUndeployedSchemaThirteenIsRefusedWithoutTouchingHistoricalBytes() throws {
     _ = try store.appendSamples([observe(identities[1], at: 60).sample])
     _ = try store.appendScreenCapture(payload: ScreenTextPayload(text: "Invented OCR"), at: 60,
       source: identities[1], documentKey: "", project: "", probe: nil)
@@ -384,14 +384,14 @@ final class CollectionApplicationIdentityTests: XCTestCase {
       XCTAssertFalse(try reader.collectionStatus().isEmpty)
       XCTAssertEqual(try reader.connection.integer("PRAGMA user_version"), 13)
     }
-    try reopen()
-    for table in tables { XCTAssertEqual(try snapshot(table, store.connection), before[table]) }
-    for table in ["samples", "evidence", "input_batches", "collection_metadata"] {
-      XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM \(table) WHERE application_identity IS NOT NULL"), 0)
+    for _ in 0..<2 {
+      XCTAssertThrowsError(try ActivityStorage(url: store.url, appDataDirectory: folder, databaseScope: .directory(folder)))
+      XCTAssertEqual(try store.connection.integer("PRAGMA user_version"), 13)
+      for table in tables { XCTAssertEqual(try snapshot(table, store.connection), before[table]) }
+      for table in ["samples", "evidence", "input_batches", "collection_metadata"] {
+        XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM pragma_table_info('\(table)') WHERE name='application_identity'"), 0)
+      }
     }
-    XCTAssertNil(try store.samples(in: all).first?.applicationPrivacyIdentity)
-    try reopen()
-    for table in tables { XCTAssertEqual(try snapshot(table, store.connection), before[table]) }
   }
   func testPresentationOnlyApplicationCannotBePromotedToANewIdentity() throws {
     let label = Redaction.applyKnownSecrets(identities[1]).text

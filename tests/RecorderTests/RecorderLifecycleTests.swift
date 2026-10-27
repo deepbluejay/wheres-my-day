@@ -288,4 +288,22 @@ final class RecorderLifecycleTests: XCTestCase {
     release.signal()
     wait(for: [drained], timeout: 5)
   }
+  func testStopCancelsMaintenanceAndWaitsForItsOwnedQueueBarrier() throws {
+    let began = expectation(description: "owned queue barrier began"), drained = expectation(description: "owned queue drained")
+    let lock = NSLock()
+    var release: (() -> Void)?, cancellations = 0, finished = false
+    let task = RecorderMaintenanceTask(name: "invented-owned", cancel: { cancellations += 1 }, finish: { completion in
+      lock.lock(); release = completion; lock.unlock(); began.fulfill()
+    }) { _ in }
+    loop = RecorderLoop(clock: clock, input: sources, front: sources, secure: sources, awake: sources,
+      screen: sources, storage: storage, maintenanceStorage: storage, ownBundleID: "invented.own", maintenanceTasks: [task])
+    loop.stop(); loop.stop()
+    XCTAssertEqual(cancellations, 1)
+    loop.finishMaintenance { finished = true; drained.fulfill() }
+    wait(for: [began], timeout: 5); XCTAssertFalse(finished)
+    lock.lock(); let completion = release; lock.unlock(); completion?()
+    wait(for: [drained], timeout: 5); XCTAssertTrue(finished)
+    // This fixture already completed its one-shot owned barrier.
+    loop = nil
+  }
 }

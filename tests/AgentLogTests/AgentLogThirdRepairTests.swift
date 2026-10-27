@@ -184,6 +184,8 @@ extension AgentLogTests {
       XCTAssertEqual(preview.counts["evidence"], 1)
       XCTAssertEqual(try readOnly.previewDeletion(in: TimeRange(100, 101)).confirmation, preview.confirmation)
       XCTAssertEqual(try readOnly.connection.integer("PRAGMA user_version"), version)
+      // Preview owns a separate WAL reader; verify legacy lineage on this reader too.
+      try readOnly.resolveDeletionIdentities(TimeRange(100, 101))
       XCTAssertEqual(try readOnly.connection.integer("SELECT count(*) FROM log_identity_component"), version == 9 ? 1 : 2)
       XCTAssertEqual(try Data(contentsOf: url), before)
       XCTAssertEqual(try? Data(contentsOf: URL(fileURLWithPath: url.path + "-wal")), wal)

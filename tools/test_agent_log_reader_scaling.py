@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 
 REPO = Path(__file__).resolve().parent.parent
 MIB = 1 << 20
@@ -14,6 +15,7 @@ MIB = 1 << 20
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-path", type=Path, help="Existing Swift debug bin directory")
+    parser.add_argument("--recorder-pid", type=int, help="Wait for this authorized recorder to reach <=1 percent CPU before each writer timing case")
     args = parser.parse_args()
     debug = args.build_path or Path(subprocess.check_output(
         ["swift", "build", "--show-bin-path"], cwd=REPO, text=True).strip())
@@ -27,11 +29,22 @@ def main():
                         str(REPO / "tools/agent-log-reader-scaling.swift"),
                         *map(str, objects), "-lsqlite3", "-o", str(binary)], cwd=REPO, check=True)
 
+        def cpu():
+            result = subprocess.run(["ps", "-o", "%cpu=", "-p", str(args.recorder_pid)], text=True, capture_output=True)
+            return float(result.stdout.strip()) if result.stdout.strip() else None
+
         def measure(shape, size, writer=False):
+            start_cpu = None
+            if writer and args.recorder_pid:
+                while (start_cpu := cpu()) is not None and start_cpu > 1.0:
+                    time.sleep(1)
+
             run = subprocess.run(["/usr/bin/time", "-l", str(binary),
                                   str(root / f"{shape}-{size}-{writer}"), str(size), shape, "writer" if writer else "reader"],
                                  text=True, capture_output=True, check=True, timeout=180)
             result = json.loads(run.stdout)
+            if writer and args.recorder_pid:
+                result.update(recorderCPUStart=start_cpu, recorderCPUEnd=cpu())
             result["rss"] = int(re.search(r"(\d+)\s+maximum resident set size", run.stderr)[1])
             print(json.dumps(result, sort_keys=True), flush=True)
             return result

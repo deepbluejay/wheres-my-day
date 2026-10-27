@@ -191,12 +191,18 @@ extension AgentLogTests {
       sourceID: "claude:invented-adopted", text: "Invented")])
     let history = try store.logRecordingHistory()
     let settings = try store.settings()
-    for version in [1, 2] {
-      // Version 1 predates timed recording history; adoption seeds it from existing settings.
-      if version == 1 { try store.connection.run("DROP TABLE log_recording_history") }
+    try makeMainLogOrigin(store)
+    for version in [1, 2, 9] {
       try store.connection.run("DROP INDEX IF EXISTS evidence_prompt_id")
       try store.connection.run("DROP INDEX IF EXISTS forgotten_source_id")
       try store.connection.run("PRAGMA user_version=\(version)")
+      if version != 9 {
+        XCTAssertThrowsError(try ActivityStorage(url: root.appendingPathComponent("invented.sqlite"), appDataDirectory: root, databaseScope: .directory(root)))
+        XCTAssertEqual(try store.evidence(in: all).count, 1)
+        XCTAssertEqual(try store.logRecordingHistory(), history)
+        XCTAssertEqual(try store.settings(), settings)
+        continue
+      }
       let adopted = try ActivityStorage(url: root.appendingPathComponent("invented.sqlite"), appDataDirectory: root, databaseScope: .directory(root))
       XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), SQLiteConnection.schemaVersion)
       XCTAssertEqual(try adopted.evidence(in: all).count, 1)

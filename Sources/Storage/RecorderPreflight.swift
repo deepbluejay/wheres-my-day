@@ -27,13 +27,7 @@ public extension ActivityStorage {
   static func validateRecorderDatabase(at url: URL, scope: DatabaseOpenScope) throws {
     try scope.validatePath(url)
     guard FileManager.default.fileExists(atPath: url.path) else { return }
-    let connection = try SQLiteConnection(url: url, readOnly: true, scope: scope)
-    let application = try connection.integer("PRAGMA application_id")
-    let version = try connection.integer("PRAGMA user_version")
-    let tables = try connection.integer("SELECT count(*) FROM sqlite_master WHERE type='table'")
-    guard (application == SQLiteConnection.applicationID && version <= SQLiteConnection.schemaVersion)
-      || (application == 0 && version == 0 && tables == 0) else {
-      throw StorageError("Recorder requires a new-schema database; use separate conversion")
-    }
+    let connection = try SQLiteConnection.originPreflight(url: url, scope: scope)
+    _ = try connection.validateSchemaOrigin()
   }
 }

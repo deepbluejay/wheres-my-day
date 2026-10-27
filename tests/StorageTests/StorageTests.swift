@@ -40,20 +40,15 @@ final class StorageTests: XCTestCase {
     XCTAssertEqual(store.securityHealth.backupExclusionFailure?.rawValue, "backup_exclusion_skipped_override")
     XCTAssertEqual(try store.appendSamples([TimeSample(ts: 1, keys: 1)]).stored, 1)
   }
-  func testPreviousSchemaAddsTableFactsWithoutRewritingOldCalls() throws {
-    let previous = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))
+  func testUnsupportedSchemaThreeIsRefusedWithoutRewritingOldCalls() throws {
+    let previous = try ActivityStorage(url: url, appDataDirectory: folder, databaseScope: .directory(folder))
     let old = ModelCall(ts: 600, range: TimeRange(0, 600), model: "invented", succeeded: true)
     try previous.appendModelCall(old)
-    try previous.connection.run("ALTER TABLE model_calls DROP COLUMN table_facts")
     try previous.connection.run("PRAGMA user_version=3")
-    let adopted = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))
-    XCTAssertEqual(try adopted.modelCalls(in: all), [old])
-    let call = ModelCall(ts: 1200, range: TimeRange(600, 1200), model: "invented", succeeded: true,
-      tableFacts: SummaryCallFacts(through: 1200, sentRanges: [TimeRange(600, 900)], endsAtRest: false))
-    try adopted.appendModelCall(call)
-    XCTAssertEqual(try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder)).modelCalls(in: all), [old, call])
-    XCTAssertEqual(try adopted.connection.integer("PRAGMA user_version"), SQLiteConnection.schemaVersion)
+    XCTAssertThrowsError(try ActivityStorage(url: url, appDataDirectory: folder, databaseScope: .directory(folder)))
+    XCTAssertEqual(try previous.modelCalls(in: all), [old])
   }
+
   func testDeletingObservationsErasesMinuteFactsButKeepsBillingAndOtherMinutes() throws {
     let store = try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))
     let call = ModelCall(ts: 600, range: TimeRange(0, 360), model: "invented", inputTokens: 12, succeeded: true,
@@ -185,7 +180,9 @@ final class StorageTests: XCTestCase {
     try store.appendModelCall(ModelCall(ts: 500, range: TimeRange(0, 120), model: "invented", succeeded: false))
     let range = TimeRange(60, 120), preview = try store.previewDeletion(in: range)
     XCTAssertEqual(preview.intervalExtent, TimeRange(0, 120))
-    XCTAssertEqual(preview.counts, ["samples": 1, "sample_observations": 1, "evidence": 1, "intervals": 1, "ax_probe_attempts": 0, "ax_probe_review": 0, "input_batches": 0, "collection_legacy_times": 0, "staged_collection": 0, "screen_metadata": 0, "sample_metadata": 0, "collection_metadata": 0, "agent_log_events": 0])
+    XCTAssertEqual(preview.counts, ["samples": 1, "sample_observations": 1, "evidence": 1, "intervals": 1, "ax_probe_attempts": 0, "ax_probe_review": 0, "input_batches": 0, "collection_legacy_times": 0, "staged_collection": 0, "screen_metadata": 0, "sample_metadata": 0, "collection_metadata": 0, "agent_log_events": 0,
+      "git_repositories": 0, "git_working_folders": 0, "git_refs": 0, "git_commits": 0,
+      "git_commit_refs": 0, "git_files": 0, "git_commit_text": 0, "git_value_text": 0])
     XCTAssertEqual(try store.samples(in: all).count, 2)
     try store.appendFixtureEvidence([EvidenceText(ts: 62, kind: .screen, source: "invented", text: "changed snapshot")])
     XCTAssertThrowsError(try store.deleteRecords(in: range, confirmation: preview.confirmation))

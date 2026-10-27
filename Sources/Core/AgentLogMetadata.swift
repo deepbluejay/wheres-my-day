@@ -5,7 +5,7 @@ public struct AgentLogMetadata: Codable, Equatable {
   public static let tokenLimit = 4096
   public static let nestingLimit = 512
   private static let paths: [[String]] = [
-    ["type"], ["sessionId"], ["cwd"], ["originator"], ["payload", "id"], ["payload", "session_id"],
+    ["type"], ["timestamp"], ["sessionId"], ["cwd"], ["originator"], ["payload", "id"], ["payload", "session_id"],
     ["payload", "thread_id"], ["payload", "cwd"], ["payload", "originator"], ["payload", "item", "originator"],
     ["payload", "source"], ["payload", "thread_source"], ["payload", "parent_thread_id"], ["payload", "origin", "kind"],
     ["payload", "source", "subagent"], ["payload", "thread_source", "subagent"]]
@@ -89,8 +89,19 @@ public struct AgentLogMetadata: Codable, Equatable {
     var primitive = 0 // number states 1...8; literal 9
     var literal = ""
     var literalIndex = 0
+    var numericTimestamp: String?
+    var timestampNumber: Bool?
   }
   private var s = State()
+  private var rawWorkingFolders: [String: String] = [:]
+  public var nativeTimestamp: Int? {
+    guard complete else { return nil }
+    return AgentLogEventParser.timestamp(s.values["timestamp"] ?? s.numericTimestamp)
+  }
+  public var workingFolder: String? {
+    guard complete else { return nil }
+    return rawWorkingFolders[s.sessionMeta && rawWorkingFolders["payload.cwd"] != nil ? "payload.cwd" : rawWorkingFolders["cwd"] != nil ? "cwd" : "payload.cwd"]
+  }
   public init() {}
   public init(from decoder: Decoder) throws {
     s = try State(from: decoder)
@@ -100,9 +111,9 @@ public struct AgentLogMetadata: Codable, Equatable {
   }
   public func encode(to encoder: Encoder) throws { try checkpoint().s.encode(to: encoder) }
   public var checkpointSafe: Bool {
-    s.invalid || (!s.string || ((s.overflow || (!s.keyToken && s.field == nil))
+    s.invalid || (!(s.timestampNumber == true && s.numericTimestamp != nil && s.primitive != 0) && (!s.string || ((s.overflow || (!s.keyToken && s.field == nil))
       && s.unicodeDigits == 0 && s.utfRemaining == 0 && s.highSurrogate == 0
-      && (s.digest?.checkpointSafe ?? true)))
+      && (s.digest?.checkpointSafe ?? true))))
   }
   public func checkpoint() throws -> Self {
     guard checkpointSafe else {
@@ -110,6 +121,10 @@ public struct AgentLogMetadata: Codable, Equatable {
     }
     if s.invalid { var empty = Self(); empty.s.invalid = true; empty.s.tooDeep = s.tooDeep; return empty }
     var safe = self
+    safe.rawWorkingFolders = [:]
+    safe.s.numericTimestamp = s.numericTimestamp.flatMap { token in
+      token.utf8.count <= 64 && token.utf8.allSatisfy { (48...57).contains($0) || [43, 45, 46, 69, 101].contains($0) } ? token : nil
+    }
     safe.s.token = []
     let names = Set(Self.paths.map { $0.joined(separator: ".") })
     safe.s.values = s.values.reduce(into: [:]) { result, pair in
@@ -201,6 +216,7 @@ public struct AgentLogMetadata: Codable, Equatable {
   private mutating func clear(_ path: [String]) {
     for selected in Self.paths where selected.starts(with: path) {
       let name = selected.joined(separator: ".")
+      rawWorkingFolders.removeValue(forKey: name)
       s.values.removeValue(forKey: name)
       s.ownFields.remove(name)
       s.subagentFields.remove(name)
@@ -211,10 +227,13 @@ public struct AgentLogMetadata: Codable, Equatable {
       s.legacyIdentities.removeValue(forKey: name)
       s.marks.removeValue(forKey: name)
       if name == "type" { s.sessionMeta = false }
+      if name == "timestamp" { s.numericTimestamp = nil; s.timestampNumber = nil }
     }
   }
   private mutating func beginValue(_ byte: UInt8, path: [String]?) {
     let selected = path.flatMap { Self.paths.contains($0) ? $0.joined(separator: ".") : nil }
+    s.timestampNumber = selected == "timestamp" && (byte == 45 || (48...57).contains(byte))
+    if selected == "timestamp" { s.numericTimestamp = s.timestampNumber == true ? String(UnicodeScalar(byte)) : nil }
     if let selected, ["payload.source.subagent", "payload.thread_source.subagent"].contains(selected) {
       s.subagentFields.insert(selected)
     }
@@ -242,6 +261,9 @@ public struct AgentLogMetadata: Codable, Equatable {
   }
   /// Returns false only when a token delimiter needs structural processing.
   private mutating func consumePrimitive(_ byte: UInt8) -> Bool {
+    if s.timestampNumber == true && ([45, 43, 46, 69, 101].contains(byte) || (48...57).contains(byte)) {
+      if let token = s.numericTimestamp { s.numericTimestamp = token.utf8.count < 64 ? token + String(UnicodeScalar(byte)) : nil }
+    }
     if s.primitive == 9 {
       let bytes = Array(s.literal.utf8)
       if s.literalIndex < bytes.count {
@@ -377,6 +399,7 @@ public struct AgentLogMetadata: Codable, Equatable {
       }
       else {
         let value = String(decoding: s.token, as: UTF8.self)
+        if ["cwd", "payload.cwd"].contains(field) { rawWorkingFolders[field] = value }
         if field == "type" { s.sessionMeta = value == "session_meta" }
         if ["payload.source", "payload.thread_source", "payload.origin.kind"].contains(field) {
           s.marks[field] = AgentLogParser.namedMark(value)
@@ -433,7 +456,7 @@ public struct AgentLogMetadata: Codable, Equatable {
     let cwd = !headerCwd && s.unusableFields.contains("cwd") ? nil : s.values[cwdField]
     return AgentLogRecordFacts(session: sessionTransition(tool: tool), isHeader: s.sessionMeta,
       sessionExact: s.exactIdentities.contains(field), legacySession: s.legacyIdentities[field],
-      project: cwd, projectOwned: s.ownFields.contains(cwdField), headerOrigin: mark ?? s.marks["payload.origin.kind"],
+      project: cwd, projectTimestamp: cwd == nil ? nil : nativeTimestamp, projectOwned: s.ownFields.contains(cwdField), headerOrigin: mark ?? s.marks["payload.origin.kind"],
       ownMarker: ownMarker || (tool == .codex && s.sessionMeta && s.ownFields.contains("payload.cwd")), unusableValues: unusableValueCount)
   }
   public func authoritativeSession(tool: AgentLogTool) -> AgentLogSessionSubject? {
