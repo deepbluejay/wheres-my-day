@@ -7,11 +7,11 @@ extension SQLiteConnection {
   /// Later schema changes go in this function, before the version is advanced.
   func validateSchemaOrigin() throws -> Int {
     let version = try integer("PRAGMA user_version")
+    guard version <= Self.schemaVersion else { throw StorageError("Database version is newer than this storage") }
     guard [0, 9, 14, 15, Self.schemaVersion].contains(version) else {
       throw StorageError("Unsupported database schema \(version): supported origins are a fresh database and main schemas 9, 14 and 15 (current \(Self.schemaVersion))")
     }
     let application = try integer("PRAGMA application_id")
-    guard version <= Self.schemaVersion else { throw StorageError("Database version is newer than this storage") }
     let tableCount = try integer("SELECT count(*) FROM sqlite_master WHERE type='table'")
     guard (version > 0 && application == Self.applicationID) || (version == 0 && application == 0 && tableCount == 0)
     else { throw StorageError("Use conversion to import an old database into a separate new database") }

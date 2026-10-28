@@ -233,7 +233,8 @@ final class GitCollectionTests: XCTestCase {
     try FileManager.default.createDirectory(at: broken, withIntermediateDirectories: true)
     try observe(broken)
     try observe(root.appendingPathComponent("invented-missing"))
-    XCTAssertEqual(try count("git_working_folders", "status='failed'"), 1)
+    // A folder outside every repository is not a read failure.
+    XCTAssertEqual(try count("git_working_folders", "status='unversioned' AND failures=0"), 1)
     XCTAssertEqual(try count("git_working_folders", "status='missing'"), 1)
     try git(["init", "-b", "main"], in: broken)
     try commit(in: broken)
@@ -243,7 +244,7 @@ final class GitCollectionTests: XCTestCase {
     try FileManager.default.removeItem(at: broken.appendingPathComponent(".git"))
     try scan(now + 600)
     XCTAssertEqual(try store.connection.integer("SELECT failures FROM git_repositories"), 1)
-    XCTAssertTrue(try store.gitStatus().contains("git_failures=2"))
+    XCTAssertTrue(try store.gitStatus().contains("git_failures=1"))
   }
   func testEveryMetadataStringIsMaskedIncludingRawSecretFolderFirstSight() throws {
     let secret = "sk-" + String(repeating: "Invented", count: 5)
@@ -302,6 +303,8 @@ final class GitCollectionTests: XCTestCase {
       let logTask = AgentLogTask(reader: reader, storage: store, git: task)
       try work { try logTask.scan(at: self.now) }
     }
+    // The raw cwd is observed on the Git queue after the append.
+    task.waitForBackfill()
     XCTAssertEqual(try count("git_repositories"), 1)
     XCTAssertEqual(try count("git_working_folders"), 2)
     try scan()

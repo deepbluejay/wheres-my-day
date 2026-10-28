@@ -69,6 +69,7 @@ extension GitCollectionTests {
     let (file, logs, bytes) = try receiptFixture(folder: tree)
     store.setGitSecureInput { reading }
     try work { try logs.scan(at: self.now + 1) }
+    task.waitForBackfill()
     // The agent-log append proceeds as on main; only the Git observation waits.
     XCTAssertEqual(try store.logPosition(path: file.path)?.offset, bytes)
     XCTAssertEqual(logs.health.gitDeferredBatches, 1)
@@ -97,6 +98,7 @@ extension GitCollectionTests {
     let (file, logs, bytes) = try receiptFixture(folder: tree)
     store.setGitSecureInput { reading }
     try work { try logs.scan(at: self.now + 1) }
+    task.waitForBackfill()
     // The agent-log append proceeds as on main; only the Git observation waits.
     XCTAssertEqual(try store.logPosition(path: file.path)?.offset, bytes)
     XCTAssertEqual(logs.health.gitDeferredBatches, 1)
@@ -188,6 +190,7 @@ extension GitCollectionTests {
     let (file, logs, bytes) = try receiptFixture()
     task.afterLocationPrepared = { _ in self.store.setGitSecureInput { reading } }
     try work { try logs.scan(at: self.now + 1) }
+    task.waitForBackfill()
     // The agent-log append proceeds as on main; only the Git observation waits.
     XCTAssertEqual(try store.logPosition(path: file.path)?.offset, bytes)
     XCTAssertEqual(logs.health.gitDeferredBatches, 1)
@@ -210,8 +213,8 @@ extension GitCollectionTests {
     let (file, logs, bytes) = try receiptFixture()
     var checks = 0
     // Hold the queued recovery so the deferred batch itself is checked first.
-    let held = DispatchSemaphore(value: 0)
-    task.beforeBackfillPage = { held.wait(); self.task.beforeBackfillPage = nil }
+    let held = DispatchSemaphore(value: 0), entered = DispatchSemaphore(value: 0)
+    task.beforeBackfillPage = { entered.signal(); held.wait(); self.task.beforeBackfillPage = nil }
     task.afterLocationPrepared = { _ in
       self.store.setGitSecureInput {
         checks += 1
@@ -219,6 +222,8 @@ extension GitCollectionTests {
       }
     }
     try work { try logs.scan(at: self.now + 1) }
+    // Live hand-offs go first, so the held recovery starts after the batch was checked.
+    XCTAssertEqual(entered.wait(timeout: .now() + 60), .success)
     XCTAssertGreaterThanOrEqual(checks, 2)
     // The agent-log append proceeds as on main; only the Git observation waits.
     XCTAssertEqual(try store.logPosition(path: file.path)?.offset, bytes)

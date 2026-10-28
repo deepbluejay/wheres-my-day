@@ -20,7 +20,8 @@ extension GitCollectionTests {
     try store.saveSettings(StorageSettings(promptRetentionDays: 1), at: 0)
     try commit()
     let folder = retentionFolder(time)
-    try store.rememberGitFolder(folder, location: nil, status: "failed", now: now - 1)
+    // The earlier failure is one retry delay old, so this observation reads again.
+    try store.rememberGitFolder(folder, location: nil, status: "failed", now: now - 300)
     var prepared = false
     task.afterLocationPrepared = { location in
       prepared = true

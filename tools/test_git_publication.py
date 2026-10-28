@@ -11,7 +11,11 @@ _spec = importlib.util.spec_from_file_location('import_boundary', ROOT / 'Plugin
 _boundary = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_boundary)
 CATALOG = ROOT / 'tools/git_publication_inventory.json'
-MUTATION = re.compile(r'(?:INSERT(?: OR \w+)? INTO|UPDATE|DELETE FROM|REPLACE INTO)\s', re.I)
+# SQLite accepts a quoted identifier right after the keyword: UPDATE"git_commits"SET.
+MUTATION = re.compile(r'(?:INSERT(?: OR \w+)? INTO|UPDATE|DELETE FROM|REPLACE INTO)(?:\s|["`\[])', re.I)
+SPLIT_KEYWORD = re.compile(r'(?:INSERT|UPDATE|DELETE|REPLACE|WITH)\b', re.I)
+# Stands for a concatenated operand that is not a string literal.
+CONCATENATED = '\\(+)'
 TRIGGER = re.compile(r'CREATE (?:TEMP |TEMPORARY )?TRIGGER\b', re.I)
 
 
@@ -22,7 +26,7 @@ def swift_sources():
 
 def normalized_sql(value):
     """Drop SQL comments and collapse whitespace so spacing cannot hide a keyword."""
-    for escape, character in (('\\n', '\n'), ('\\t', '\t'), ('\\r', '\r')):
+    for escape, character in (('\\n', '\n'), ('\\t', '\t'), ('\\r', '\r'), ('\\"', '"')):
         value = value.replace(escape, character)
     value = re.sub(r'/\*.*?\*/', ' ', value, flags=re.S)
     value = re.sub(r'--[^\n]*', ' ', value)
@@ -40,6 +44,25 @@ def matching(code, start, opening='{', closing='}'):
             if depth == 0:
                 return index
     raise AssertionError('Unbalanced Swift scope')
+
+
+def literal_body(source, index):
+    """The raw body and end of the Swift string literal opening at index, or None."""
+    opening = _boundary.STRING_OPEN.match(source, index)
+    if not opening:
+        return None
+    hashes, quotes = opening.groups()
+    index += len(opening.group())
+    body_start = index
+    closing, escape = quotes + hashes, '\\' + hashes
+    while index < len(source):
+        if source.startswith(escape, index):
+            index += len(escape) + 1
+        elif source.startswith(closing, index):
+            return source[body_start:index], index + len(closing)
+        else:
+            index += 1
+    return None
 
 
 def sql_literals(source):
@@ -63,28 +86,32 @@ def sql_literals(source):
                 else:
                     index += 1
         else:
-            opening = _boundary.STRING_OPEN.match(source, index)
-            if not opening:
+            literal = literal_body(source, index)
+            if not literal:
                 index += 1
                 continue
             start = index
-            hashes, quotes = opening.groups()
-            index += len(opening.group())
-            body_start = index
-            closing, escape = quotes + hashes, '\\' + hashes
-            while index < len(source):
-                if source.startswith(escape, index):
-                    index += len(escape) + 1
-                elif source.startswith(closing, index):
-                    value = normalized_sql(source[body_start:index])
-                    index += len(closing)
-                    direct = MUTATION.match(value)
-                    cte = re.match(r'WITH\b', value, re.I) and re.search(r'\b(?:INSERT|UPDATE|DELETE|REPLACE)\b', value, re.I)
-                    if direct or cte or TRIGGER.match(value):
-                        yield start, value.strip()
+            body, index = literal
+            # "DELETE " + "FROM git_commits" is one statement: join concatenated literals,
+            # and mark any other operand so a split keyword stays visible.
+            concatenated = False
+            while True:
+                plus = re.match(r'\s*\+\s*', source[index:])
+                if not plus:
                     break
-                else:
-                    index += 1
+                concatenated = True
+                following = literal_body(source, index + plus.end())
+                if not following:
+                    body += CONCATENATED
+                    break
+                body += following[0]
+                index = following[1]
+            value = normalized_sql(body)
+            direct = MUTATION.match(value)
+            cte = re.match(r'WITH\b', value, re.I) and re.search(r'\b(?:INSERT|UPDATE|DELETE|REPLACE)\b', value, re.I)
+            split = concatenated and SPLIT_KEYWORD.match(value)
+            if direct or cte or split or TRIGGER.match(value):
+                yield start, value.strip()
 
 
 def mutation_sites(path, source):
@@ -110,7 +137,7 @@ def mutation_sites(path, source):
     for start, sql in sql_literals(source):
         if re.match(r'CREATE\s', sql, re.I):
             continue
-        dynamic = re.search(r'^(?:INSERT(?: OR \w+)? INTO|UPDATE|DELETE FROM|REPLACE INTO)\s*(?:\\\(|$)', sql, re.I)
+        dynamic = re.search(r'^(?:INSERT(?: OR \w+)? INTO|UPDATE|DELETE FROM|REPLACE INTO)\s*(?:\\\(|$)', sql, re.I) or CONCATENATED in sql
         if 'git_' not in sql.lower() and path != 'Sources/Storage/GitCollection.swift' and not dynamic:
             continue
         owners = [item for item in functions if item[0] < start < item[1]]
@@ -263,6 +290,33 @@ class GitPublicationInventoryTests(unittest.TestCase):
         self.assertEqual([site['sql'] for site in mutation_sites('Sources/Storage/Invented.swift', multiline)], ['DELETE FROM git_refs'])
         # Bare keywords used as ordinary strings are not statements.
         self.assertEqual(list(mutation_sites('Sources/Storage/Invented.swift', 'func f() { let a = ["INSERT", "UPDATE", "update"] }')), [])
+
+    def test_quoted_identifier_after_keyword_is_a_mutation(self):
+        for sql in [r'UPDATE\"git_commits\"SET complete=1',
+                    r'DELETE FROM\"git_files\"',
+                    r'INSERT OR IGNORE INTO\"git_tombstones\" VALUES(?)',
+                    r'REPLACE INTO[git_commits] VALUES(1)',
+                    r'update`git_commits`set complete=1']:
+            with self.subTest(sql=sql):
+                source = 'func bypass() throws { try connection.run("' + sql + '") }'
+                sites = list(mutation_sites('Sources/Storage/Invented.swift', source))
+                self.assertEqual(len(sites), 1)
+                self.assertFalse(sites[0]['gated'])
+        raw = 'func bypass() throws { try connection.run("""\n  UPDATE"git_commits"SET complete=1\n  """) }'
+        self.assertEqual([site['sql'] for site in mutation_sites('Sources/Shell/Invented.swift', raw)], ['UPDATE"git_commits"SET complete=1'])
+
+    def test_concatenation_cannot_split_a_mutation_keyword(self):
+        for expression, sql in [('"DELETE " + "FROM git_commits"', 'DELETE FROM git_commits'),
+                                ('"INSERT OR " +\n "IGNORE INTO " + "git_tombstones VALUES(?)"', 'INSERT OR IGNORE INTO git_tombstones VALUES(?)'),
+                                ('"UPD" + "ATE git_commits SET complete=1"', 'UPDATE git_commits SET complete=1'),
+                                ('"DELETE " + statement', 'DELETE \\(+)')]:
+            with self.subTest(sql=sql):
+                source = 'func bypass() throws { try connection.run(' + expression + ') }'
+                sites = list(mutation_sites('Sources/Shell/Invented.swift', source))
+                self.assertEqual([site['sql'] for site in sites], [sql])
+                self.assertFalse(sites[0]['gated'])
+        # Concatenated text that is not a statement stays out of the inventory.
+        self.assertEqual(list(mutation_sites('Sources/Shell/Invented.swift', 'func f() { let a = " AND x=?" + list }')), [])
 
     def test_temporary_triggers_are_schema_mutations(self):
         for sql in ['CREATE TEMP TRIGGER invented AFTER UPDATE ON settings BEGIN DELETE FROM git_commits; END',

@@ -114,7 +114,8 @@ extension GitCollectionTests {
     try store.deleteRecords(in: range, confirmation: preview.confirmation)
     XCTAssertGreaterThan(profile.writeTransactions, 1)
     XCTAssertEqual(profile.gitDeleteTransactions.count, 1)
-    XCTAssertEqual(profile.gitDeleteStatements, 8)
+    // Eight erasures plus the narrowing take-back of tombstones, all in the one unit.
+    XCTAssertEqual(profile.gitDeleteStatements, 10)
     XCTAssertEqual(try count("samples"), 0)
     for table in ["git_commits", "git_commit_text", "git_files", "git_commit_refs"] {
       XCTAssertEqual(try count(table), 0, table)

@@ -283,8 +283,9 @@ final class DatabaseBoundaryTests: XCTestCase {
     }
     defer { DatabaseOpenBoundary.beforeOpen = nil }
     // Origin validation, Git preparation and collection proofs each use approved read-only snapshots.
+    // A checkpoint save needs no snapshot: its Git authority reads no rows.
     for (args, count) in [(["stop"],3),(["status"],1),
-      (["privacy","verdicts"],1),(["selftest"],20),(["leaktest"],20)] {
+      (["privacy","verdicts"],1),(["selftest"],19),(["leaktest"],19)] {
       opened = []
       let result = RetainedCommands.run(args,paths:context,now:1000)
       XCTAssertEqual(result.status,0,result.output); XCTAssertEqual(opened.count,count,args.joined(separator:" "))

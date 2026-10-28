@@ -21,7 +21,7 @@ public struct AgentLogHealth {
   public var folderFailures = 0
   public var discoveryFailures = 0
   public var ownershipDeferredBatches = 0
-  /// Batches appended while Secure Input (or a Git error) deferred their Git observation.
+  /// Appended batches whose Git observation Secure Input, a Git error or the hand-off bound deferred.
   public var gitDeferredBatches = 0
   public var gitFailures = 0
   public var acquiredEvents = 0
@@ -82,20 +82,21 @@ public final class AgentLogTask {
           guard try recordingAllowed(at: time) else { return }
           let batch = try reader.read(file, position: position, at: time)
           guard try recordingAllowed(at: time) else { return }
-          // Offer the raw cwd before its masked checkpoint advances. A deferral or Git
-          // error never holds the append back: retained occurrences are offered again,
-          // with their native times, once the Git queue recovers this source.
-          var gitDeferred = false, gitFailed = false
-          if !batch.ownershipDeferred, let git {
-            do { gitDeferred = try git.observe(batch.events, position: batch.position) == .deferred }
-            catch { gitFailed = true }
-          }
           let result = try storage.appendLogEvents(batch.events, evidence: batch.evidence, position: batch.position)
-          if !batch.ownershipDeferred, let git { git.requestRecovery(batch.position, afterDeferral: gitDeferred || gitFailed) }
+          // The raw cwd goes to the Git queue in memory after the append; this thread
+          // never waits on Git. A deferral or Git error is recovered there from the
+          // retained occurrences, with their native times.
+          if !batch.ownershipDeferred, let git {
+            git.handOff(batch.events, position: batch.position) { [weak self] failed in
+              guard let self else { return }
+              self.lock.lock()
+              self.status.gitDeferredBatches += 1
+              if failed { self.status.gitFailures += 1 }
+              self.lock.unlock()
+            }
+          }
           lock.lock()
           if batch.ownershipDeferred { status.ownershipDeferredBatches += 1 }
-          if gitDeferred || gitFailed { status.gitDeferredBatches += 1 }
-          if gitFailed { status.gitFailures += 1 }
           if git != nil {
             status.ignored[.timestampUnknownCwd, default: 0] += batch.events.filter { $0.workingFolder != nil && $0.timestamp == nil }.count
           }

@@ -373,14 +373,9 @@ extension ActivityStorage {
       source: folder.physicalSource.storedKey, device: folder.device, inode: folder.inode, time: folder.time, tool: folder.tool, sourceIdentity: folder.physicalSource)
     return Self.gitDigest(Self.gitFolderKey(safe) + ":" + String(folder.time))
   }
-  /// Re-polling a cursor is not a new cwd observation.
-  func prepareGitCheckpointState(_ position: LogPosition, fallback: SQLValue, events: [AgentLogEvent] = []) throws -> (state: SQLValue, revision: Int?) {
-    let snapshot = try ActivityStorage(url: url, appDataDirectory: appDataDirectory, readOnly: true, databaseScope: databaseScope)
-    return try snapshot.connection.transaction(write: false) {
-      return (try snapshot.gitCheckpointState(position, fallback: fallback,
-        tool: events.first(where: { $0.workingFolder != nil && $0.timestamp != nil })?.tool), try snapshot.gitSourceRevision())
-    }
-  }
+  /// Re-polling a cursor is not a new cwd observation. The authority is a pure function
+  /// of the checkpoint and hash-only receipt names: it reads no rows, so an append never
+  /// depends on Git-queue writes to folders or the source revision.
   func gitCheckpointState(_ position: LogPosition, fallback: SQLValue, tool: AgentLogTool? = nil) throws -> SQLValue {
     guard var state = try? AgentLogState.decode(position.state), let tool = state.tool.flatMap(AgentLogTool.init(rawValue:)) ?? tool else { return fallback }
     state.tool = tool.rawValue
@@ -594,7 +589,7 @@ extension ActivityStorage {
         INSERT INTO git_working_folders(identity,source,device,inode,session,folder,repo_id,top_level,branch,head,ts,last_seen,attempt_ts,status,failures,tool,discovery,complete,ownership_authority)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(identity) DO UPDATE SET
         repo_id=excluded.repo_id,top_level=excluded.top_level,branch=excluded.branch,head=excluded.head,
-        attempt_ts=excluded.attempt_ts,status=excluded.status,failures=git_working_folders.failures+excluded.failures,complete=excluded.complete,ownership_authority=excluded.ownership_authority
+        attempt_ts=excluded.attempt_ts,status=excluded.status,failures=CASE WHEN excluded.status='unversioned' THEN 0 ELSE git_working_folders.failures+excluded.failures END,complete=excluded.complete,ownership_authority=excluded.ownership_authority
         """, [.key(folderIdentity), .key(source), .integer(folder.device), .integer(folder.inode),
           .key(session), .maskedText(maskedFolder), repo, .maskedText(top),
           .maskedText(branch), .maskedText(head), .integer(folder.time), .integer(folder.time),
@@ -643,6 +638,22 @@ extension ActivityStorage {
       try cleanGitOrphans()
     } }
   }
+  /// Read-only: the last resolution of a folder that is not linked to a repository.
+  public func gitUnlinkedFolderState(_ folder: GitWorkingFolder) throws -> (status: String, failures: Int, attempt: Int)? {
+    let source = folder.physicalSource.storedKey, session = AgentLogIdentityCodec.session(folder.session).storedKey
+    let masked = Self.maskedGitText(folder.folder)
+    return try gitLocked {
+      var result: (String, Int, Int)?
+      try connection.namedRows("""
+        SELECT status,failures,attempt_ts FROM git_working_folders WHERE complete=1 AND repo_id IS NULL AND (identity=? OR
+        (source=? AND device=? AND inode=? AND session=? AND folder=? AND tool=?)) ORDER BY id LIMIT 1
+        """, [.key(Self.gitFolderKey(folder)), .key(source), .integer(folder.device), .integer(folder.inode),
+          .key(session), .maskedText(masked), .key(folder.tool?.rawValue ?? "")]) {
+        result = (try $0.text("status"), try $0.int("failures"), try $0.int("attempt_ts"))
+      }
+      return result
+    }
+  }
   /// Keyset paging keeps backfill independent of the number of saved log occurrences.
   public func gitMetadataRecoveryPending() throws -> Bool {
     try gitLocked { try connection.integer("SELECT EXISTS(SELECT 1 FROM log_positions INDEXED BY log_positions_git_recovery WHERE json_valid(state) AND json_extract(state,'$.metadataRecoveryOffset') IS NOT NULL)") > 0 }
@@ -654,19 +665,20 @@ extension ActivityStorage {
     try gitBackfillPage(after: id, limit: 1, checkpoints: false, now: position.seenAt, source: position).rows.first
   }
   /// One read snapshot per bounded page, in id order.
-  public func gitBackfillPage(after id: Int, limit: Int, checkpoints: Bool, now: Int, source: LogPosition? = nil) throws -> GitBackfillPage {
+  /// Checkpoint pages read only checkpoints written after `since` (seen_ts).
+  public func gitBackfillPage(after id: Int, limit: Int, checkpoints: Bool, now: Int, source: LogPosition? = nil, since: Int = Int.min) throws -> GitBackfillPage {
     let snapshot = try ActivityStorage(url: url, appDataDirectory: appDataDirectory, readOnly: true, databaseScope: databaseScope)
     return try snapshot.connection.transaction(write: false) {
-      try snapshot.gitBackfillPageSnapshot(after: id, limit: limit, checkpoints: checkpoints, now: now, source: source)
+      try snapshot.gitBackfillPageSnapshot(after: id, limit: limit, checkpoints: checkpoints, now: now, source: source, since: since)
     }
   }
-  private func gitBackfillPageSnapshot(after id: Int, limit: Int, checkpoints: Bool, now: Int, source: LogPosition?) throws -> GitBackfillPage {
+  private func gitBackfillPageSnapshot(after id: Int, limit: Int, checkpoints: Bool, now: Int, source: LogPosition?, since: Int) throws -> GitBackfillPage {
     try gitLocked {
       var page = GitBackfillPage()
       var query = checkpoints
-        ? "SELECT rowid AS id,path AS source,device,inode,state,seen_ts AS ts,0 AS byte_offset FROM log_positions WHERE rowid>? ORDER BY rowid LIMIT ?"
+        ? "SELECT rowid AS id,path AS source,device,inode,state,seen_ts AS ts,0 AS byte_offset FROM log_positions WHERE rowid>? AND seen_ts>? ORDER BY rowid LIMIT ?"
         : "SELECT e.id,e.source,e.device,e.inode,e.byte_offset,COALESCE(s.session_id,h.session_id,e.session_id) AS session,CASE WHEN json_valid(p.payload) THEN COALESCE(json_extract(p.payload,'$.cwd'),json_extract(p.payload,'$.payload.cwd')) WHEN EXISTS(SELECT 1 FROM log_positions l WHERE l.path=e.source AND l.device=e.device AND l.inode=e.inode AND json_valid(l.state) AND json_extract(l.state,'$.cwdObservedAt')=e.ts AND json_extract(l.state,'$.project')=e.project) THEN e.project ELSE '' END AS folder,e.ts,e.tool FROM agent_log_events e JOIN agent_log_payloads p ON p.id=e.payload_id LEFT JOIN agent_log_event_sessions s ON s.event_id=e.id LEFT JOIN agent_log_inherited_sessions h ON h.event_id=e.id WHERE e.id>? AND e.timestamp_known=1 ORDER BY e.id LIMIT ?"
-      var values: [SQLValue] = [.integer(id)]
+      var values: [SQLValue] = [.integer(id)] + (checkpoints ? [.integer(since)] : [])
       if let source {
         guard let tool = try AgentLogState.decode(source.state).tool else { return page }
         let keys = legacyLogAdapter.sourceKeys(path: source.path)
@@ -716,6 +728,49 @@ extension ActivityStorage {
         [.integer(receipt.id), .integer(receipt.device), .integer(receipt.inode), .integer(receipt.offset)]) == 1 else { return }
       try connection.run("INSERT INTO git_backfill_progress(source,event_id) VALUES(?,?) ON CONFLICT(source) DO UPDATE SET event_id=max(event_id,excluded.event_id)",
         [.key(key), .integer(receipt.id)])
+    } }
+  }
+  /// A finished receipt says every retained occurrence of the source below its offset
+  /// was offered. Only new events move the offset, so a receipt never skips one. The
+  /// value lives in the key because the clamp trigger lowers event_id.
+  public func gitBackfillFinishedKey(_ source: LogPosition) throws -> String? {
+    guard source.offset > 0, let key = try gitBackfillKey(source) else { return nil }
+    return "finished:" + key + ":" + String(source.offset)
+  }
+  public func gitBackfillFinishedReceipts() throws -> Set<String> {
+    try gitLocked {
+      var keys = Set<String>()
+      try connection.namedRows("SELECT source FROM git_backfill_progress WHERE source>='finished:' AND source<'finished;'") { keys.insert(try $0.text("source")) }
+      return keys
+    }
+  }
+  /// Replaces the source's earlier receipt, so there is at most one per source.
+  public func saveGitBackfillFinished(_ source: LogPosition) throws {
+    guard let key = try gitBackfillKey(source), let receipt = try gitBackfillFinishedKey(source) else { return }
+    try gitLocked { try gitTransaction(cleanup: true) {
+      try connection.run("DELETE FROM git_backfill_progress WHERE source>? AND source<? AND source!=?",
+        [.key("finished:" + key + ":"), .key("finished:" + key + ";"), .key(receipt)])
+      try connection.run("INSERT OR IGNORE INTO git_backfill_progress(source,event_id) VALUES(?,0)", [.key(receipt)])
+    } }
+  }
+  /// Checkpoints with a later seen_ts are offered again. An unchanged checkpoint keeps
+  /// its seen_ts, so a restart reads only checkpoints written since the last complete pass.
+  public func gitCheckpointBackfillMark() throws -> Int {
+    try gitLocked { try gitCheckpointMark() ?? Int.min }
+  }
+  /// Caller holds the storage lock. Nil before Git adoption or before a complete pass.
+  func gitCheckpointMark() throws -> Int? {
+    guard try connection.integer("SELECT count(*) FROM sqlite_master WHERE name='git_backfill_progress'") > 0 else { return nil }
+    var mark: Int?
+    try connection.namedRows("SELECT source FROM git_backfill_progress WHERE source>='checkpoints:' AND source<'checkpoints;'") {
+      if let value = Int(try $0.text("source").dropFirst("checkpoints:".count)) { mark = max(mark ?? value, value) }
+    }
+    return mark
+  }
+  public func saveGitCheckpointBackfillMark(_ seen: Int) throws {
+    try gitLocked { try gitTransaction(cleanup: true) {
+      try connection.run("DELETE FROM git_backfill_progress WHERE source>='checkpoints:' AND source<'checkpoints;'")
+      try connection.run("INSERT INTO git_backfill_progress(source,event_id) VALUES(?,0)", [.key("checkpoints:" + String(seen))])
     } }
   }
   /// Read-only hint for batching equal occurrences. Publication still decides every write.
@@ -1007,6 +1062,10 @@ extension ActivityStorage {
         && connection.integer("SELECT COALESCE(max(rowid),0) FROM forgotten_ranges") == policy.forgottenRevision
     }
   }
+  /// The policy read before a backfill page still holds at `now`.
+  public func gitPolicyAllowed(_ policy: GitPreparationPolicy, now: Int) throws -> Bool {
+    try gitPolicyAllowed(generation: policy.generation, policy: policy, now: now)
+  }
   /// Preparation may take longer than a Git I/O deadline. Privacy changes still stop it
   /// before the next bounded window; the publishing transaction repeats the final checks.
   public func gitPreparationAllowed(repo: Int, hash: String, generation: Int, policy: GitPreparationPolicy, now: Int) throws -> Bool {
@@ -1205,6 +1264,7 @@ extension ActivityStorage {
       let blocked = reopenColumn ? try connection.integer("SELECT count(*) FROM git_repositories WHERE reopen_blocked=1") : 0
       fields.append("git_masked_reopen_blocked=\(blocked)")
       fields.append("git_missing_folders=\(try connection.integer("SELECT count(*) FROM git_working_folders WHERE status='missing'"))")
+      fields.append("git_unversioned_folders=\(try connection.integer("SELECT count(*) FROM git_working_folders WHERE status='unversioned'"))")
       fields.append("git_last_read=\(try connection.integer("SELECT COALESCE(max(last_read),0) FROM git_repositories"))")
       fields.append("git_failures=\(try connection.integer("SELECT (SELECT COALESCE(sum(failures),0) FROM git_repositories)+(SELECT COALESCE(sum(failures),0) FROM git_working_folders)"))")
       return fields.joined(separator: " ")
@@ -1261,6 +1321,16 @@ extension ActivityStorage {
         try gitLocked { try connection.run("INSERT INTO \(table) VALUES(?)", [value]) }
       }
     }
+    guard try snapshot.connection.integer("SELECT count(*) FROM sqlite_temp_master WHERE name='git_deletion_discovery_sources'") > 0 else { return }
+    try gitLocked {
+      try connection.run("CREATE TEMP TABLE IF NOT EXISTS git_deletion_discovery_sources(hash TEXT NOT NULL,folder_id INTEGER,intrinsic INTEGER NOT NULL)")
+      try connection.run("DELETE FROM git_deletion_discovery_sources")
+    }
+    try snapshot.connection.rows("SELECT hash,folder_id,intrinsic FROM git_deletion_discovery_sources") { row in
+      let folder: SQLValue = sqlite3_column_type(row, 1) == SQLITE_NULL ? .null : .integer(SQLiteConnection.int(row, 1))
+      try gitLocked { try connection.run("INSERT INTO git_deletion_discovery_sources VALUES(?,?,?)",
+        [.key(SQLiteConnection.text(row, 0)), folder, .integer(SQLiteConnection.int(row, 2))]) }
+    }
   }
   func prepareGitDeletion(_ range: TimeRange) throws {
     guard try connection.integer("SELECT count(*) FROM sqlite_master WHERE name='git_repositories'") > 0 else { return }
@@ -1274,6 +1344,10 @@ extension ActivityStorage {
     try connection.run("DELETE FROM git_deletion_checkpoints")
     try connection.run("CREATE TEMP TABLE IF NOT EXISTS git_deletion_discoveries(hash TEXT PRIMARY KEY)")
     try connection.run("DELETE FROM git_deletion_discoveries")
+    // Why each discovery was selected: in the range by its own time, or through a folder.
+    // Narrowing keeps only discoveries whose folder is still erased or that are in range.
+    try connection.run("CREATE TEMP TABLE IF NOT EXISTS git_deletion_discovery_sources(hash TEXT NOT NULL,folder_id INTEGER,intrinsic INTEGER NOT NULL)")
+    try connection.run("DELETE FROM git_deletion_discovery_sources")
     let values: [SQLValue] = [.integer(range.start), .integer(range.end)]
     try connection.run("""
       INSERT INTO git_deletion_repos SELECT repo_id FROM git_working_folders WHERE repo_id IS NOT NULL
@@ -1288,6 +1362,7 @@ extension ActivityStorage {
     try connection.run("INSERT INTO git_deletion_hashes SELECT hash FROM git_commits WHERE id IN git_deletion_commits")
     if try connection.integer("SELECT count(*) FROM pragma_table_info('git_working_folders') WHERE name='discovery'") > 0 {
       try connection.run("INSERT OR IGNORE INTO git_deletion_discoveries SELECT discovery FROM git_working_folders WHERE id IN git_deletion_folders AND discovery!=''")
+      try connection.run("INSERT INTO git_deletion_discovery_sources SELECT discovery,id,ts>=? AND ts<? FROM git_working_folders WHERE id IN git_deletion_folders AND discovery!=''", values)
     }
     // Older read-only previews may predate the agent-event tables.
     if try connection.integer("SELECT count(*) FROM sqlite_master WHERE name='agent_log_events'") > 0 {
@@ -1296,15 +1371,18 @@ extension ActivityStorage {
       let session = attributed ? "COALESCE(s.session_id,e.session_id,'')" : "COALESCE(e.session_id,'')"
       let join = attributed ? "LEFT JOIN agent_log_event_sessions s ON s.event_id=e.id" : ""
       try connection.namedRows("""
-        SELECT e.*,\(session) AS git_session FROM agent_log_events e \(join) WHERE EXISTS(
-          SELECT 1 FROM git_working_folders f WHERE f.id IN git_deletion_folders
+        SELECT e.*,\(session) AS git_session,f.id AS git_folder FROM agent_log_events e \(join)
+          JOIN git_working_folders f ON f.id IN git_deletion_folders
             AND f.device=e.device AND f.inode=e.inode AND f.source=e.source
-            AND f.session=\(session) AND f.folder=e.project)
+            AND f.session=\(session) AND f.folder=e.project
         """) { row in
         let folder = GitWorkingFolder(folder: try row.text("project"), session: try row.text("git_session"),
           source: try row.text("source"), device: try row.int("device"), inode: try row.int("inode"), time: try row.int("ts"),
           tool: AgentLogTool(rawValue: try row.text("tool")), sourceIdentity: AgentLogIdentityCodec.physical(try row.text("source")))
-        try connection.run("INSERT OR IGNORE INTO git_deletion_discoveries VALUES(?)", [.key(Self.gitDiscoveryKey(folder))])
+        let discovery = Self.gitDiscoveryKey(folder)
+        try connection.run("INSERT OR IGNORE INTO git_deletion_discoveries VALUES(?)", [.key(discovery)])
+        try connection.run("INSERT INTO git_deletion_discovery_sources VALUES(?,?,?)",
+          [.key(discovery), .integer(try row.int("git_folder")), .integer(folder.time >= range.start && folder.time < range.end ? 1 : 0)])
       }
     }
     try connection.namedRows("SELECT rowid AS id,* FROM log_positions WHERE json_valid(state)") { row in
@@ -1312,11 +1390,18 @@ extension ActivityStorage {
       guard let time = state.cwdObservedAt, !state.project.isEmpty else { return }
       let folder = GitWorkingFolder(folder: state.project, session: (state.cwdSession ?? state.session)?.storedKey ?? "", source: try row.text("path"),
         device: try row.int("device"), inode: try row.int("inode"), time: time, tool: state.tool.flatMap(AgentLogTool.init(rawValue:)), sourceIdentity: AgentLogIdentityCodec.physical(try row.text("path")))
-      let selected = try connection.integer("SELECT count(*) FROM git_working_folders WHERE id IN git_deletion_folders AND device=? AND inode=? AND source=? AND session=? AND folder=?",
-        [.integer(folder.device), .integer(folder.inode), .key(folder.physicalSource.storedKey), .key(AgentLogIdentityCodec.session(folder.session).storedKey), .text(folder.folder)]) > 0
-      if (time >= range.start && time < range.end) || selected {
+      var selected: [Int] = []
+      try connection.namedRows("SELECT id FROM git_working_folders WHERE id IN git_deletion_folders AND device=? AND inode=? AND source=? AND session=? AND folder=?",
+        [.integer(folder.device), .integer(folder.inode), .key(folder.physicalSource.storedKey), .key(AgentLogIdentityCodec.session(folder.session).storedKey), .text(folder.folder)]) {
+        selected.append(try $0.int("id"))
+      }
+      let intrinsic = time >= range.start && time < range.end
+      if intrinsic || !selected.isEmpty {
+        let discovery = Self.gitDiscoveryKey(folder)
         try connection.run("INSERT INTO git_deletion_checkpoints VALUES(?)", [.integer(try row.int("id"))])
-        try connection.run("INSERT OR IGNORE INTO git_deletion_discoveries VALUES(?)", [.key(Self.gitDiscoveryKey(folder))])
+        try connection.run("INSERT OR IGNORE INTO git_deletion_discoveries VALUES(?)", [.key(discovery)])
+        if intrinsic { try connection.run("INSERT INTO git_deletion_discovery_sources VALUES(?,NULL,1)", [.key(discovery)]) }
+        for id in selected { try connection.run("INSERT INTO git_deletion_discovery_sources VALUES(?,?,0)", [.key(discovery), .integer(id)]) }
       }
     }
   }
@@ -1372,9 +1457,33 @@ extension ActivityStorage {
         WHERE (ts>=? AND ts<?) OR (author_ts>=? AND author_ts<?) OR repo_id IN git_deletion_repos)
       """, values + values)
     try connection.run("DELETE FROM git_deletion_refs WHERE id NOT IN (SELECT id FROM git_refs WHERE (ts>=? AND ts<?) OR repo_id IN git_deletion_repos)", values)
+    try narrowGitDeletionMarks()
+  }
+  /// The first batch tombstoned the whole previewed selection. Tombstones this forget
+  /// added for a row that narrowing left in place, and that is not in the range by
+  /// itself, are taken back; a commit or folder that stays can still be collected.
+  private func narrowGitDeletionMarks() throws {
+    guard try connection.integer("SELECT count(*) FROM sqlite_temp_master WHERE name IN ('git_deletion_new_hashes','git_deletion_new_discoveries','git_deletion_discovery_sources')") == 3 else { return }
+    try connection.run("""
+      DELETE FROM git_deletion_hashes WHERE hash NOT IN (SELECT hash FROM git_commits WHERE id IN git_deletion_commits)
+        AND hash IN (SELECT hash FROM git_commits)
+      """)
+    try connection.run("DELETE FROM git_tombstones WHERE hash IN git_deletion_new_hashes AND hash NOT IN git_deletion_hashes")
+    try connection.run("""
+      DELETE FROM git_deletion_discoveries WHERE hash NOT IN (SELECT hash FROM git_deletion_discovery_sources
+        WHERE intrinsic=1 OR folder_id IN git_deletion_folders)
+      """)
+    try connection.run("DELETE FROM git_discovery_tombstones WHERE hash IN git_deletion_new_discoveries AND hash NOT IN git_deletion_discoveries")
   }
   func markGitDeletion() throws {
     guard try connection.integer("SELECT count(*) FROM sqlite_master WHERE name='git_tombstones'") > 0 else { return }
+    // Only tombstones this forget adds can be taken back by narrowing.
+    try connection.run("CREATE TEMP TABLE IF NOT EXISTS git_deletion_new_hashes(hash TEXT PRIMARY KEY)")
+    try connection.run("DELETE FROM git_deletion_new_hashes")
+    try connection.run("INSERT INTO git_deletion_new_hashes SELECT hash FROM git_deletion_hashes WHERE hash NOT IN git_tombstones")
+    try connection.run("CREATE TEMP TABLE IF NOT EXISTS git_deletion_new_discoveries(hash TEXT PRIMARY KEY)")
+    try connection.run("DELETE FROM git_deletion_new_discoveries")
+    try connection.run("INSERT INTO git_deletion_new_discoveries SELECT hash FROM git_deletion_discoveries WHERE hash NOT IN git_discovery_tombstones")
     try connection.run("INSERT OR IGNORE INTO git_tombstones SELECT hash FROM git_deletion_hashes")
     try connection.run("INSERT OR IGNORE INTO git_discovery_tombstones SELECT hash FROM git_deletion_discoveries")
   }

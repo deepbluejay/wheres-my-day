@@ -1,11 +1,16 @@
 {
-  "notes": "Reviewed nonpublication mutations: schema/adoption, irreversible privacy erasure/markers, bounded debt invalidation/disposal, and masked TEMP deletion selection. Gate-internal refusal/abandonment writes are part of authorization, not caller bypasses. Any change requires reviewing this inventory. CollectionFileCursor owns a private empty-filename SQLite manifest; its complete source digest pins the isolated adapter. Collection proof copies are restricted to SQLiteConnection temporary proof databases. Backfill progress marks (git_backfill_progress) only skip occurrences already offered to discovery; they never authorize a publication, and deleting the largest agent-log event id lowers them. Forget narrows its TEMP selection in the final unit so rows published in a batch gap are not cascaded.",
+  "notes": "Reviewed nonpublication mutations: schema/adoption, irreversible privacy erasure/markers, bounded debt invalidation/disposal, and masked TEMP deletion selection. Gate-internal refusal/abandonment writes are part of authorization, not caller bypasses. Any change requires reviewing this inventory. CollectionFileCursor owns a private empty-filename SQLite manifest; its complete source digest pins the isolated adapter. Collection proof copies are restricted to SQLiteConnection temporary proof databases. Backfill progress marks (git_backfill_progress) only skip occurrences already offered to discovery; they never authorize a publication, and deleting the largest agent-log event id lowers them. Forget narrows its TEMP selection in the final unit so rows published in a batch gap are not cascaded. Finished-source receipts and the checkpoint-pass mark keep their value in the git_backfill_progress key (event_id 0) and likewise only skip work already offered. After narrowing, the final unit takes back only tombstones this forget added for rows that stay and are not in the range by themselves. Concatenated literals are joined before matching, and a non-literal operand is marked \\\\(+).",
   "gated_sites": 20,
   "nonpublication": [
     {
       "file": "Sources/Storage/AXProbeStorage.swift",
       "function": "deleteAXProbe",
       "sql": "DELETE FROM \\(table) WHERE run_id=?"
+    },
+    {
+      "file": "Sources/Storage/ActivityStorage.swift",
+      "function": "cleanRetention",
+      "sql": "DELETE FROM sample_observations WHERE id IN (\\(+)"
     },
     {
       "file": "Sources/Storage/ActivityStorage.swift",
@@ -21,6 +26,21 @@
       "file": "Sources/Storage/CollectionMaintenanceProof.swift",
       "function": "apply",
       "sql": "UPDATE"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "function": "apply",
+      "sql": "WITH proof_args AS (SELECT \\(+)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "function": "apply",
+      "sql": "WITH proof_insert AS (SELECT \\(+)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "function": "collectionWrite",
+      "sql": "WITH proof_args AS (SELECT \\(+)"
     },
     {
       "file": "Sources/Storage/Deletion.swift",
@@ -85,7 +105,17 @@
     {
       "file": "Sources/Storage/GitCollection.swift",
       "function": "copyGitDeletionSelections",
+      "sql": "DELETE FROM git_deletion_discovery_sources"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "copyGitDeletionSelections",
       "sql": "INSERT INTO \\(table) VALUES(?)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "copyGitDeletionSelections",
+      "sql": "INSERT INTO git_deletion_discovery_sources VALUES(?,?,?)"
     },
     {
       "file": "Sources/Storage/GitCollection.swift",
@@ -145,6 +175,26 @@
     {
       "file": "Sources/Storage/GitCollection.swift",
       "function": "markGitDeletion",
+      "sql": "DELETE FROM git_deletion_new_discoveries"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "markGitDeletion",
+      "sql": "DELETE FROM git_deletion_new_hashes"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "markGitDeletion",
+      "sql": "INSERT INTO git_deletion_new_discoveries SELECT hash FROM git_deletion_discoveries WHERE hash NOT IN git_discovery_tombstones"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "markGitDeletion",
+      "sql": "INSERT INTO git_deletion_new_hashes SELECT hash FROM git_deletion_hashes WHERE hash NOT IN git_tombstones"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "markGitDeletion",
       "sql": "INSERT OR IGNORE INTO git_discovery_tombstones SELECT hash FROM git_deletion_discoveries"
     },
     {
@@ -174,6 +224,26 @@
     },
     {
       "file": "Sources/Storage/GitCollection.swift",
+      "function": "narrowGitDeletionMarks",
+      "sql": "DELETE FROM git_deletion_discoveries WHERE hash NOT IN (SELECT hash FROM git_deletion_discovery_sources WHERE intrinsic=1 OR folder_id IN git_deletion_folders)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "narrowGitDeletionMarks",
+      "sql": "DELETE FROM git_deletion_hashes WHERE hash NOT IN (SELECT hash FROM git_commits WHERE id IN git_deletion_commits) AND hash IN (SELECT hash FROM git_commits)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "narrowGitDeletionMarks",
+      "sql": "DELETE FROM git_discovery_tombstones WHERE hash IN git_deletion_new_discoveries AND hash NOT IN git_deletion_discoveries"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "narrowGitDeletionMarks",
+      "sql": "DELETE FROM git_tombstones WHERE hash IN git_deletion_new_hashes AND hash NOT IN git_deletion_hashes"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
       "function": "prepareGitDeletion",
       "sql": "DELETE FROM git_deletion_\\(table)"
     },
@@ -190,6 +260,11 @@
     {
       "file": "Sources/Storage/GitCollection.swift",
       "function": "prepareGitDeletion",
+      "sql": "DELETE FROM git_deletion_discovery_sources"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
       "sql": "DELETE FROM git_deletion_hashes"
     },
     {
@@ -201,6 +276,26 @@
       "file": "Sources/Storage/GitCollection.swift",
       "function": "prepareGitDeletion",
       "sql": "INSERT INTO git_deletion_commits SELECT id FROM git_commits WHERE (ts>=? AND ts<?) OR (author_ts>=? AND author_ts<?) OR repo_id IN git_deletion_repos"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "INSERT INTO git_deletion_discovery_sources SELECT discovery,id,ts>=? AND ts<? FROM git_working_folders WHERE id IN git_deletion_folders AND discovery!=''"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "INSERT INTO git_deletion_discovery_sources VALUES(?,?,0)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "INSERT INTO git_deletion_discovery_sources VALUES(?,?,?)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "prepareGitDeletion",
+      "sql": "INSERT INTO git_deletion_discovery_sources VALUES(?,NULL,1)"
     },
     {
       "file": "Sources/Storage/GitCollection.swift",
@@ -244,8 +339,28 @@
     },
     {
       "file": "Sources/Storage/GitCollection.swift",
+      "function": "saveGitBackfillFinished",
+      "sql": "DELETE FROM git_backfill_progress WHERE source>? AND source<? AND source!=?"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "saveGitBackfillFinished",
+      "sql": "INSERT OR IGNORE INTO git_backfill_progress(source,event_id) VALUES(?,0)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
       "function": "saveGitBackfillProgress",
       "sql": "INSERT INTO git_backfill_progress(source,event_id) VALUES(?,?) ON CONFLICT(source) DO UPDATE SET event_id=max(event_id,excluded.event_id)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "saveGitCheckpointBackfillMark",
+      "sql": "DELETE FROM git_backfill_progress WHERE source>='checkpoints:' AND source<'checkpoints;'"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "saveGitCheckpointBackfillMark",
+      "sql": "INSERT INTO git_backfill_progress(source,event_id) VALUES(?,0)"
     },
     {
       "file": "Sources/Storage/GitCollection.swift",
@@ -422,7 +537,7 @@
     {
       "file": "Sources/Storage/GitCollection.swift",
       "function": "rememberGitFolder",
-      "sql": "INSERT INTO git_working_folders(identity,source,device,inode,session,folder,repo_id,top_level,branch,head,ts,last_seen,attempt_ts,status,failures,tool,discovery,complete,ownership_authority) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(identity) DO UPDATE SET repo_id=excluded.repo_id,top_level=excluded.top_level,branch=excluded.branch,head=excluded.head, attempt_ts=excluded.attempt_ts,status=excluded.status,failures=git_working_folders.failures+excluded.failures,complete=excluded.complete,ownership_authority=excluded.ownership_authority",
+      "sql": "INSERT INTO git_working_folders(identity,source,device,inode,session,folder,repo_id,top_level,branch,head,ts,last_seen,attempt_ts,status,failures,tool,discovery,complete,ownership_authority) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(identity) DO UPDATE SET repo_id=excluded.repo_id,top_level=excluded.top_level,branch=excluded.branch,head=excluded.head, attempt_ts=excluded.attempt_ts,status=excluded.status,failures=CASE WHEN excluded.status='unversioned' THEN 0 ELSE git_working_folders.failures+excluded.failures END,complete=excluded.complete,ownership_authority=excluded.ownership_authority",
       "gated": true,
       "operation": "publishGit(.discovery(context), now: now)"
     },

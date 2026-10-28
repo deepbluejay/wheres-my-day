@@ -473,21 +473,37 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
       try insertLogPosition(p, state: fallback); return true
     }
     if converted { return }
-    let prepared = try prepareGitCheckpointState(p, fallback: fallback)
-    try locked { try connection.transaction {
-      guard try gitSourceRevision() == prepared.revision else { throw StorageError.busy("Log metadata changed; retry preparation") }
-      try insertLogPosition(p, state: prepared.state)
-    } }
+    let state = try gitCheckpointState(p, fallback: fallback)
+    try locked { try connection.transaction { try insertLogPosition(p, state: state) } }
+  }
+  private static func jsonObject(_ text: String) -> NSDictionary? {
+    (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? NSDictionary
   }
   private func insertLogPosition(_ p: LogPosition, state: SQLValue) throws {
     try locked {
+      // An unchanged re-poll writes nothing: seen_ts keeps the last change, and the
+      // Git source revision is not bumped under a concurrent backfill preparation.
+      // Checkpoint key order differs between processes, so JSON objects are compared.
+      if case .maskedText(let text) = state, let new = Self.jsonObject(text) {
+        var unchanged = false
+        try connection.namedRows("SELECT device,inode,offset,state FROM log_positions WHERE path=?", [.key(AgentLogIdentity.decodedPath(p.path))]) { row in
+          unchanged = try row.int("device") == p.device && row.int("inode") == p.inode && row.int("offset") == p.offset
+            && Self.jsonObject(try row.text("state"))?.isEqual(new) == true
+        }
+        if unchanged { return }
+      }
+      // A written checkpoint is newer than the last complete checkpoint pass, whatever
+      // time the writer passes in, so that pass mark can never skip it.
+      var seen = p.seenAt
+      if let mark = try gitCheckpointMark(), mark < Int.max { seen = max(seen, mark + 1) }
       try connection.run(
         """
         INSERT INTO log_positions(path,device,inode,offset,state,seen_ts) VALUES(?,?,?,?,?,?)
         ON CONFLICT(path) DO UPDATE SET device=excluded.device,inode=excluded.inode,
         offset=excluded.offset,state=excluded.state,seen_ts=excluded.seen_ts
+        WHERE device IS NOT excluded.device OR inode IS NOT excluded.inode OR offset IS NOT excluded.offset OR state IS NOT excluded.state
         """,
-        [.key(AgentLogIdentity.decodedPath(p.path)), .integer(p.device), .integer(p.inode), .integer(p.offset), state, .integer(p.seenAt)])
+        [.key(AgentLogIdentity.decodedPath(p.path)), .integer(p.device), .integer(p.inode), .integer(p.offset), state, .integer(seen)])
     }
   }
   @discardableResult public func appendLogBatch(_ evidence: [EvidenceText], position: LogPosition) throws
@@ -498,11 +514,11 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
   @discardableResult public func appendLogEvents(_ events: [AgentLogEvent], evidence: [EvidenceText], position: LogPosition) throws -> AppendResult {
     let prepared = evidence.map(maskEvidence)
     let preparedEvents = try events.map(PreparedAgentLogEvent.init)
-    let state = try prepareGitCheckpointState(position, fallback: .maskedText(try maskedLogState(position.state)), events: events)
+    let state = try gitCheckpointState(position, fallback: .maskedText(try maskedLogState(position.state)),
+      tool: events.first(where: { $0.workingFolder != nil && $0.timestamp != nil })?.tool)
     let decodedCheckpoint = try? AgentLogState.decode(position.state)
     return try locked {
       try connection.transaction {
-        guard try gitSourceRevision() == state.revision else { throw StorageError.busy("Log metadata changed; retry preparation") }
         let days = try settings().promptRetentionDays
         let (cutoff, overflow) = position.seenAt.subtractingReportingOverflow(days * 86400)
         let oldest = overflow ? Int.min : cutoff
@@ -525,7 +541,7 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
           for key in legacyLogAdapter.sourceKeys(path: position.path) {
             try purgeOwnLogSource(position, tool: tool, sourceKey: key)
           }
-          try insertLogPosition(position, state: state.state)
+          try insertLogPosition(position, state: state)
           return AppendResult(stored: 0, refused: prepared.count)
         case .content(let admitted):
           plan = admitted
@@ -548,7 +564,7 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
                 .key(AgentLogIdentity.decodedPath(position.path)), .integer(id)])
           }
         }
-        try insertLogPosition(position, state: state.state)
+        try insertLogPosition(position, state: state)
         result.logGrowth = growth
         return result
       }

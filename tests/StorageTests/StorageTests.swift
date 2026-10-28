@@ -271,7 +271,10 @@ final class StorageTests: XCTestCase {
       try store.connection.run("PRAGMA wal_checkpoint(TRUNCATE)")
     }
     let before = try Data(contentsOf: url)
-    XCTAssertThrowsError(try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder)))
+    XCTAssertThrowsError(try ActivityStorage(url: url, appDataDirectory: url.deletingLastPathComponent(), databaseScope: .directory(folder))) {
+      // The newer case is named as such, not as an unsupported origin.
+      XCTAssertEqual(($0 as? StorageError)?.description, "Database version is newer than this storage")
+    }
     XCTAssertEqual(try Data(contentsOf: url), before)
   }
   func testLogEvidenceAndPositionCommitTogether() throws {
