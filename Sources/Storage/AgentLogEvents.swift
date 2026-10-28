@@ -135,14 +135,17 @@ extension ActivityStorage {
   /// Ownership receipts are only ever added: the baseline, own sources, revoked sessions,
   /// and the hash-only registry folder.
   public func agentLogOwnershipRevision() throws -> String? {
-    let counts = try locked {
+    try agentLogOwnershipCounts().map { $0 + ":" + (try ownLogSources().revision()) }
+  }
+  public func agentLogOwnershipCounts() throws -> String? {
+    try locked {
       try ["agent_log_own_baseline", "agent_log_tool_own_sources", "agent_log_revoked_sessions"].map { table in
         try connection.integer("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", [.key(table)]) == 0
           ? -1 : connection.integer("SELECT count(*) FROM \(table)")
       }
-    }
-    return counts.map(String.init).joined(separator: ":") + ":" + (try ownLogSources().revision())
+    }.map(String.init).joined(separator: ":")
   }
+  public func agentLogOwnershipReceipts() throws -> Set<String>? { Set(try ownLogSources().inventory()) }
   func ownLogSources() -> AgentLogOwnSources {
     AgentLogOwnSources(appDataDirectory: appDataDirectory, digest: {
       SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined()

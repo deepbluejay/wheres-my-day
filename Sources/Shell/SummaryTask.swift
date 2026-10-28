@@ -28,16 +28,19 @@ public final class SummaryTask {
     lock.lock(); pendingRequest = max(pendingRequest ?? time, time); lock.unlock()
   }
   public var maintenanceTask: RecorderMaintenanceTask {
-    RecorderMaintenanceTask(name: "summary") { time in
-      self.lock.lock(); let request = self.pendingRequest; self.pendingRequest = nil; self.lock.unlock()
-      defer { self.lock.lock(); self.status = self.service.health; self.lock.unlock() }
-      do { try self.service.summarize(from: self.start, through: min(request ?? time, time),
-        dayStart: self.dayStart(time), locale: self.locale(), requested: request != nil, at: time)
-      } catch {
-        try self.publish(self.service.health.serviceUnavailableUntil)
-        throw error
-      }
-      try self.publish(self.service.health.serviceUnavailableUntil)
+    RecorderMaintenanceTask(name: "summary") { time in try self.usage.measure("summaries") { _ in try self.run(at: time) } }
+  }
+  /// Measured as a stage; usage is only recorded.
+  var usage = StageUsage.shared
+  private func run(at time: Int) throws {
+    lock.lock(); let request = pendingRequest; pendingRequest = nil; lock.unlock()
+    defer { lock.lock(); status = service.health; lock.unlock() }
+    do { try service.summarize(from: start, through: min(request ?? time, time),
+      dayStart: dayStart(time), locale: locale(), requested: request != nil, at: time)
+    } catch {
+      try publish(service.health.serviceUnavailableUntil)
+      throw error
     }
+    try publish(service.health.serviceUnavailableUntil)
   }
 }

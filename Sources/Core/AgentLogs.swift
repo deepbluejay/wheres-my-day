@@ -44,6 +44,10 @@ public protocol AgentLogReader {
   func read(_ file: AgentLogFile, position: LogPosition?, at time: Int) throws -> AgentLogBatch
   /// Changes whenever the own-source receipts a read consults may have changed; nil when unknown.
   func ownershipRevision() throws -> String?
+  /// The hash-only receipt names now registered; nil when unknown.
+  func ownershipReceipts() throws -> Set<String>?
+  /// Every receipt name a read of this file from this checkpoint consults; nil when unknown.
+  func ownershipCandidates(path: String, state: String) -> Set<String>?
 }
 
 public struct AgentLogListing {
@@ -60,6 +64,8 @@ public struct AgentLogListing {
 extension AgentLogReader {
   public func listing() throws -> AgentLogListing { AgentLogListing(files: try files()) }
   public func ownershipRevision() throws -> String? { nil }
+  public func ownershipReceipts() throws -> Set<String>? { nil }
+  public func ownershipCandidates(path: String, state: String) -> Set<String>? { nil }
 }
 
 public enum AgentLogIgnore: String, Codable, CaseIterable {
@@ -426,8 +432,14 @@ public protocol AgentLogStorage: SettingsStore, LogPositionStore, LogBatchWriter
   func prepareAgentLogCollection() throws
   /// Changes whenever an ownership receipt an append consults may have changed; nil when unknown.
   func agentLogOwnershipRevision() throws -> String?
+  /// The part of that revision held in database tables; nil when unknown.
+  func agentLogOwnershipCounts() throws -> String?
+  /// The hash-only receipt names in the store's registry; nil when unknown.
+  func agentLogOwnershipReceipts() throws -> Set<String>?
 }
 extension AgentLogStorage {
   public func prepareAgentLogCollection() throws {}
   public func agentLogOwnershipRevision() throws -> String? { nil }
+  public func agentLogOwnershipCounts() throws -> String? { nil }
+  public func agentLogOwnershipReceipts() throws -> Set<String>? { nil }
 }

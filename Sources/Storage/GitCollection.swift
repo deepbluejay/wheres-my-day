@@ -391,8 +391,21 @@ extension ActivityStorage {
     }
     return result
   }
+  /// Opening a read-only connection is about a fifth of a validation. Inside `body` this
+  /// thread's validations share one; each still reads in its own fresh transaction.
+  public func withGitSourceSnapshot<T>(_ body: () throws -> T) throws -> T {
+    let key = gitSnapshotKey
+    if Thread.current.threadDictionary[key] != nil { return try body() }
+    Thread.current.threadDictionary[key] = try openGitSourceSnapshot()
+    defer { Thread.current.threadDictionary.removeObject(forKey: key) }
+    return try body()
+  }
+  private func openGitSourceSnapshot() throws -> ActivityStorage {
+    locked { gitSourceSnapshotOpens += 1 }
+    return try ActivityStorage(url: url, appDataDirectory: appDataDirectory, readOnly: true, databaseScope: databaseScope)
+  }
   private func prepareGitSource(_ folder: GitWorkingFolder, position: LogPosition?) throws -> GitSourcePreparation {
-    let snapshot = try ActivityStorage(url: url, appDataDirectory: appDataDirectory, readOnly: true, databaseScope: databaseScope)
+    let snapshot = try Thread.current.threadDictionary[gitSnapshotKey] as? ActivityStorage ?? openGitSourceSnapshot()
     return try snapshot.connection.transaction(write: false) {
       var prepared = GitSourcePreparation(revision: try snapshot.gitSourceRevision())
       prepared.candidates = [AgentLogIdentityCodec.session(folder.session)]
@@ -656,6 +669,16 @@ extension ActivityStorage {
     }
   }
   /// Keyset paging keeps backfill independent of the number of saved log occurrences.
+  /// The stored keys of checkpoints in metadata recovery.
+  public func gitMetadataRecoverySources() throws -> Set<String> {
+    try gitLocked {
+      var keys = Set<String>()
+      try connection.namedRows("SELECT path FROM log_positions INDEXED BY log_positions_git_recovery WHERE json_valid(state) AND json_extract(state,'$.metadataRecoveryOffset') IS NOT NULL") {
+        keys.insert(try $0.text("path"))
+      }
+      return keys
+    }
+  }
   public func gitMetadataRecoveryPending() throws -> Bool {
     try gitLocked { try connection.integer("SELECT EXISTS(SELECT 1 FROM log_positions INDEXED BY log_positions_git_recovery WHERE json_valid(state) AND json_extract(state,'$.metadataRecoveryOffset') IS NOT NULL)") > 0 }
   }
@@ -823,6 +846,50 @@ extension ActivityStorage {
           try row.optionalText("repo").flatMap(Int.init))
       }
       return result
+    }
+  }
+  /// Everything a discovery visit consults besides the folder's own row and checkpoint:
+  /// ownership receipts, recording settings and history, forgotten ranges, the retention
+  /// day and tombstones. Not the source revision: any event or checkpoint write bumps it,
+  /// and a visit uses it only to retry a preparation that raced a write.
+  /// Nil when ownership cannot be fingerprinted.
+  public func gitDiscoveryRevision(now: Int) throws -> String? {
+    guard let ownership = try agentLogOwnershipRevision() else { return nil }
+    return try gitLocked {
+      let policy = try gitPreparationPolicy(), settings = try settings()
+      var parts = [ownership, String(policy.generation), String(policy.retentionDays), String(policy.forgottenRevision),
+        settings.recordingEnabled ? "1" : "0", settings.pausedUntil.map(String.init) ?? "-",
+        String(Int((Double(try gitRetentionCutoff(now: now)) / 86400).rounded(.down)))]
+      parts += [String(try connection.integer("SELECT count(*) FROM forgotten_ranges")),
+        String(try connection.integer("SELECT count(*) FROM log_recording_history")),
+        String(try connection.integer("SELECT count(*) FROM git_discovery_tombstones")),
+        String(try connection.integer("SELECT COALESCE(max(rowid),0) FROM git_discovery_tombstones"))]
+      try connection.namedRows("SELECT id,since,enabled,CAST(paused_until AS TEXT) AS pause FROM log_recording_history ORDER BY id DESC LIMIT 1") {
+        parts += [String(try $0.int("id")), String(try $0.int("since")), String(try $0.int("enabled")), try $0.optionalText("pause") ?? "-"]
+      }
+      return parts.joined(separator: "|")
+    }
+  }
+  /// A one-way digest of a folder row, every column, and of its source's checkpoint row.
+  /// It holds no content. Nil when the row is gone.
+  public func gitDiscoveryVisitDigest(id: Int, folder: GitWorkingFolder) throws -> String? {
+    try gitLocked {
+      var hash = SHA256(), found = false
+      func add(_ statement: OpaquePointer) {
+        for column in 0..<sqlite3_column_count(statement) {
+          let type = sqlite3_column_type(statement, column)
+          let count = type == SQLITE_NULL ? 0 : Int(sqlite3_column_bytes(statement, column))
+          let bytes = sqlite3_column_blob(statement, column)
+          var header = [UInt8(truncatingIfNeeded: type)] + withUnsafeBytes(of: UInt64(count).bigEndian) { Array($0) }
+          if let bytes, count > 0 { header += Array(UnsafeRawBufferPointer(start: bytes, count: count)) }
+          hash.update(data: Data(header))
+        }
+      }
+      try connection.rows("SELECT * FROM git_working_folders WHERE id=?", [.integer(id)]) { found = true; add($0) }
+      guard found else { return nil }
+      hash.update(data: Data("|".utf8))
+      try connection.rows("SELECT device,inode,offset,state,seen_ts FROM log_positions WHERE path=?", [.key(folder.physicalSource.storedKey)]) { add($0) }
+      return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
   }
   public func gitFolderPresence(id: Int, exists: Bool, now: Int) throws {

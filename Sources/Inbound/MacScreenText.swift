@@ -135,7 +135,11 @@ public final class MacScreenTextSource: StructuredAXProbeScreenSource {
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
     let plan = configure(request, supported: try? request.supportedRecognitionLanguages())
-    guard (try? VNImageRequestHandler(cgImage: image).perform([request])) != nil else {
+    let recognized = StageUsage.shared.measure("screen_collection") { items in
+      items["ocr"] = 1
+      return (try? VNImageRequestHandler(cgImage: image).perform([request])) != nil
+    }
+    guard recognized else {
       return .absent(.failed)
     }
     let observations = (request.results ?? []).map { result in

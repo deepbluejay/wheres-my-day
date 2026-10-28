@@ -14,6 +14,10 @@ public struct CodexAgentLogReader: AgentLogReader {
     try AgentLogFiles.read(file, tool: .codex, position: position, at: time, ownSources: ownSources)
   }
   public func ownershipRevision() throws -> String? { try ownSources.revision() }
+  public func ownershipReceipts() throws -> Set<String>? { Set(try ownSources.inventory()) }
+  public func ownershipCandidates(path: String, state: String) -> Set<String>? {
+    AgentLogFiles.ownershipCandidates(path: path, state: state, tool: .codex, ownSources: ownSources)
+  }
   private var ownSources: AgentLogOwnSources {
     AgentLogFiles.ownSources(appDataDirectory: filesSource.appDataDirectory ?? AppDataPaths.directory(in: URL(fileURLWithPath: filesSource.userHome)))
   }

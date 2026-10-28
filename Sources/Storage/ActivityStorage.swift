@@ -20,6 +20,9 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
   var afterGitFolderStarted: ((Int) throws -> Void)?
   var afterGitUnit: ((String) throws -> Void)?
   let gitCancellationKey = "ActivityProbe.GitStorageCancellation." + UUID().uuidString
+  let gitSnapshotKey = "ActivityProbe.GitSourceSnapshot." + UUID().uuidString
+  // Test seam: read-only connections opened to prepare Git sources.
+  var gitSourceSnapshotOpens = 0
   let url: URL
   let databaseScope: DatabaseOpenScope
   let ownBundleID: String

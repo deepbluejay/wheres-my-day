@@ -57,7 +57,15 @@ extension GitCollectionTests {
     }
     report("OWNER-CPU shape positions=\(try count("log_positions")) existingFiles=\(existing) oldCheckpoints=\(try count("log_positions", "json_extract(state,'$.tool') IS NULL")) recovering=\(try count("log_positions", "json_extract(state,'$.metadataRecoveryOffset') IS NOT NULL")) events=\(try count("agent_log_events"))")
 
+    let usage = StageUsage()
     func tick(_ label: String, _ logsTask: AgentLogTask, at time: Int) throws {
+      logsTask.usage = usage; task.usage = usage
+      defer {
+        let stages = usage.roll(at: time).stages.sorted { $0.key < $1.key }.map { name, stage in
+          "\(name):cpu=\(Double(stage.lastCPUNanoseconds) / 1e9),runs=\(stage.lastRuns)," + stage.last.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
+        }
+        report("OWNER-CPU \(label) stages " + stages.joined(separator: " "))
+      }
       let rows = task.backfillRows, checkpoints = task.checkpointRows, offers = task.backfillOffers, reads = task.sourceReads
       let began = ProcessInfo.processInfo.systemUptime, start = Self.cpu()
       var scanError = false
@@ -65,10 +73,12 @@ extension GitCollectionTests {
       var scanThread = 0.0
       do { try work { let before = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); defer { scanThread = Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - before) / 1e9 }; try logsTask.scan(at: time) } } catch { scanError = true }
       let scanned = Self.cpu(), scanWall = ProcessInfo.processInfo.systemUptime - began
-      try work { try self.task.maintenanceTask.run(time) }
+      // Discovery runs on the calling thread; history and backfill go on the Git queue.
+      var discoverThread = 0.0
+      try work { let before = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); defer { discoverThread = Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - before) / 1e9 }; try self.task.maintenanceTask.run(time) }
       task.waitForBackfill()
       let done = Self.cpu()
-      report("OWNER-CPU \(label) scanThreadCpu=\(scanThread) cpuDuringScan=\(scanned - start) scanWall=\(scanWall) cpuAfterScan=\(done - scanned) wall=\(ProcessInfo.processInfo.systemUptime - began) rows=\(task.backfillRows - rows) checkpointRows=\(task.checkpointRows - checkpoints) offers=\(task.backfillOffers - offers) sourceReads=\(task.sourceReads - reads) failures=\(task.backfillFailures) scanError=\(scanError) storedMark=\(try store.gitBackfillProgress(nil)) checkpointMark=\(try store.gitCheckpointBackfillMark()) finished=\(try count("git_backfill_progress", "source LIKE 'finished:%'")) folders=\(try count("git_working_folders")) linked=\(try count("git_working_folders", "repo_id IS NOT NULL"))")
+      report("OWNER-CPU \(label) scanThreadCpu=\(scanThread) cpuDuringScan=\(scanned - start) scanWall=\(scanWall) discoverThreadCpu=\(discoverThread) cpuAfterScan=\(done - scanned) wall=\(ProcessInfo.processInfo.systemUptime - began) rows=\(task.backfillRows - rows) checkpointRows=\(task.checkpointRows - checkpoints) offers=\(task.backfillOffers - offers) sourceReads=\(task.sourceReads - reads) failures=\(task.backfillFailures) scanError=\(scanError) storedMark=\(try store.gitBackfillProgress(nil)) checkpointMark=\(try store.gitCheckpointBackfillMark()) finished=\(try count("git_backfill_progress", "source LIKE 'finished:%'")) folders=\(try count("git_working_folders")) linked=\(try count("git_working_folders", "repo_id IS NOT NULL"))")
     }
     var logsTask = AgentLogTask(reader: reader, storage: store, git: task)
     try tick("first-start", logsTask, at: now + 300)
@@ -151,7 +161,7 @@ extension GitCollectionTests {
 }
 
 extension GitCollectionTests {
-  private func cpuFixtureLog(_ name: String, records: [[String: Any]]) throws -> URL {
+  func cpuFixtureLog(_ name: String, records: [[String: Any]]) throws -> URL {
     let logs = root.appendingPathComponent(AgentLogTool.claude.defaultHomeName).appendingPathComponent(AgentLogTool.claude.logsFolder)
     try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
     let url = logs.appendingPathComponent(name + ".jsonl")
@@ -160,7 +170,7 @@ extension GitCollectionTests {
     try bytes.write(to: url)
     return url
   }
-  private func cpuRecords(_ count: Int, session: String, folder: URL, base: Int) -> [[String: Any]] {
+  func cpuRecords(_ count: Int, session: String, folder: URL, base: Int) -> [[String: Any]] {
     (0..<count).map { ["type": "assistant", "timestamp": base + $0, "sessionId": session, "cwd": folder.path,
       "message": ["role": "assistant", "content": "Invented activity \($0)"]] }
   }
@@ -252,25 +262,30 @@ extension GitCollectionTests {
 
 /// Counts reads; forwards everything else, including the ownership revision when the
 /// wrapped reader has one.
-private final class CountingReads: AgentLogReader {
+final class CountingReads: AgentLogReader {
   let wrapped: ClaudeAgentLogReader
   var reads = 0
+  var afterRead: (() -> Void)?
   init(_ wrapped: ClaudeAgentLogReader) { self.wrapped = wrapped }
   var name: String { wrapped.name }
   func files() throws -> [AgentLogFile] { try wrapped.files() }
   func listing() throws -> AgentLogListing { try wrapped.listing() }
   func read(_ file: AgentLogFile, position: LogPosition?, at time: Int) throws -> AgentLogBatch {
     reads += 1
+    defer { afterRead?() }
     return try wrapped.read(file, position: position, at: time)
   }
   func ownershipRevision() throws -> String? { try wrapped.ownershipRevision() }
+  func ownershipReceipts() throws -> Set<String>? { try wrapped.ownershipReceipts() }
+  func ownershipCandidates(path: String, state: String) -> Set<String>? { wrapped.ownershipCandidates(path: path, state: state) }
 }
 
 extension GitCollectionTests {
   /// Every unchanged log used to be read and appended again every 5-minute tick: about
   /// 10 ms of CPU per file, so 2,866 owner files cost about 30 s per tick. An unchanged
   /// file whose last read found nothing is now skipped; an appended file is read, and a new
-  /// own-session receipt makes every file read again, so own-source exclusion still purges.
+  /// own-session receipt makes the files that consult it read again, so own-source exclusion
+  /// still purges.
   func testUnchangedLogsAreNotReadAgainUntilTheyOrTheirOwnershipReceiptsChange() throws {
     let names = (0..<4).map { "invented-steady-\($0)" }
     var urls: [URL] = []
@@ -293,14 +308,15 @@ extension GitCollectionTests {
     try work { try logsTask.scan(at: self.now + 900) }
     XCTAssertEqual(reader.reads, 1)
     XCTAssertEqual(try count("agent_log_events"), 21)
-    // A receipt registered later for one session: every file is read again and that
-    // source's stored events are purged.
+    // A receipt registered later for one session: the file whose reads consult it is read
+    // again and its stored events are purged. The appended file is read once more too, as
+    // its last read found an event.
     reader.reads = 0
     try AgentLogFiles.ownSources(appDataDirectory: root).registerSession(AgentLogIdentity.decoded(names[3]), tool: .claude)
     try work { try logsTask.scan(at: self.now + 1200) }
-    XCTAssertEqual(reader.reads, 4)
+    XCTAssertEqual(reader.reads, 2)
     XCTAssertEqual(try count("agent_log_events"), 16)
-    // That scan registered the owned file's own receipts, so the next one reads all once more.
+    // That read added an own-source row; a change to the ownership tables reads every file.
     reader.reads = 0
     try work { try logsTask.scan(at: self.now + 1500) }
     XCTAssertEqual(reader.reads, 4)

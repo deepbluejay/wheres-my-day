@@ -13,6 +13,13 @@ public enum AgentLogFiles {
       SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined()
     })
   }
+  /// A read at a stable checkpoint consults the path, home and file-name receipts and the
+  /// checkpoint's sessions; this is a superset of them. Nil for a state it cannot decode.
+  static func ownershipCandidates(path: String, state: String, tool: AgentLogTool, ownSources: AgentLogOwnSources) -> Set<String>? {
+    guard let state = try? AgentLogState.decode(state) else { return nil }
+    let sessions = [state.session, state.ownershipSession, state.cwdSession, state.ownedSession].compactMap { $0 }
+    return Set(ownSources.authority(path: path, sessions: sessions, tool: tool))
+  }
   public static let batchBytes = 1 << 20
   public static let batchRetainedBytes = 4 << 20
   public static let longestLineBytes = 16 << 20

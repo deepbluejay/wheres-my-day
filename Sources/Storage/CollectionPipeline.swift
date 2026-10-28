@@ -135,14 +135,16 @@ public final class CollectionPipeline {
     queuedBytes += bytes
     if oversized { oversizedBytes = bytes }
     admission.unlock()
-    queue.async {
+    // Screen captures and activity samples share this writer; each is measured as its stage.
+    queue.async { StageUsage.shared.measure(capture ? "screen_collection" : "sample_collection") { items in
+      items["writes"] = 1
       var work = Pending(bytes: bytes, oversized: oversized, prepare: prepare)
       do { work.record = try prepare(); work.prepare = nil }
       catch { self.record(error, phase: 0) }
       self.pending.append(work)
       if !self.publicationBlocked { self.publishPending() }
       if !self.writeBlocked { self.persistReady() }
-    }
+    } }
     return .accepted
   }
   @discardableResult public func offer(_ observation: ActivityObservation) -> Bool {

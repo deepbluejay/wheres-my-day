@@ -35,6 +35,11 @@ public final class GitCollectionTask {
   private var checkpointCursor = 0
   private var checkpointSince: Int?
   private var checkpointStart = 0
+  // Per agent-log reader, the stored keys of its latest complete listing. A checkpoint in
+  // recovery that no reader lists is parked: its file is gone, so its recovery cannot end
+  // and the stored pass no longer repeats for it. A later listing resumes it.
+  private var listings: [String: Set<String>?] = [:]
+  private var parkedSources = Set<String>()
   // Loaded once per process on the Git queue; only that queue reads or extends it.
   private var finishedReceipts: Set<String>?
   // Raw cwd occurrences handed off after an append, in memory only, offered before backfill.
@@ -53,6 +58,16 @@ public final class GitCollectionTask {
   var sourceReads = 0
   /// Backfill passes that stopped on an error; each is retried in the same drain, then at the next request or tick.
   public private(set) var backfillFailures = 0
+  // Discovery, under discoveryLock: per folder id, a digest of the inputs its last visit
+  // left when another visit with them would do nothing, and what every visit consults.
+  private var discoveryUnchanged: [Int: String] = [:]
+  private var discoveryShared: String?
+  // Test seams: folder rows visited and skipped as unchanged.
+  var discoveryVisits = 0
+  var discoverySkips = 0
+  var commitReads = 0
+  /// Discovery, backfill and history are measured as stages; usage is only recorded.
+  var usage = StageUsage.shared
   private var rawDirectories: [Int: String] = [:]
   private var rawWorkingFolders: [Int: String] = [:]
   private let cancellation = GitTaskCancellation()
@@ -317,6 +332,29 @@ public final class GitCollectionTask {
     }
     return true
   }
+  /// Each agent-log reader registers before its first scan; parking waits for every one.
+  func registerListing(_ reader: String) {
+    schedulingLock.lock(); if listings[reader] == nil { listings[reader] = .some(nil) }; schedulingLock.unlock()
+  }
+  /// A reader's complete listing, as stored checkpoint keys.
+  func listed(_ keys: Set<String>, by reader: String) {
+    schedulingLock.lock()
+    listings[reader] = keys
+    if !parkedSources.isDisjoint(with: keys) {
+      parkedSources.subtract(keys)
+      storedBackfillDone = false
+    }
+    schedulingLock.unlock()
+  }
+  /// Recovering checkpoints no reader lists, once every reader has listed in this process.
+  private func parkUnlisted(_ recovering: Set<String>) -> Set<String> {
+    schedulingLock.lock(); defer { schedulingLock.unlock() }
+    let complete = listings.values.compactMap { $0 }
+    guard !listings.isEmpty, complete.count == listings.count else { return recovering }
+    let unlisted = recovering.filter { key in !complete.contains { $0.contains(key) } }
+    parkedSources.formUnion(unlisted)
+    return recovering.subtracting(unlisted)
+  }
   /// Called after the agent-log append, never before it. A source is offered once per
   /// process, and again after Secure Input deferred its live observation.
   public func requestRecovery(_ position: LogPosition, afterDeferral: Bool = false) {
@@ -365,18 +403,20 @@ public final class GitCollectionTask {
         let live = liveQueue.removeFirst()
         liveOccurrences -= live.folders.count
         schedulingLock.unlock()
-        offerLive(live)
+        measureBackfill { offerLive(live) }
         continue
       }
       let key = backfillQueue.removeFirst()
       let position = pendingSources.removeValue(forKey: key)
       let storedTime = key == Self.storedBackfill ? storedBackfillTime : nil
       schedulingLock.unlock()
+      if position == nil && storedTime == nil { continue }
       var finished = false, failed = false
       do {
-        if let position { finished = try recover(position) }
-        else if let storedTime { finished = try backfillStored(at: storedTime) }
-        else { continue }
+        try measureBackfill {
+          if let position { finished = try recover(position) }
+          else if let storedTime { finished = try backfillStored(at: storedTime) }
+        }
       } catch { failed = !isStopped }
       schedulingLock.lock()
       if failed { backfillFailures += 1 }
@@ -433,9 +473,9 @@ public final class GitCollectionTask {
   /// the marks. A checkpoint leaves recovery only by being written again, above the pass's
   /// floor, so that repeat reads it. Its retained occurrences were all stored before
   /// recovery began (a deferred read appends nothing); that read's hand-off requests the
-  /// source's own recovery, which offers them above the source's mark. One row stuck in
-  /// recovery, such as a deleted log's, so costs a repeat that reads only what changed,
-  /// not every event and checkpoint.
+  /// source's own recovery, which offers them above the source's mark. A row stuck in
+  /// recovery whose log no reader lists, such as a deleted log's, is parked and no longer
+  /// repeats the pass; a listing of that log again resumes the repeat.
   private func backfillStored(at now: Int) throws -> Bool {
     try storage.withGitCancellation(cancellation) {
       var cursor = try storedCursor ?? storage.gitBackfillProgress(nil)
@@ -473,7 +513,18 @@ public final class GitCollectionTask {
       // A checkpoint written after the pass started has a seen_ts above `start`, so every
       // checkpoint at or below it was read. Later ones are read again.
       if start > since { try storage.saveGitCheckpointBackfillMark(start) }
-      return try !storage.gitMetadataRecoveryPending()
+      return try parkUnlisted(storage.gitMetadataRecoverySources()).isEmpty
+    }
+  }
+  private func measureBackfill(_ body: () throws -> Void) rethrows {
+    try usage.measure("git_backfill") { items in
+      schedulingLock.lock(); let rows = backfillRows, checkpoints = checkpointRows, offers = backfillOffers; schedulingLock.unlock()
+      defer {
+        schedulingLock.lock()
+        items["rows"] = backfillRows - rows; items["checkpoints"] = checkpointRows - checkpoints; items["offers"] = backfillOffers - offers
+        schedulingLock.unlock()
+      }
+      try body()
     }
   }
   private func countRows(_ page: GitBackfillPage) {
@@ -513,7 +564,11 @@ public final class GitCollectionTask {
   }
   private func discover(at now: Int) throws {
     defer { scheduleBackfill() }
-    try storage.withGitCancellation(cancellation) { try discoverAllowed(at: now) }
+    try usage.measure("git_discovery") { items in
+      let visits = discoveryVisits, skips = discoverySkips
+      defer { items["visited"] = discoveryVisits - visits; items["skipped"] = discoverySkips - skips }
+      try storage.withGitCancellation(cancellation) { try discoverAllowed(at: now) }
+    }
   }
   private func discoverAllowed(at now: Int) throws {
     discoveryLock.lock(); defer { discoveryLock.unlock() }
@@ -524,24 +579,58 @@ public final class GitCollectionTask {
     rawDirectories = try rawDirectories.filter { try cancellation.check(); return try storage.gitRepositoryExists($0.key) }
     rawWorkingFolders = try rawWorkingFolders.filter { try cancellation.check(); return try storage.gitFolderExists($0.key) }
     requestStoredBackfill(at: now)
-    var folderCursor = 0
-    while let (id, folder, repo) = try storage.nextGitFolder(after: folderCursor) {
-      guard !isStopped, try storage.gitRecordingAllowed(at: now) else { return }
-      folderCursor = id
-      guard try storage.validateGitObservation(folder, now: now) else { continue }
-      var observation = folder
-      observation.folder = rawWorkingFolders[id] ?? folder.folder
-      let exists = FileManager.default.fileExists(atPath: observation.folder)
-      try storage.gitFolderPresence(id: id, exists: exists, now: now)
-      if repo == nil && exists { try observe(observation, now: now) }
+    // Any change to what every visit consults, such as a receipt, forget, pause or the
+    // retention day, revisits every folder.
+    let shared = try storage.gitDiscoveryRevision(now: now)
+    if shared == nil || shared != discoveryShared { discoveryUnchanged = [:] }
+    discoveryShared = shared
+    var folderCursor = 0, visited = Set<Int>()
+    try storage.withGitSourceSnapshot {
+      while let (id, folder, repo) = try storage.nextGitFolder(after: folderCursor) {
+        guard !isStopped, try storage.gitRecordingAllowed(at: now) else { return }
+        folderCursor = id
+        visited.insert(id)
+        var observation = folder
+        observation.folder = rawWorkingFolders[id] ?? folder.folder
+        // An unlinked folder outside every repository stays 'unversioned' until a git init
+        // there changes this walk. Others, such as a failed read in backoff, are always visited.
+        func look() -> (exists: Bool, outside: Bool?) {
+          let exists = FileManager.default.fileExists(atPath: observation.folder)
+          return (exists, repo == nil && exists ? Self.outsideRepository(observation.folder) : nil)
+        }
+        func inputs(_ seen: (exists: Bool, outside: Bool?)) throws -> String? {
+          guard shared != nil, let row = try storage.gitDiscoveryVisitDigest(id: id, folder: folder) else { return nil }
+          return [row, seen.exists ? "1" : "0", seen.outside.map { $0 ? "1" : "0" } ?? "-",
+            ActivityStorage.gitDigest(rawWorkingFolders[id] ?? folder.folder)].joined(separator: "|")
+        }
+        // Only a folder whose last visit passed validation is looked at before validating.
+        if let last = discoveryUnchanged.removeValue(forKey: id), try inputs(look()) == last {
+          discoveryUnchanged[id] = last
+          discoverySkips += 1
+          continue
+        }
+        discoveryVisits += 1
+        guard try storage.validateGitObservation(folder, now: now) else { continue }
+        let seen = look()
+        try storage.gitFolderPresence(id: id, exists: seen.exists, now: now)
+        if repo == nil && seen.exists { try observe(observation, now: now) }
+        // The inputs this visit left behind. A visit with them again writes nothing: the
+        // presence already matches and an unversioned folder stays unversioned.
+        if repo != nil || !seen.exists || seen.outside == true { discoveryUnchanged[id] = try inputs(seen) }
+      }
+      discoveryUnchanged = discoveryUnchanged.filter { visited.contains($0.key) }
     }
   }
   /// Each repository yields after a time slice, retaining its spool offset and ref frontier.
   /// Completed commit rows are the durable restart cursor; ref tips advance only after EOF.
   private func scanHistory(at now: Int) throws {
     guard !isStopped else { return }
-    try storage.withGitCancellation(cancellation) {
-      try reader.withCancellation(cancellation: cancellation, shouldContinue: { self.readAllowed(at: now) }) { try scanHistoryAllowed(at: now) }
+    try usage.measure("git_history") { items in
+      let reads = commitReads
+      defer { items["commits"] = commitReads - reads }
+      try storage.withGitCancellation(cancellation) {
+        try reader.withCancellation(cancellation: cancellation, shouldContinue: { self.readAllowed(at: now) }) { try scanHistoryAllowed(at: now) }
+      }
     }
   }
   private func scanHistoryAllowed(at now: Int) throws {
@@ -647,6 +736,7 @@ public final class GitCollectionTask {
     return false
   }
   private func readCommit(_ read: PendingGitRead, repo: Int, hash: String, now: Int) throws {
+    commitReads += 1
     guard let generation = try storage.gitPreparationGeneration(repo: repo, now: now) else { throw GitReadError.cancelled }
     let policy = try storage.gitPreparationPolicy()
     try reader.withCancellation(cancellation: cancellation, shouldContinue: {

@@ -133,13 +133,17 @@ public final class RecorderLoop {
   private var lastMaintenance: Int?
   private var maintenanceRunning = false
   private var maintenanceResults: [String] = []
+  /// Called on the maintenance queue after each tick's tasks with every stage's usage.
+  var publishUsage: ((StageUsage.Snapshot) -> Void)?
+  let usage: StageUsage
 
   public init(
     clock: RecorderClock, input: InputCountSource, front: FrontWindowSource,
     secure: SecureInputSource, awake: DisplayAwakeSource, screen: ScreenTextSource,
     storage: RecorderStorage, maintenanceStorage: EvidenceRetention, ownBundleID: String,
-    maintenanceTasks: [RecorderMaintenanceTask] = [], probePipeline: AXProbePipeline? = nil
+    maintenanceTasks: [RecorderMaintenanceTask] = [], probePipeline: AXProbePipeline? = nil, usage: StageUsage = .shared
   ) {
+    self.usage = usage
     self.clock = clock
     self.input = input
     self.front = front
@@ -161,7 +165,7 @@ public final class RecorderLoop {
       [
         RecorderMaintenanceTask(name: "retention") { now in
           // A separate client connection avoids holding the recorder object's lock during background work.
-          _ = try maintenanceStorage.cleanRetention(at: now)
+          try usage.measure("retention") { items in items["removed"] = try maintenanceStorage.cleanRetention(at: now) }
         }
       ] + maintenanceTasks
   }
@@ -758,6 +762,7 @@ public final class RecorderLoop {
         do { try task.run(now) } catch { failures.append(task.name) }
       }
       guard let self else { return }
+      self.publishUsage?(self.usage.roll(at: now))
       self.inboxLock.lock()
       self.maintenanceResults.append(contentsOf: failures)
       self.maintenanceRunning = false
