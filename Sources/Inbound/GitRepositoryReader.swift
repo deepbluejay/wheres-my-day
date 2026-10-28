@@ -187,8 +187,14 @@ public final class GitRepositoryReader {
   }
   public func directoryLocation(_ folder: String, includeBranch: Bool = false) throws -> GitRepositoryLocation {
     let common = try value(at: folder, ["rev-parse", "--git-common-dir"])
-    let base = URL(fileURLWithPath: folder, isDirectory: true)
-    let directory = common.hasPrefix("/") ? URL(fileURLWithPath: common) : base.appendingPathComponent(common)
+    // Below the top level Git prints a relative "../.git", relative to its physical cwd.
+    // The physical folder has no links, "." or ".." left, so its ".." can be dropped by spelling.
+    var directory = URL(fileURLWithPath: common)
+    if !common.hasPrefix("/") {
+      guard let physical = realpath(folder, nil) else { throw GitReadError.failed }
+      defer { free(physical) }
+      directory = URL(fileURLWithPath: String(cString: physical), isDirectory: true).appendingPathComponent(common).standardizedFileURL
+    }
     let top = try value(at: folder, ["rev-parse", "--show-toplevel"])
     let head = (try? value(at: folder, ["rev-parse", "--verify", "HEAD"])) ?? ""
     let branch = includeBranch ? ((try? value(at: folder, ["symbolic-ref", "--quiet", "--short", "HEAD"])) ?? "") : ""

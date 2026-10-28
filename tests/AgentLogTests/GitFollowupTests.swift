@@ -171,8 +171,7 @@ extension GitCollectionTests {
         XCTAssertEqual(try store.gitBackfillProgress(XCTUnwrap(store.logPosition(path: file.path))), newest)
         XCTAssertEqual(try count("git_working_folders", "repo_id IS NOT NULL"), 2)
         // Reset for the next mode.
-        try store.connection.run("DELETE FROM git_working_folders")
-        try store.connection.run("DELETE FROM git_repositories")
+            try store.connection.run("DELETE FROM git_repositories")
         try FileManager.default.removeItem(at: file)
         try store.connection.run("DELETE FROM log_positions")
         try store.connection.run("DELETE FROM agent_log_events")
@@ -385,5 +384,167 @@ extension GitCollectionTests {
     task.waitForBackfill()
     XCTAssertEqual(task.sourceReads, 1)
     XCTAssertEqual(task.backfillRows, 1)
+  }
+
+  /// A repository subfolder, whose common directory Git prints as a relative "../.git",
+  /// is linked, also when spelled with ".", rather than failing path resolution.
+  func testRepositorySubfolderIsLinked() throws {
+    try commit()
+    let deep = repo.appendingPathComponent("invented-deep/invented-deeper")
+    try FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+    try observe(deep, time: now - 20)
+    try observe(URL(fileURLWithPath: repo.path + "/./invented-deep"), source: "invented-dot-source", time: now - 10)
+    XCTAssertEqual(try count("git_working_folders"), 2)
+    XCTAssertEqual(try count("git_working_folders", "status='ready' AND repo_id IS NOT NULL AND failures=0"), 2)
+    XCTAssertEqual(try count("git_repositories"), 1)
+  }
+
+  /// SHOULD 1: a cwd reached through a symlink into a repository subfolder is walked on its
+  /// physical path too, so it is linked rather than 'unversioned'.
+  func testSymlinkIntoRepositorySubfolderIsLinked() throws {
+    try commit()
+    let deep = repo.appendingPathComponent("invented-deep")
+    try FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+    try observe(deep, time: now - 20)
+    XCTAssertEqual(try count("git_working_folders", "status='ready' AND repo_id IS NOT NULL"), 1)
+    let link = root.appendingPathComponent("invented-link")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: deep)
+    XCTAssertFalse(GitCollectionTask.outsideRepository(link.path))
+    try observe(link, source: "invented-link-source", time: now - 5)
+    XCTAssertEqual(try count("git_working_folders"), 2)
+    XCTAssertEqual(try count("git_working_folders", "status='ready' AND repo_id IS NOT NULL"), 2)
+    XCTAssertEqual(try count("git_repositories"), 1)
+    XCTAssertEqual(try count("git_working_folders", "status='unversioned'"), 0)
+    // A link inside the repository to a plain folder: the walks disagree, so the Git child decides.
+    let plain = root.appendingPathComponent("invented-plain")
+    try FileManager.default.createDirectory(at: plain, withIntermediateDirectories: true)
+    let inside = repo.appendingPathComponent("invented-out-link")
+    try FileManager.default.createSymbolicLink(at: inside, withDestinationURL: plain)
+    XCTAssertFalse(GitCollectionTask.outsideRepository(inside.path))
+    XCTAssertTrue(GitCollectionTask.outsideRepository(plain.path))
+  }
+
+  private func inventedCheckpoint(_ index: Int, offset: Int, seen: Int) throws -> LogPosition {
+    var state = AgentLogState(); state.tool = AgentLogTool.claude.rawValue
+    return LogPosition(path: root.appendingPathComponent("invented-checkpoint-\(index).jsonl").path, device: 7, inode: 100 + index,
+      offset: offset, state: try state.encoded(), seenAt: seen)
+  }
+
+  /// SHOULD 2: a checkpoint pass stopped part way and resumed at a later tick saves the
+  /// time of the attempt that started at cursor 0. A checkpoint behind the cursor that is
+  /// rewritten at the resume tick is still read after a restart.
+  func testResumedCheckpointPassSavesItsStartTime() throws {
+    let start = now + 300, resume = now + 900
+    for index in 0..<300 { try store.saveLogPosition(inventedCheckpoint(index, offset: 1, seen: now - 1000 + index)) }
+    var stopping = true
+    task.beforeBackfillPage = {
+      if stopping, self.task.checkpointRows >= GitCollectionTask.backfillPageSize { throw StorageError.busy("invented stop") }
+    }
+    task.backfill(at: start)
+    task.waitForBackfill()
+    XCTAssertEqual(task.checkpointRows, GitCollectionTask.backfillPageSize)
+    XCTAssertGreaterThan(task.backfillFailures, 0)
+    XCTAssertEqual(try store.gitCheckpointBackfillMark(), Int.min)
+    stopping = false
+    try store.saveLogPosition(inventedCheckpoint(3, offset: 2, seen: resume))
+    task.backfill(at: resume)
+    task.waitForBackfill()
+    XCTAssertEqual(task.checkpointRows, 300)
+    XCTAssertEqual(try store.gitCheckpointBackfillMark(), start)
+    try restartGit()
+    task.backfill(at: resume + 300)
+    task.waitForBackfill()
+    XCTAssertEqual(task.checkpointRows, 1)
+  }
+
+  /// SHOULD 3: checkpoints written behind the cursor while a pass runs, one in the same
+  /// second as the pass's tick and one under a clock set back, are read after a restart.
+  func testCheckpointsWrittenDuringAPassAreReadAfterRestart() throws {
+    let start = now + 300
+    for index in 0..<300 { try store.saveLogPosition(inventedCheckpoint(index, offset: 1, seen: now - 1000 + index)) }
+    var wrote = false
+    task.beforeBackfillPage = {
+      guard !wrote, self.task.checkpointRows >= GitCollectionTask.backfillPageSize else { return }
+      wrote = true
+      try self.store.saveLogPosition(self.inventedCheckpoint(3, offset: 2, seen: start))
+      try self.store.saveLogPosition(self.inventedCheckpoint(4, offset: 2, seen: start - 5000))
+    }
+    task.backfill(at: start)
+    task.waitForBackfill()
+    XCTAssertTrue(wrote)
+    XCTAssertEqual(task.checkpointRows, 300)
+    XCTAssertEqual(try store.gitCheckpointBackfillMark(), start)
+    XCTAssertEqual(try count("log_positions", "seen_ts>\(start)"), 2)
+    try restartGit()
+    task.backfill(at: start + 300)
+    task.waitForBackfill()
+    XCTAssertEqual(task.checkpointRows, 2)
+    // The completed pass removed its floor: a later write keeps its own newer time.
+    try store.saveLogPosition(inventedCheckpoint(5, offset: 2, seen: start + 900))
+    XCTAssertEqual(try count("log_positions", "seen_ts=\(start + 900)"), 1)
+  }
+
+  /// SHOULD 5: the latest occurrence of a linked group refused because the folder was
+  /// unlinked meanwhile is offered again, last, so the re-registered row reaches it.
+  func testLatestOccurrenceRefusedByUnlinkIsOfferedLast() throws {
+    try commit()
+    let file = claudeLogs.appendingPathComponent("invented-latest.jsonl")
+    func record(_ time: Int) -> [String: Any] {
+      ["type": "assistant", "timestamp": time, "sessionId": "invented-latest", "cwd": repo.path,
+       "message": ["role": "assistant", "content": "Invented activity"]]
+    }
+    try appendRecord(record(now - 100), to: file)
+    let reader = claudeReader()
+    func nextBatch() throws -> AgentLogBatch {
+      let source = try XCTUnwrap(reader.files().first { $0.path == file.resolvingSymlinksInPath().path })
+      return try reader.read(source, position: store.logPosition(path: source.path), at: now)
+    }
+    var batch = try nextBatch()
+    try work { try self.task.observe(batch.events, position: batch.position) }
+    try store.appendLogEvents(batch.events, evidence: batch.evidence, position: batch.position)
+    XCTAssertEqual(try count("git_working_folders", "ts=\(now - 100) AND repo_id IS NOT NULL"), 1)
+    for time in [now - 50, now - 30, now - 20] { try appendRecord(record(time), to: file) }
+    batch = try nextBatch()
+    var unlinked = false
+    // The first touch is the group's latest occurrence; a concurrent unlink lands just before it.
+    store.beforeGitTouch = {
+      guard !unlinked else { return }
+      unlinked = true
+      try self.store.locked { try self.store.connection.run("DELETE FROM git_working_folders") }
+    }
+    try work { try self.task.observe(batch.events, position: batch.position) }
+    store.beforeGitTouch = nil
+    XCTAssertTrue(unlinked)
+    XCTAssertEqual(try count("git_working_folders"), 1)
+    XCTAssertEqual(try count("git_working_folders", "ts=\(now - 50) AND last_seen=\(now - 20) AND repo_id IS NOT NULL"), 1)
+  }
+
+  /// A read error that is not a GitReadError, for one folder of a source recovery and the
+  /// stored pass, is that folder's failure: both passes finish and every mark advances past it.
+  func testReaderErrorForOneFolderDoesNotHoldThePassMarks() throws {
+    try commit()
+    let bad = repo.appendingPathComponent("invented-unreadable")
+    try FileManager.default.createDirectory(at: bad, withIntermediateDirectories: true)
+    let base = now - 50_000, scanTime = now + 300
+    let file = try writeLog("invented-reader-error", events: 300, base: base, session: { "invented-reader-error-\($0 % 2)" },
+      folder: { $0 % 2 == 0 ? bad.path : self.repo.path })
+    try ingestWithoutGit(at: now)
+    task.beforeLocationPrepared = { if $0 == bad.path { throw FileLocation.Failure.unavailable } }
+    let logsTask = AgentLogTask(reader: claudeReader(), storage: store, git: task)
+    try work { try logsTask.scan(at: scanTime) }
+    task.backfill(at: scanTime)
+    task.waitForBackfill()
+    XCTAssertEqual(task.backfillFailures, 0)
+    XCTAssertEqual(logsTask.health.gitDeferredBatches, 0)
+    let newest = try store.connection.integer("SELECT max(id) FROM agent_log_events")
+    XCTAssertEqual(try store.gitBackfillProgress(XCTUnwrap(store.logPosition(path: file.path))), newest)
+    XCTAssertEqual(try store.gitBackfillProgress(nil), newest)
+    XCTAssertEqual(try store.gitCheckpointBackfillMark(), scanTime)
+    XCTAssertEqual(try count("git_working_folders", "status='failed' AND failures=1 AND repo_id IS NULL"), 1)
+    XCTAssertEqual(try count("git_working_folders", "status='ready' AND repo_id IS NOT NULL"), 1)
+    // A live occurrence of the same folder does not throw either; it waits for the backoff.
+    try work { try self.task.observe(GitWorkingFolder(folder: bad.path, session: "invented-live", source: "invented-live-source",
+      device: 7, inode: 9, time: self.now, tool: .claude), now: scanTime + 600) }
+    XCTAssertEqual(try count("git_working_folders", "status='failed'"), 2)
   }
 }

@@ -17,6 +17,10 @@ SPLIT_KEYWORD = re.compile(r'(?:INSERT|UPDATE|DELETE|REPLACE|WITH)\b', re.I)
 # Stands for a concatenated operand that is not a string literal.
 CONCATENATED = '\\(+)'
 TRIGGER = re.compile(r'CREATE (?:TEMP |TEMPORARY )?TRIGGER\b', re.I)
+# After a dynamic start (a non-literal + operand or a leading interpolation) the keyword
+# may sit in the variable; a statement tail still shows. "x + \" AND y=?\"" stays out.
+DYNAMIC_TAIL = re.compile(r'\b(?:FROM|INTO|SET)(?:\s|["`\[])|git_', re.I)
+INTERPOLATION = re.compile(r'\\#*\(')
 
 
 def swift_sources():
@@ -92,6 +96,11 @@ def sql_literals(source):
                 continue
             start = index
             body, index = literal
+            # A literal reached here was not joined to a literal on its left, so a + before
+            # it has a non-literal left operand.
+            leading = bool(re.search(r'\+\s*$', source[max(0, start - 64):start]))
+            if leading:
+                body = CONCATENATED + body
             # "DELETE " + "FROM git_commits" is one statement: join concatenated literals,
             # and mark any other operand so a split keyword stays visible.
             concatenated = False
@@ -110,7 +119,8 @@ def sql_literals(source):
             direct = MUTATION.match(value)
             cte = re.match(r'WITH\b', value, re.I) and re.search(r'\b(?:INSERT|UPDATE|DELETE|REPLACE)\b', value, re.I)
             split = concatenated and SPLIT_KEYWORD.match(value)
-            if direct or cte or split or TRIGGER.match(value):
+            tail = (leading or INTERPOLATION.match(value)) and DYNAMIC_TAIL.search(value)
+            if direct or cte or split or tail or TRIGGER.match(value):
                 yield start, value.strip()
 
 
@@ -137,7 +147,8 @@ def mutation_sites(path, source):
     for start, sql in sql_literals(source):
         if re.match(r'CREATE\s', sql, re.I):
             continue
-        dynamic = re.search(r'^(?:INSERT(?: OR \w+)? INTO|UPDATE|DELETE FROM|REPLACE INTO)\s*(?:\\\(|$)', sql, re.I) or CONCATENATED in sql
+        dynamic = (re.search(r'^(?:INSERT(?: OR \w+)? INTO|UPDATE|DELETE FROM|REPLACE INTO)\s*(?:\\\(|$)', sql, re.I)
+                   or CONCATENATED in sql or INTERPOLATION.match(sql))
         if 'git_' not in sql.lower() and path != 'Sources/Storage/GitCollection.swift' and not dynamic:
             continue
         owners = [item for item in functions if item[0] < start < item[1]]
@@ -317,6 +328,21 @@ class GitPublicationInventoryTests(unittest.TestCase):
                 self.assertFalse(sites[0]['gated'])
         # Concatenated text that is not a statement stays out of the inventory.
         self.assertEqual(list(mutation_sites('Sources/Shell/Invented.swift', 'func f() { let a = " AND x=?" + list }')), [])
+
+    def test_keyword_in_a_variable_or_leading_interpolation_is_dynamic(self):
+        for expression, sql in [('verb + " FROM git_commits"', '\\(+) FROM git_commits'),
+                                ('"\\(verb) FROM git_commits"', '\\(verb) FROM git_commits'),
+                                ('v + "ETE FROM git_commits"', '\\(+)ETE FROM git_commits')]:
+            with self.subTest(sql=sql):
+                source = 'func bypass() throws { let verb = "DELETE"; let v = "DEL"; try connection.run(' + expression + ') }'
+                sites = list(mutation_sites('Sources/Shell/Invented.swift', source))
+                self.assertEqual([site['sql'] for site in sites], [sql])
+                self.assertFalse(sites[0]['gated'])
+        # Without a statement tail, text after a variable stays out; so does a compound append.
+        for source in ['func f() { let a = list + " AND x=?" }', 'func f() { let a = name + " <from> <to>" }',
+                       'func f() { query += " AND x=?" }']:
+            with self.subTest(source=source):
+                self.assertEqual(list(mutation_sites('Sources/Shell/Invented.swift', source)), [])
 
     def test_temporary_triggers_are_schema_mutations(self):
         for sql in ['CREATE TEMP TRIGGER invented AFTER UPDATE ON settings BEGIN DELETE FROM git_commits; END',

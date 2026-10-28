@@ -1,5 +1,5 @@
 {
-  "notes": "Reviewed nonpublication mutations: schema/adoption, irreversible privacy erasure/markers, bounded debt invalidation/disposal, and masked TEMP deletion selection. Gate-internal refusal/abandonment writes are part of authorization, not caller bypasses. Any change requires reviewing this inventory. CollectionFileCursor owns a private empty-filename SQLite manifest; its complete source digest pins the isolated adapter. Collection proof copies are restricted to SQLiteConnection temporary proof databases. Backfill progress marks (git_backfill_progress) only skip occurrences already offered to discovery; they never authorize a publication, and deleting the largest agent-log event id lowers them. Forget narrows its TEMP selection in the final unit so rows published in a batch gap are not cascaded. Finished-source receipts and the checkpoint-pass mark keep their value in the git_backfill_progress key (event_id 0) and likewise only skip work already offered. After narrowing, the final unit takes back only tombstones this forget added for rows that stay and are not in the range by themselves. Concatenated literals are joined before matching, and a non-literal operand is marked \\\\(+).",
+  "notes": "Reviewed nonpublication mutations: schema/adoption, irreversible privacy erasure/markers, bounded debt invalidation/disposal, and masked TEMP deletion selection. Gate-internal refusal/abandonment writes are part of authorization, not caller bypasses. Any change requires reviewing this inventory. CollectionFileCursor owns a private empty-filename SQLite manifest; its complete source digest pins the isolated adapter. Collection proof copies are restricted to SQLiteConnection temporary proof databases. Backfill progress marks (git_backfill_progress) only skip occurrences already offered to discovery; they never authorize a publication, and deleting the largest agent-log event id lowers them. Forget narrows its TEMP selection in the final unit so rows published in a batch gap are not cascaded. Finished-source receipts and the checkpoint-pass mark keep their value in the git_backfill_progress key (event_id 0) and likewise only skip work already offered. After narrowing, the final unit takes back only tombstones this forget added for rows that stay and are not in the range by themselves. Concatenated literals are joined before matching, and a non-literal operand is marked \\\\(+). A literal after a non-literal + operand, or one that starts with an interpolation, is marked \\\\(+) or kept as is when it still shows a statement tail (FROM, INTO, SET or git_); the reads this lists are rows/integer executions. A checkpoint pass saves its start as a write floor (a checkpoints:floor: key, event_id 0) before its first page, so later checkpoint writes stay above the mark it saves; saving the mark removes the floor.",
   "gated_sites": 20,
   "nonpublication": [
     {
@@ -39,8 +39,43 @@
     },
     {
       "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "function": "apply",
+      "sql": "\\(+)SELECT EXISTS(SELECT 1 FROM proof_insert WHERE (\\(key.predicate)) AND \\(applicable))"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "function": "apply",
+      "sql": "\\(+)SELECT rowid FROM \\(table) WHERE (\\(key.predicate)) AND \\(predicate)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "function": "apply",
+      "sql": "\\(+)SELECT rowid FROM \\(table)\\(indexHint) WHERE \\(predicate)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "function": "apply",
+      "sql": "\\(name)\\(collation) = (SELECT \\(name) FROM proof_insert)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
       "function": "collectionWrite",
       "sql": "WITH proof_args AS (SELECT \\(+)"
+    },
+    {
+      "file": "Sources/Storage/CollectionMaintenanceProof.swift",
+      "function": "collectionWrite",
+      "sql": "\\(+)SELECT rowid FROM \\(table) WHERE (\\(predicate))\\(+)"
+    },
+    {
+      "file": "Sources/Storage/ConversionManifest.swift",
+      "function": "conversionManifest",
+      "sql": "\\(+) FROM samples WHERE ts>=? AND ts<?"
+    },
+    {
+      "file": "Sources/Storage/ConversionManifest.swift",
+      "function": "rows",
+      "sql": "\\(+) FROM \\(table) ORDER BY \\(order)"
     },
     {
       "file": "Sources/Storage/Deletion.swift",
@@ -360,6 +395,16 @@
     {
       "file": "Sources/Storage/GitCollection.swift",
       "function": "saveGitCheckpointBackfillMark",
+      "sql": "INSERT INTO git_backfill_progress(source,event_id) VALUES(?,0)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "startGitCheckpointPass",
+      "sql": "DELETE FROM git_backfill_progress WHERE source>='checkpoints:floor:' AND source<'checkpoints:floor;'"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "startGitCheckpointPass",
       "sql": "INSERT INTO git_backfill_progress(source,event_id) VALUES(?,0)"
     },
     {

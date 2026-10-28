@@ -536,6 +536,7 @@ extension ActivityStorage {
     }
   }
   @discardableResult public func touchGitFolder(_ folder: GitWorkingFolder, id: Int, now: Int, position: LogPosition? = nil) throws -> Bool {
+    try beforeGitTouch?()
     let discovery = Self.gitDiscoveryKey(folder)
     let prepared = try prepareGitSource(folder, position: position)
     let context = GitDiscoveryPublication(folder: folder, source: prepared, discovery: discovery,
@@ -759,13 +760,24 @@ extension ActivityStorage {
     try gitLocked { try gitCheckpointMark() ?? Int.min }
   }
   /// Caller holds the storage lock. Nil before Git adoption or before a complete pass.
-  func gitCheckpointMark() throws -> Int? {
+  /// With `floor`, the time of a started pass counts too, for checkpoint writers.
+  func gitCheckpointMark(floor: Bool = false) throws -> Int? {
     guard try connection.integer("SELECT count(*) FROM sqlite_master WHERE name='git_backfill_progress'") > 0 else { return nil }
     var mark: Int?
     try connection.namedRows("SELECT source FROM git_backfill_progress WHERE source>='checkpoints:' AND source<'checkpoints;'") {
-      if let value = Int(try $0.text("source").dropFirst("checkpoints:".count)) { mark = max(mark ?? value, value) }
+      let key = try $0.text("source").dropFirst("checkpoints:".count)
+      if let value = Int(key) ?? (floor && key.hasPrefix("floor:") ? Int(key.dropFirst("floor:".count)) : nil) { mark = max(mark ?? value, value) }
     }
     return mark
+  }
+  /// Saved before a checkpoint pass reads its first page. Every checkpoint written after
+  /// this, at any clock, gets a seen_ts above `now`, and so above the mark the pass saves;
+  /// one written before it is in the pass's pages. Saving the mark removes the floor.
+  public func startGitCheckpointPass(_ now: Int) throws {
+    try gitLocked { try gitTransaction(cleanup: true) {
+      try connection.run("DELETE FROM git_backfill_progress WHERE source>='checkpoints:floor:' AND source<'checkpoints:floor;'")
+      try connection.run("INSERT INTO git_backfill_progress(source,event_id) VALUES(?,0)", [.key("checkpoints:floor:" + String(now))])
+    } }
   }
   public func saveGitCheckpointBackfillMark(_ seen: Int) throws {
     try gitLocked { try gitTransaction(cleanup: true) {

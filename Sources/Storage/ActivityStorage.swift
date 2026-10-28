@@ -12,6 +12,7 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
   let lock = NSRecursiveLock()
   let deletionPreparationLock = NSLock()
   var beforeGitSourcePublication: (() throws -> Void)?
+  var beforeGitTouch: (() throws -> Void)?
   var beforeDeletionPublication: (() throws -> Void)?
   var beforeGitFrontierPublication: (() throws -> Void)?
   var beforeGitFolderCompletion: (() throws -> Void)?
@@ -492,10 +493,10 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
         }
         if unchanged { return }
       }
-      // A written checkpoint is newer than the last complete checkpoint pass, whatever
-      // time the writer passes in, so that pass mark can never skip it.
+      // A written checkpoint is newer than the last complete checkpoint pass and than a
+      // running pass's start, whatever time the writer passes in, so no pass mark skips it.
       var seen = p.seenAt
-      if let mark = try gitCheckpointMark(), mark < Int.max { seen = max(seen, mark + 1) }
+      if let mark = try gitCheckpointMark(floor: true), mark < Int.max { seen = max(seen, mark + 1) }
       try connection.run(
         """
         INSERT INTO log_positions(path,device,inode,offset,state,seen_ts) VALUES(?,?,?,?,?,?)

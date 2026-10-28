@@ -21,6 +21,7 @@ public final class GitCollectionTask {
   var beforeMetadataRead: (() throws -> Void)?
   var afterCommitStarted: ((Int) throws -> Void)?
   var afterFileAppended: (() throws -> Void)?
+  var beforeLocationPrepared: ((String) throws -> Void)?
   var afterLocationPrepared: ((inout GitPreparedRepositoryLocation) throws -> Void)?
   // Retained-occurrence backfill runs on the Git queue; log ingestion only enqueues it.
   private var backfillScheduled = false
@@ -33,6 +34,7 @@ public final class GitCollectionTask {
   private var storedLast: GitBackfillReceipt?
   private var checkpointCursor = 0
   private var checkpointSince: Int?
+  private var checkpointStart = 0
   // Loaded once per process on the Git queue; only that queue reads or extends it.
   private var finishedReceipts: Set<String>?
   // Raw cwd occurrences handed off after an append, in memory only, offered before backfill.
@@ -157,15 +159,17 @@ public final class GitCollectionTask {
     do {
       prepared = try reader.withCancellation(cancellation: cancellation, shouldContinue: {
         !self.isStopped && (try? self.storage.gitPolicyAllowed(generation: generation, policy: policy, now: now)) == true
-      }) { try reader.preparedLocation(folder.folder) }
-    } catch let error as GitReadError {
-      guard !isStopped, error != .cancelled else { return .other }
+      }) {
+        try beforeLocationPrepared?(folder.folder)
+        return try reader.preparedLocation(folder.folder)
+      }
+    } catch {
+      // Any read error, such as a path that cannot be resolved, is this folder's failure
+      // with the usual backoff, so it cannot stop the batch or hold a backfill mark.
+      guard !isStopped, (error as? GitReadError) != .cancelled else { return .other }
       try storage.rememberGitFolder(folder, location: nil, status: "failed", now: now, position: position, preparationGeneration: generation, preparationPolicy: policy)
       if let known = try storage.knownGitFolder(folder) { rawWorkingFolders[known.id] = folder.folder }
       return .other
-    } catch {
-      guard !isStopped else { return .other }
-      throw error
     }
     do {
       try afterLocationPrepared?(&prepared)
@@ -196,8 +200,14 @@ public final class GitCollectionTask {
   /// The synchronous form of a live hand-off, on the caller's thread.
   /// Git finds a repository only through a .git entry in the folder or a parent, or a bare
   /// repository the folder lies in. Without either, rev-parse can only say "not a repository".
+  /// Git walks the physical path, so a link into a repository folder is walked both ways;
+  /// when the two walks disagree the Git child decides.
   static func outsideRepository(_ folder: String) -> Bool {
-    var url = URL(fileURLWithPath: folder, isDirectory: true).standardizedFileURL
+    let url = URL(fileURLWithPath: folder, isDirectory: true)
+    return outsideRepository(walking: url.standardizedFileURL) && outsideRepository(walking: url.resolvingSymlinksInPath())
+  }
+  private static func outsideRepository(walking start: URL) -> Bool {
+    var url = start
     let files = FileManager.default
     while true {
       if files.fileExists(atPath: url.appendingPathComponent(".git").path) { return false }
@@ -294,6 +304,10 @@ public final class GitCollectionTask {
         guard try allowed() else { return false }
         if admitted { continue }
         rest.removeAll { $0 == latest }
+        // Refused because the folder was unlinked meanwhile: the re-registered row must
+        // still reach the latest time, so that occurrence is offered again, last.
+        let after = try storage.withGitCancellation(cancellation) { try storage.gitFolderOccurrence(group[latest], allowMaskedMatch: fromStored) }
+        if !after.linked { rest.append(latest) }
       }
       for index in rest {
         guard try allowed() else { return false }
@@ -430,9 +444,13 @@ public final class GitCollectionTask {
         cursor = pageLast.id; storedLast = pageLast; storedCursor = cursor
       }
       // A clock set back below the mark rereads every checkpoint once instead of skipping some.
-      let mark = try checkpointSince ?? storage.gitCheckpointBackfillMark()
-      let since = checkpointSince == nil && mark > now ? Int.min : mark
-      checkpointSince = since
+      // A resumed pass keeps the time and threshold of the attempt that started at cursor 0.
+      if checkpointSince == nil {
+        let mark = try storage.gitCheckpointBackfillMark()
+        try storage.startGitCheckpointPass(now)
+        checkpointSince = mark > now ? Int.min : mark; checkpointStart = now
+      }
+      let since = checkpointSince!, start = checkpointStart
       while true {
         try beforeBackfillPage?()
         let allowed = try pagePolicy(now: now)
@@ -447,9 +465,9 @@ public final class GitCollectionTask {
       storedCursor = nil; storedLast = nil; checkpointCursor = 0; checkpointSince = nil
       guard try !storage.gitMetadataRecoveryPending() else { return false }
       if let last { try storage.saveGitBackfillProgress(last, source: nil) }
-      // Log scans at or before this tick finished before discovery queued the pass, so
-      // every checkpoint with seen_ts up to `now` was read. Later ticks are read again.
-      if now > since { try storage.saveGitCheckpointBackfillMark(now) }
+      // A checkpoint written after the pass started has a seen_ts above `start`, so every
+      // checkpoint at or below it was read. Later ones are read again.
+      if start > since { try storage.saveGitCheckpointBackfillMark(start) }
       return true
     }
   }

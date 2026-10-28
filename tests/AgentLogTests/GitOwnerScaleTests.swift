@@ -17,9 +17,12 @@ extension GitCollectionTests {
   /// Claude logs: 163 sources (one with 6,147 events) holding 106,313 timestamped cwd
   /// events over 26 invented repositories, plus 2,000 extra files: 2,163 checkpoints,
   /// stripped of the Git fields as at main-15 adoption. Maintenance ticks repeat until the
-  /// Git queue reads nothing new, then the recorder restarts once.
+  /// Git queue reads nothing new, then the recorder restarts once. With
+  /// ACTIVITYPROBE_OWNER_SCALE_SUBFOLDERS=1 every other block of 400 events records a
+  /// subfolder of its repository as the cwd.
   func testOwnerScaleFirstStartCost() throws {
     try XCTSkipUnless(ProcessInfo.processInfo.environment["ACTIVITYPROBE_OWNER_SCALE"] == "1")
+    let subfolders = ProcessInfo.processInfo.environment["ACTIVITYPROBE_OWNER_SCALE_SUBFOLDERS"] == "1"
     let logs = root.appendingPathComponent(AgentLogTool.claude.defaultHomeName).appendingPathComponent(AgentLogTool.claude.logsFolder)
     try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
     let repositories = try (0..<26).map { index -> URL in
@@ -27,7 +30,12 @@ extension GitCollectionTests {
       try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
       try git(["init", "-b", "main"], in: folder)
       try commit("Invented change \(index)", in: folder)
+      try FileManager.default.createDirectory(at: folder.appendingPathComponent("invented-sub/invented-deeper"), withIntermediateDirectories: true)
       return folder
+    }
+    func cwd(_ source: Int, _ index: Int) -> String {
+      let folder = repositories[(source + index / 400) % 26]
+      return subfolders && (index / 400) % 2 == 1 ? folder.appendingPathComponent("invented-sub/invented-deeper").path : folder.path
     }
     let base = now - 2_000_000
     var sizes = [6147] + Array(repeating: 0, count: 162)
@@ -38,7 +46,7 @@ extension GitCollectionTests {
       var bytes = Data()
       for index in 0..<size {
         let record: [String: Any] = ["type": "assistant", "timestamp": base + offset + index, "sessionId": "invented-owner-\(source)-\(index / 500)",
-          "cwd": repositories[(source + index / 400) % 26].path, "message": ["role": "assistant", "content": "Invented activity"]]
+          "cwd": cwd(source, index), "message": ["role": "assistant", "content": "Invented activity"]]
         bytes += try JSONSerialization.data(withJSONObject: record) + Data([10])
       }
       offset += size
@@ -74,7 +82,7 @@ extension GitCollectionTests {
       }
       let wall = ProcessInfo.processInfo.systemUptime - began
       let used = Self.cpuSeconds(RUSAGE_SELF) - cpu, git = Self.cpuSeconds(RUSAGE_CHILDREN) - children
-      print("GIT-OWNER-SCALE \(label) ticks=\(ticks) wall=\(wall) cpu=\(used) gitChildCpu=\(git) cpuPercent=\(100 * (used + git) / wall) rows=\(task.backfillRows) offers=\(task.backfillOffers) abortedPasses=\(task.backfillFailures) scanErrors=\(scanErrors) fileFailures=\(logsTask.health.fileFailures) folders=\(try count("git_working_folders")) linkedRepos=\(try count("git_repositories"))")
+      print("GIT-OWNER-SCALE \(label) ticks=\(ticks) wall=\(wall) cpu=\(used) gitChildCpu=\(git) cpuPercent=\(100 * (used + git) / wall) rows=\(task.backfillRows) offers=\(task.backfillOffers) abortedPasses=\(task.backfillFailures) scanErrors=\(scanErrors) fileFailures=\(logsTask.health.fileFailures) folders=\(try count("git_working_folders")) linkedFolders=\(try count("git_working_folders", "repo_id IS NOT NULL")) failedFolders=\(try count("git_working_folders", "status='failed'")) linkedRepos=\(try count("git_repositories")) storedMark=\(try store.gitBackfillProgress(nil)) checkpointMarkSet=\(try store.gitCheckpointBackfillMark() != Int.min)")
     }
     print("GIT-OWNER-SCALE ingestWithoutGit=\(ingest)")
     try measure("first-start", firstTick: now + 300)
