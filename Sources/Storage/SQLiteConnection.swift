@@ -81,7 +81,11 @@ final class SQLiteConnection {
   var collectionWriteAuthorized = false
   private var collectionSnapshotURL: URL?
   private var collectionSnapshotScope: DatabaseOpenScope?
+  // One idle read connection for transaction-entry snapshots; a proof borrows it.
+  private var collectionSnapshotSpare: SQLiteConnection?
   var verifyingCollectionMaintenance = false
+  // Counts statements that may write through this connection; see PolicyReads.
+  private(set) var writeEpoch = 0
   var collectionChangeObserver: ((String, Int64) -> Void)?
   private let busyMilliseconds: Int32
   init(url: URL, readOnly: Bool = false, immutable: Bool = false, scope: DatabaseOpenScope, busyMilliseconds: Int32 = 3000) throws {
@@ -147,10 +151,19 @@ final class SQLiteConnection {
   }
   func collectionEntrySnapshot() throws -> SQLiteConnection? {
     guard let url = collectionSnapshotURL, let scope = collectionSnapshotScope else { return nil }
-    let snapshot = try SQLiteConnection(url: url, readOnly: true, scope: scope, busyMilliseconds: 0)
+    let snapshot = try collectionSnapshotSpare ?? SQLiteConnection(url: url, readOnly: true, scope: scope, busyMilliseconds: 0)
+    collectionSnapshotSpare = nil
+    // The read transaction starts here, after the writer's BEGIN IMMEDIATE.
     try snapshot.run("BEGIN")
     _ = try snapshot.integer("SELECT count(*) FROM sqlite_master")
     return snapshot
+  }
+  /// A snapshot is kept for reuse only after its read transaction ended cleanly.
+  func returnCollectionEntrySnapshot(_ snapshot: SQLiteConnection) {
+    guard handle != nil, collectionSnapshotSpare == nil, (try? snapshot.run("ROLLBACK")) != nil,
+      sqlite3_get_autocommit(snapshot.handle) == 1, sqlite3_txn_state(snapshot.handle, nil) == SQLITE_TXN_NONE,
+      sqlite3_next_stmt(snapshot.handle, nil) == nil else { return }
+    collectionSnapshotSpare = snapshot
   }
   private func installCollectionUpdateHook() {
     sqlite3_update_hook(handle, { context, _, database, table, row in
@@ -164,8 +177,10 @@ final class SQLiteConnection {
       owner.collectionPrivacyChangeObserver?(name, row)
     }, Unmanaged.passUnretained(self).toOpaque())
   }
-  deinit { sqlite3_close(handle) }
+  // The idle snapshot closes first; the owning connection stays the last one to close.
+  deinit { collectionSnapshotSpare = nil; sqlite3_close(handle) }
   func close() throws {
+    collectionSnapshotSpare = nil
     guard sqlite3_close(handle) == SQLITE_OK else { throw failure() }
     handle = nil
   }
@@ -228,6 +243,8 @@ final class SQLiteConnection {
   }
   func rows(_ sql: String, _ values: [SQLValue] = [], _ visit: (OpaquePointer) throws -> Void) throws {
     if !collectionWriteAuthorized && sql != "ROLLBACK" { try verifyPendingCollectionChanges() }
+    // Leaving WAL needs the only connection; the idle snapshot would hold the database open.
+    if sql.hasPrefix("PRAGMA journal_mode") { collectionSnapshotSpare = nil }
     if let proof = collectionMaintenanceProof {
       let command = sql.trimmingCharacters(in: .whitespacesAndNewlines).prefix(7).uppercased()
       if ["CREATE ", "ALTER ", "DROP "].contains(where: command.hasPrefix) { try proof.applySchema(sql) }
@@ -235,6 +252,7 @@ final class SQLiteConnection {
     var statement: OpaquePointer?
     guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw failure() }
     defer { sqlite3_finalize(statement) }
+    if sqlite3_stmt_readonly(statement) == 0 { writeEpoch &+= 1 }
     for (offset, value) in values.enumerated() {
       let index = Int32(offset + 1)
       let result: Int32

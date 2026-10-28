@@ -14,11 +14,13 @@ public struct AXProbeReviewLease: Codable {
     mach_timebase_info(&base)
     return Double(mach_continuous_time()) * Double(base.numer) / Double(base.denom) / 1e9
   }
-  public static func bootID() -> String {
+  /// The boot session cannot change while this process runs.
+  public static func bootID() -> String { boot }
+  private static let boot: String = {
     var bytes = [CChar](repeating: 0, count: 128), size = 128
     guard sysctlbyname("kern.bootsessionuuid", &bytes, &size, nil, 0) == 0 else { return "" }
     return String(decoding: bytes.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
-  }
+  }()
   public func active(wall: Double, continuous: Double, boot: String) -> Bool {
     let numbers = [sessionStart, issued, deadline, issuedWall, deadlineWall, wall, continuous]
     return numbers.allSatisfy(\.isFinite) && !boot.isEmpty && self.boot == boot

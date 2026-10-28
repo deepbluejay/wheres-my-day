@@ -4,6 +4,9 @@ import Foundation
 
 extension ActivityStorage {
   public func settings() throws -> StorageSettings {
+    try policyRead({ $0.settings }, { $0.settings = $1 }) { try readSettings() }
+  }
+  private func readSettings() throws -> StorageSettings {
     try locked {
       var result = StorageSettings()
       var apps: [String] = []

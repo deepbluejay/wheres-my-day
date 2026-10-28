@@ -11,6 +11,7 @@ final class CollectionMaintenanceProof {
     "collection_retention", "collection_policy_refusals", "collection_ingestion", "collection_ingestion_pending"]
   let expected: SQLiteConnection
   private let baseline: SQLiteConnection?
+  private weak var source: SQLiteConnection?
   private var loaded: [String: Set<Int64>] = [:]
   private var identities: [String: Set<Int64>] = [:]
   private var changed: [String: Set<Int64>] = [:]
@@ -18,41 +19,35 @@ final class CollectionMaintenanceProof {
   private var seeding = false
   let full: Bool
   private var referenceHashes = Set<String>()
+  // Empty expectations keyed by the source's collection schema. Each scoped proof
+  // receives a page copy instead of parsing the same tables and triggers again.
+  private static let templateLock = NSLock()
+  private static var templates: [String: SQLiteConnection] = [:]
 
   init(_ source: SQLiteConnection, full: Bool = false) throws {
     self.full = full
+    self.source = source
     expected = try SQLiteConnection(temporaryCollectionProof: ())
     baseline = full ? nil : try source.collectionEntrySnapshot()
     try expected.run("PRAGMA cache_size=-512")
     try expected.run("PRAGMA secure_delete=ON")
-    try expected.run("BEGIN")
-    try expected.run("CREATE TABLE proof_external_refs(hash TEXT PRIMARY KEY)")
-    for table in Self.tables.sorted() {
-      var schema: String?
-      try source.namedRows("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", [.key(table)]) { schema = try $0.text("sql") }
-      guard let schema else { continue }
-      try expected.run(schema)
-      try source.namedRows("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", [.key(table)]) {
-        try expected.run($0.text("sql"))
-      }
-      if full { try copy(source, table: table, predicate: "1") }
-    }
     sqlite3_create_function_v2(expected.handle, "proof_seeding", 0, SQLITE_UTF8,
       Unmanaged.passUnretained(self).toOpaque(), { context, _, _ in
         guard let context, let pointer = sqlite3_user_data(context) else { return }
         let proof = Unmanaged<CollectionMaintenanceProof>.fromOpaque(pointer).takeUnretainedValue()
         sqlite3_result_int(context, proof.seeding ? 1 : 0)
       }, nil, nil, nil)
-    for sql in SQLiteConnection.collectionCascadeTriggers {
-      let owner = sql.components(separatedBy: " ON ").last?.components(separatedBy: " ").first ?? ""
-      if try expected.integer("SELECT count(*) FROM sqlite_master WHERE name=? AND type='table'", [.key(owner)]) == 1 {
-        try installTrigger(sql)
+    let schema = try Self.schema(source)
+    if full {
+      try expected.run("BEGIN")
+      try Self.build(expected, schema) { try copy(source, table: $0, predicate: "1") }
+    } else {
+      try Self.restoreTemplate(schema, into: expected)
+      try expected.run("BEGIN")
+      // The shipped accounting triggers are installed, without running an initialization INSERT.
+      if schema.contains(where: { $0.table == "collection_ingestion_pending" }) {
+        try seed(source, table: "collection_ingestion_pending", predicate: "id=1")
       }
-    }
-    if try expected.integer("SELECT count(*) FROM sqlite_master WHERE name='collection_ingestion_pending'") == 1 {
-      // Install the shipped accounting triggers, without running an initialization INSERT.
-      try expected.createCollectionAccountingTriggers(existingTablesOnly: true, transform: installTrigger)
-      if !full { try seed(source, table: "collection_ingestion_pending", predicate: "id=1") }
     }
     expected.collectionChangeObserver = { [weak self] table, row in
       guard let self, !self.seeding, Self.tables.contains(table) else { return }
@@ -60,7 +55,58 @@ final class CollectionMaintenanceProof {
       self.identities[table, default: []].insert(row)
     }
   }
-  private func installTrigger(_ definition: String) throws {
+  deinit {
+    if let baseline { source?.returnCollectionEntrySnapshot(baseline) }
+  }
+  /// Table and index definitions in creation order, read inside the writer's transaction.
+  private static func schema(_ source: SQLiteConnection) throws -> [(table: String, sql: String, indexes: [String])] {
+    let names = tables.sorted().map { "'" + $0 + "'" }.joined(separator: ",")
+    var definitions: [String: String] = [:], indexes: [String: [String]] = [:]
+    try source.rows("SELECT type,tbl_name,sql FROM sqlite_master WHERE type IN ('table','index') AND tbl_name IN (\(names))") { row in
+      let table = SQLiteConnection.text(row, 1)
+      if SQLiteConnection.text(row, 0) == "table" { definitions[table] = SQLiteConnection.text(row, 2) }
+      else if let sql = SQLiteConnection.optionalText(row, 2) { indexes[table, default: []].append(sql) }
+    }
+    return tables.sorted().compactMap { table in definitions[table].map { (table, $0, indexes[table] ?? []) } }
+  }
+  private static func build(_ database: SQLiteConnection, _ schema: [(table: String, sql: String, indexes: [String])],
+    filled: (String) throws -> Void = { _ in }) throws {
+    try database.run("CREATE TABLE proof_external_refs(hash TEXT PRIMARY KEY)")
+    for entry in schema {
+      try database.run(entry.sql)
+      for index in entry.indexes { try database.run(index) }
+      try filled(entry.table)
+    }
+    for sql in SQLiteConnection.collectionCascadeTriggers {
+      let owner = sql.components(separatedBy: " ON ").last?.components(separatedBy: " ").first ?? ""
+      if try database.integer("SELECT count(*) FROM sqlite_master WHERE name=? AND type='table'", [.key(owner)]) == 1 {
+        try installTrigger(sql, on: database)
+      }
+    }
+    if try database.integer("SELECT count(*) FROM sqlite_master WHERE name='collection_ingestion_pending'") == 1 {
+      try database.createCollectionAccountingTriggers(existingTablesOnly: true) { try installTrigger($0, on: database) }
+    }
+  }
+  /// Copies the template pages built by the same code a full proof runs. The key is the
+  /// complete schema text, so any table, index or definition change builds a new template.
+  private static func restoreTemplate(_ schema: [(table: String, sql: String, indexes: [String])], into database: SQLiteConnection) throws {
+    let key = schema.map { ([$0.table, $0.sql] + $0.indexes).joined(separator: "\u{0}") }.joined(separator: "\u{1}")
+    templateLock.lock()
+    defer { templateLock.unlock() }
+    let template: SQLiteConnection
+    if let found = templates[key] { template = found }
+    else {
+      template = try SQLiteConnection(temporaryCollectionProof: ())
+      try build(template, schema)
+      if templates.count >= 8 { templates.removeAll() }
+      templates[key] = template
+    }
+    guard let backup = sqlite3_backup_init(database.handle, "main", template.handle, "main") else { throw database.failure() }
+    let result = sqlite3_backup_step(backup, -1)
+    guard sqlite3_backup_finish(backup) == SQLITE_OK, result == SQLITE_DONE else { throw StorageError("Collection proof template unavailable") }
+  }
+  private func installTrigger(_ definition: String) throws { try Self.installTrigger(definition, on: expected) }
+  private static func installTrigger(_ definition: String, on database: SQLiteConnection) throws {
     var sql = definition
     if sql.contains("CREATE TRIGGER IF NOT EXISTS collection_unref ") {
       sql = sql.replacingOccurrences(of: "; END", with: " AND NOT EXISTS(SELECT 1 FROM proof_external_refs r WHERE r.hash=collection_blobs.hash); END")
@@ -72,7 +118,7 @@ final class CollectionMaintenanceProof {
       header = String(header[..<condition.lowerBound]) + "WHEN proof_seeding()=0 AND (" + header[condition.upperBound...] + ") "
     } else { header += " WHEN proof_seeding()=0 " }
     sql = header + body
-    try expected.run(sql)
+    try database.run(sql)
   }
   private func copy(_ database: SQLiteConnection, table: String, predicate: String, values: [SQLValue] = []) throws {
     let wasSeeding = seeding; seeding = true

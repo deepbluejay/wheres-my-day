@@ -285,12 +285,19 @@ extension ActivityStorage: AXProbeStore {
   }
   public func axProbeAllowed(_ request: AXProbeRequest, at now: Int) throws -> Bool {
     try locked {
-      let settings = try self.settings()
-      guard settings.axProbeRun == request.run, RecorderPolicy.recording(settings, at: now),
-        !settings.excludesApplication(request.bundleID),
-        !settings.axProbeReviewActive(at: now),
-        try connection.integer("SELECT count(*) FROM ax_probe_runs WHERE id=? AND cancelled=0", [.key(request.run.id)]) == 1,
-        request.time < Int.max, try !forgotten(TimeRange(request.time, request.time + 1)) else { return false }
+      guard request.time < Int.max else { return false }
+      // The probe gate runs before each AX call; its stored inputs are reused while unchanged.
+      let key = [request.run.id, String(request.run.start), String(request.time), request.bundleID].joined(separator: "|")
+      let inputs = try policyRead({ $0.probeInputs[key] }, { $0.probeInputs[key] = $1 }) { () throws -> ProbeInputs in
+        let settings = try self.settings()
+        return ProbeInputs(settings: settings, sameRun: settings.axProbeRun == request.run,
+          excluded: settings.excludesApplication(request.bundleID),
+          open: try connection.integer("SELECT count(*) FROM ax_probe_runs WHERE id=? AND cancelled=0", [.key(request.run.id)]) == 1,
+          forgotten: try forgotten(TimeRange(request.time, request.time + 1)))
+      }
+      // Pause expiry and the review lease depend on the time of this check.
+      guard inputs.sameRun, RecorderPolicy.recording(inputs.settings, at: now), !inputs.excluded,
+        !inputs.settings.axProbeReviewActive(at: now), inputs.open, !inputs.forgotten else { return false }
       return true
     }
   }

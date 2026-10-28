@@ -50,6 +50,7 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
   var axProbePersistenceFailures: [String: AXProbeReceipt] = [:]
   var axProbeOverloadTotals: [String: Int] = [:]
   var axProbeOverloadAttempts: [String: String] = [:]
+  var policyReads: PolicyReads?
   public private(set) var securityHealth = StorageSecurityHealth()
 
   /// Explicit paths keep this adapter away from the running recorder's file.

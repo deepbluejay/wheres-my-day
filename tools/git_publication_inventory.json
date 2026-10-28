@@ -473,11 +473,11 @@
     },
     {
       "file": "Sources/Storage/CollectionMaintenanceProof.swift",
-      "call": "run(schema)"
+      "call": "run(entry.sql)"
     },
     {
       "file": "Sources/Storage/CollectionMaintenanceProof.swift",
-      "call": "run($0.text(\"sql\"))"
+      "call": "run(index)"
     },
     {
       "file": "Sources/Storage/CollectionMaintenanceProof.swift",

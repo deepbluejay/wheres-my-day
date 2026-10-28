@@ -283,9 +283,10 @@ final class DatabaseBoundaryTests: XCTestCase {
     }
     defer { DatabaseOpenBoundary.beforeOpen = nil }
     // Origin validation, Git preparation and collection proofs each use approved read-only snapshots.
-    // A checkpoint save needs no snapshot: its Git authority reads no rows.
+    // A checkpoint save needs no snapshot: its Git authority reads no rows. A connection's
+    // proof snapshot is opened once and reused by its later write transactions.
     for (args, count) in [(["stop"],3),(["status"],1),
-      (["privacy","verdicts"],1),(["selftest"],19),(["leaktest"],19)] {
+      (["privacy","verdicts"],1),(["selftest"],6),(["leaktest"],6)] {
       opened = []
       let result = RetainedCommands.run(args,paths:context,now:1000)
       XCTAssertEqual(result.status,0,result.output); XCTAssertEqual(opened.count,count,args.joined(separator:" "))
@@ -310,8 +311,8 @@ final class DatabaseBoundaryTests: XCTestCase {
     }
     let destination = root.appendingPathComponent("conversion.sqlite")
     // Four source opens remain. Destination write transactions also establish
-    // independently approved read-only entry snapshots.
-    for count in [10,10] { // A repeat also performs read-only destination preflight.
+    // an independently approved read-only entry snapshot, reused within each run.
+    for count in [6,8] { // A repeat also performs read-only destination preflight.
       opened = []
       let result = convert(source,to:destination)
       XCTAssertEqual(result.status,0,result.output); XCTAssertEqual(opened.count,count)
