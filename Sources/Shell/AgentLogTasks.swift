@@ -36,6 +36,22 @@ public final class AgentLogTask {
   let storage: AgentLogStorage
   private let lock = NSLock()
   private var status = AgentLogHealth()
+  /// Recovery batches of 1 MiB per file per scan: a 560 MiB file finishes in 9 ticks.
+  var recoveryBatchesPerScan = 64
+  /// Everything a read and its append consult, besides recording permission: the file's
+  /// identity, size and times, its stored checkpoint, and the ownership receipts.
+  private struct ReadInputs: Equatable {
+    let device: Int, inode: Int, size: Int, modified: [Int], position: LogPosition, ownership: String
+    init?(_ file: AgentLogFile, position: LogPosition?, ownership: String?) {
+      var info = stat()
+      guard let position, let ownership, stat(file.path, &info) == 0 else { return nil }
+      device = Int(info.st_dev); inode = Int(info.st_ino); size = Int(info.st_size)
+      modified = [info.st_mtimespec.tv_sec, info.st_mtimespec.tv_nsec, info.st_ctimespec.tv_sec, info.st_ctimespec.tv_nsec]
+      self.position = position; self.ownership = ownership
+    }
+  }
+  // Files whose last read in this process found nothing and wrote nothing, with that read's inputs.
+  private var unchanged: [String: ReadInputs] = [:]
   public init(reader: AgentLogReader, storage: AgentLogStorage, git: GitCollectionTask? = nil) {
     self.git = git
     self.reader = reader
@@ -75,9 +91,26 @@ public final class AgentLogTask {
       for _ in 0..<listing.discoveryFailures { recordFailure(AgentLogReadError.processUnavailable) }
       failure = AgentLogReadError.processUnavailable
     }
+    // Read before any file, so a receipt added during the scan makes the next scan read again.
+    let ownership: String?
+    do {
+      ownership = try reader.ownershipRevision().flatMap { reader in try storage.agentLogOwnershipRevision().map { reader + "|" + $0 } }
+    } catch {
+      recordFailure(error)
+      throw error
+    }
     for file in listing.files {
       do {
         var position = try storage.logPosition(path: file.path)
+        // An unchanged file whose last read found nothing and wrote nothing would read the
+        // same again; ownership is evaluated again whenever a receipt changes.
+        let inputs = ReadInputs(file, position: position, ownership: ownership)
+        lock.lock()
+        let skip = inputs != nil && unchanged[file.path] == inputs
+        if !skip { unchanged[file.path] = nil }
+        lock.unlock()
+        if skip { continue }
+        var recoveryBatches = 0, first = true
         while true {
           guard try recordingAllowed(at: time) else { return }
           let batch = try reader.read(file, position: position, at: time)
@@ -112,6 +145,21 @@ public final class AgentLogTask {
           status.malformedLines += batch.malformedLines
           for (reason, count) in batch.ignored { status.ignored[reason, default: 0] += count }
           lock.unlock()
+          if first, let inputs, batch.events.isEmpty, batch.evidence.isEmpty, !batch.ownershipDeferred,
+            result.stored == 0, result.refused == 0, try storage.logPosition(path: file.path) == inputs.position {
+            lock.lock(); unchanged[file.path] = inputs; lock.unlock()
+          }
+          first = false
+          // Metadata recovery saves each 1 MiB it reads without moving the offset. It goes on
+          // in the same scan, up to a bound, instead of waiting a tick per MiB.
+          if batch.ownershipDeferred {
+            let before = position.flatMap { try? AgentLogState.decode($0.state) }?.metadataRecoveryOffset
+            guard let after = (try? AgentLogState.decode(batch.position.state))?.metadataRecoveryOffset,
+              after > (before ?? -1), recoveryBatches < recoveryBatchesPerScan else { break }
+            recoveryBatches += 1
+            position = batch.position
+            continue
+          }
           if batch.position.offset >= file.size || batch.position.offset == position?.offset { break }
           // An unfinished final line is left until the next scan.
           if batch.position.offset == 0 { break }

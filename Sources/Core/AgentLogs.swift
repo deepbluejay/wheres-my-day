@@ -42,6 +42,8 @@ public protocol AgentLogReader {
   func files() throws -> [AgentLogFile]
   func listing() throws -> AgentLogListing
   func read(_ file: AgentLogFile, position: LogPosition?, at time: Int) throws -> AgentLogBatch
+  /// Changes whenever the own-source receipts a read consults may have changed; nil when unknown.
+  func ownershipRevision() throws -> String?
 }
 
 public struct AgentLogListing {
@@ -57,6 +59,7 @@ public struct AgentLogListing {
 
 extension AgentLogReader {
   public func listing() throws -> AgentLogListing { AgentLogListing(files: try files()) }
+  public func ownershipRevision() throws -> String? { nil }
 }
 
 public enum AgentLogIgnore: String, Codable, CaseIterable {
@@ -421,7 +424,10 @@ public protocol LogPrivacyHistory {
 }
 public protocol AgentLogStorage: SettingsStore, LogPositionStore, LogBatchWriter, LogPrivacyHistory {
   func prepareAgentLogCollection() throws
+  /// Changes whenever an ownership receipt an append consults may have changed; nil when unknown.
+  func agentLogOwnershipRevision() throws -> String?
 }
 extension AgentLogStorage {
   public func prepareAgentLogCollection() throws {}
+  public func agentLogOwnershipRevision() throws -> String? { nil }
 }

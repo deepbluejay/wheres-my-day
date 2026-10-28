@@ -40,6 +40,17 @@ public struct AgentLogOwnSources {
     do { try Data().write(to: target, options: .withoutOverwriting) }
     catch { if !FileManager.default.fileExists(atPath: target.path) { throw error } }
   }
+  /// Receipts are only added or removed as directory entries, which changes the folder's
+  /// status-change time. "absent" while no receipt was ever registered.
+  public func revision() throws -> String {
+    var info = stat()
+    guard stat(directory.path, &info) == 0 else {
+      if errno == ENOENT { return "absent" }
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    return [Int(info.st_dev), Int(info.st_ino), Int(info.st_nlink), info.st_mtimespec.tv_sec, info.st_mtimespec.tv_nsec,
+      info.st_ctimespec.tv_sec, info.st_ctimespec.tv_nsec].map(String.init).joined(separator: ":")
+  }
   /// Receipt names are one-way hashes; neither receipt contents nor agent files are opened.
   public func visitInventory(_ visit: (String) throws -> Void) throws {
     guard FileManager.default.fileExists(atPath: directory.path) else { return }

@@ -428,8 +428,14 @@ public final class GitCollectionTask {
     }
   }
   /// Stored occurrences above the durable mark, then checkpoints written since the last
-  /// complete pass. Both marks advance only when no source is in metadata recovery;
-  /// otherwise the pass repeats next tick.
+  /// complete pass. Rows whose source is in metadata recovery are not offered, and neither
+  /// mark waits for them; while any source is in recovery the pass repeats next tick, from
+  /// the marks. A checkpoint leaves recovery only by being written again, above the pass's
+  /// floor, so that repeat reads it. Its retained occurrences were all stored before
+  /// recovery began (a deferred read appends nothing); that read's hand-off requests the
+  /// source's own recovery, which offers them above the source's mark. One row stuck in
+  /// recovery, such as a deleted log's, so costs a repeat that reads only what changed,
+  /// not every event and checkpoint.
   private func backfillStored(at now: Int) throws -> Bool {
     try storage.withGitCancellation(cancellation) {
       var cursor = try storedCursor ?? storage.gitBackfillProgress(nil)
@@ -463,12 +469,11 @@ public final class GitCollectionTask {
       }
       let last = storedLast
       storedCursor = nil; storedLast = nil; checkpointCursor = 0; checkpointSince = nil
-      guard try !storage.gitMetadataRecoveryPending() else { return false }
       if let last { try storage.saveGitBackfillProgress(last, source: nil) }
       // A checkpoint written after the pass started has a seen_ts above `start`, so every
       // checkpoint at or below it was read. Later ones are read again.
       if start > since { try storage.saveGitCheckpointBackfillMark(start) }
-      return true
+      return try !storage.gitMetadataRecoveryPending()
     }
   }
   private func countRows(_ page: GitBackfillPage) {
