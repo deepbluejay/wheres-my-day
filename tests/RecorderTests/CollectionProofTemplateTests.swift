@@ -58,4 +58,14 @@ final class CollectionProofTemplateTests: XCTestCase {
     }
     XCTAssertEqual(try store.connection.integer("SELECT count(*) FROM samples WHERE ts=200 AND window=''"), 1)
   }
+  func testIdleSnapshotIsReleasedForAnySpellingOfAJournalModeChange() throws {
+    for (index, spelling) in ["  pragma Journal_Mode = DELETE", "\nPRAGMA main.journal_mode=delete"].enumerated() {
+      let store = try open("invented-\(index).sqlite")
+      // A write transaction's proof leaves an idle snapshot connection behind.
+      try store.saveSettings(StorageSettings(excludedApps: []), at: 0)
+      var mode = ""
+      try store.connection.rows(spelling) { mode = SQLiteConnection.text($0, 0) }
+      XCTAssertEqual(mode, "delete")
+    }
+  }
 }

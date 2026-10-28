@@ -201,6 +201,25 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
       return result
     }
   }
+  /// A summary pass plans over every sample since summaries began, every tick. Only the
+  /// columns the plan uses are read, by index, from one template row: no names, titles or
+  /// per-row application identity.
+  public func planningSamples(in range: TimeRange) throws -> [TimeSample] {
+    try locked {
+      var result: [TimeSample] = [], row = TimeSample(ts: 0)
+      try connection.rows(
+        "SELECT ts, keys, clicks, scrolls, moved, keeping_awake, excluded FROM samples WHERE ts>=? AND ts<? ORDER BY ts, id",
+        [.integer(range.start), .integer(range.end)]
+      ) {
+        row.ts = SQLiteConnection.int($0, 0); row.keys = SQLiteConnection.int($0, 1)
+        row.clicks = SQLiteConnection.int($0, 2); row.scrolls = SQLiteConnection.int($0, 3)
+        row.moved = SQLiteConnection.int($0, 4) != 0; row.keepingAwake = SQLiteConnection.int($0, 5) != 0
+        row.excluded = SQLiteConnection.int($0, 6) != 0
+        result.append(row)
+      }
+      return result
+    }
+  }
   @discardableResult func insertInterval(_ interval: NamedInterval) throws -> Bool {
     guard try !forgotten(interval.range) else { return false }
     try connection.run(

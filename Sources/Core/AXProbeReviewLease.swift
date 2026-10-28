@@ -15,12 +15,14 @@ public struct AXProbeReviewLease: Codable {
     return Double(mach_continuous_time()) * Double(base.numer) / Double(base.denom) / 1e9
   }
   /// The boot session cannot change while this process runs.
-  public static func bootID() -> String { boot }
-  private static let boot: String = {
-    var bytes = [CChar](repeating: 0, count: 128), size = 128
-    guard sysctlbyname("kern.bootsessionuuid", &bytes, &size, nil, 0) == 0 else { return "" }
-    return String(decoding: bytes.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
-  }()
+  public static func bootID() -> String {
+    boot.value {
+      var bytes = [CChar](repeating: 0, count: 128), size = 128
+      guard sysctlbyname("kern.bootsessionuuid", &bytes, &size, nil, 0) == 0 else { return "" }
+      return String(decoding: bytes.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+  }
+  private static let boot = FirstNonEmpty()
   public func active(wall: Double, continuous: Double, boot: String) -> Bool {
     let numbers = [sessionStart, issued, deadline, issuedWall, deadlineWall, wall, continuous]
     return numbers.allSatisfy(\.isFinite) && !boot.isEmpty && self.boot == boot
@@ -35,5 +37,19 @@ public extension StorageSettings {
     guard general["axProbe.reviewActive"] == "1", let raw = general["axProbe.reviewLease"],
       let lease = try? JSONDecoder().decode(AXProbeReviewLease.self, from: Data(raw.utf8)) else { return false }
     return lease.active(wall: Double(time), continuous: continuous, boot: boot)
+  }
+}
+
+/// Keeps the first non-empty value read. An empty one is a failed read and is read again,
+/// so one failure cannot turn the review barrier off for the rest of the process.
+final class FirstNonEmpty {
+  private let lock = NSLock()
+  private var kept: String?
+  func value(_ read: () -> String) -> String {
+    lock.lock(); defer { lock.unlock() }
+    if let kept { return kept }
+    let value = read()
+    if !value.isEmpty { kept = value }
+    return value
   }
 }

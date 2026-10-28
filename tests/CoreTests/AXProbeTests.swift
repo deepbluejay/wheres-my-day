@@ -1,4 +1,4 @@
-import Core
+@testable import Core
 import Foundation
 import XCTest
 
@@ -79,6 +79,15 @@ private func collected(_ result: AXProbeResult) -> String {
   (result.nodes ?? []).flatMap { $0.attributes.map(\.text) }.filter { !$0.isEmpty }.joined(separator: "\n")
 }
 final class AXProbeTests: XCTestCase {
+  func testBootSessionKeepsOnlyASuccessfulRead() {
+    let boot = FirstNonEmpty()
+    var reads = ["", "invented-boot", "invented-other"]
+    func read() -> String { reads.removeFirst() }
+    XCTAssertEqual(boot.value(read), "")
+    XCTAssertEqual(boot.value(read), "invented-boot")
+    XCTAssertEqual(boot.value(read), "invented-boot")
+    XCTAssertEqual(reads, ["invented-other"])
+  }
   private let window = WindowIdentity(processID: 10, windowID: 20)
   func testPairRecordsObservedBrowserBooleanWithoutAppCategoriesAndDecodesLegacy() throws {
     for bundle in ["invented.editor", "invented.browser", "invented.unknown"] {

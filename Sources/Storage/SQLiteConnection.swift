@@ -84,8 +84,15 @@ final class SQLiteConnection {
   // One idle read connection for transaction-entry snapshots; a proof borrows it.
   private var collectionSnapshotSpare: SQLiteConnection?
   var verifyingCollectionMaintenance = false
-  // Counts statements that may write through this connection; see PolicyReads.
-  private(set) var writeEpoch = 0
+  // Policy reads (see PolicyReads) are reused until this connection may have changed a
+  // table they read: tables read while readingPolicy > 0 are policyTables, and the
+  // authorizer counts every statement that can write one, change the schema or roll back.
+  private(set) var policyWriteEpoch = 0
+  private(set) var policyTables: Set<String> = []
+  var readingPolicy = 0
+  // Commits and rollbacks of this connection; a write transaction ends only through one.
+  private var transactionEnds = 0
+  private var writeTransactionDataVersion: (value: Int, ends: Int)?
   var collectionChangeObserver: ((String, Int64) -> Void)?
   private let busyMilliseconds: Int32
   init(url: URL, readOnly: Bool = false, immutable: Bool = false, scope: DatabaseOpenScope, busyMilliseconds: Int32 = 3000) throws {
@@ -113,10 +120,21 @@ final class SQLiteConnection {
       throw error
     }
     installCollectionUpdateHook()
-    sqlite3_set_authorizer(handle, { context, action, table, _, _, trigger in
-      guard let context, let table,
-        [SQLITE_INSERT, SQLITE_UPDATE, SQLITE_DELETE].contains(action) else { return SQLITE_OK }
+    sqlite3_commit_hook(handle, { context in
+      guard let context else { return 0 }
+      Unmanaged<SQLiteConnection>.fromOpaque(context).takeUnretainedValue().transactionEnds &+= 1
+      return 0
+    }, Unmanaged.passUnretained(self).toOpaque())
+    sqlite3_rollback_hook(handle, { context in
+      guard let context else { return }
       let owner = Unmanaged<SQLiteConnection>.fromOpaque(context).takeUnretainedValue()
+      owner.transactionEnds &+= 1; owner.policyWriteEpoch &+= 1
+    }, Unmanaged.passUnretained(self).toOpaque())
+    sqlite3_set_authorizer(handle, { context, action, table, detail, _, trigger in
+      guard let context else { return SQLITE_OK }
+      let owner = Unmanaged<SQLiteConnection>.fromOpaque(context).takeUnretainedValue()
+      owner.notePolicyAccess(action, table, detail)
+      guard let table, [SQLITE_INSERT, SQLITE_UPDATE, SQLITE_DELETE].contains(action) else { return SQLITE_OK }
       let collection = CollectionMaintenanceProof.tables.contains(String(cString: table))
       if owner.collectionMaintenanceProof != nil && !owner.collectionWriteAuthorized && trigger == nil && collection { return SQLITE_DENY }
       // SQLite's truncate optimization skips row hooks. Force per-row DELETEs,
@@ -125,6 +143,37 @@ final class SQLiteConnection {
       if action == SQLITE_DELETE && (collection || privacyCalls) && owner.collectionMaintenanceProof != nil { return SQLITE_IGNORE }
       return SQLITE_OK
     }, Unmanaged.passUnretained(self).toOpaque())
+  }
+  /// Runs while a statement is prepared, so it also sees what its triggers write.
+  private func notePolicyAccess(_ action: Int32, _ table: UnsafePointer<CChar>?, _ detail: UnsafePointer<CChar>?) {
+    switch action {
+    case SQLITE_READ:
+      if readingPolicy > 0, let table { policyTables.insert(String(cString: table)) }
+    case SQLITE_SELECT, SQLITE_FUNCTION, SQLITE_RECURSIVE: break
+    case SQLITE_INSERT, SQLITE_UPDATE, SQLITE_DELETE:
+      if let table, policyTables.contains(String(cString: table)) { policyWriteEpoch &+= 1 }
+    case SQLITE_TRANSACTION, SQLITE_SAVEPOINT:
+      // BEGIN, COMMIT and RELEASE keep what was read; ROLLBACK (TO) can undo it.
+      if let table, strcmp(table, "ROLLBACK") == 0 { policyWriteEpoch &+= 1 }
+    case SQLITE_PRAGMA:
+      if detail != nil { policyWriteEpoch &+= 1 }
+    default:
+      // Schema changes, ATTACH and anything not listed above.
+      policyWriteEpoch &+= 1
+    }
+  }
+  /// Another connection's commit changes this. Inside this connection's write transaction
+  /// no other connection can commit, so the value read earlier in it is still current.
+  func dataVersion() throws -> Int {
+    let writing = sqlite3_txn_state(handle, "main") == SQLITE_TXN_WRITE
+    if writing, let held = writeTransactionDataVersion, held.ends == transactionEnds { return held.value }
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(handle, "PRAGMA data_version", -1, &statement, nil) == SQLITE_OK, let statement else { throw failure() }
+    defer { sqlite3_finalize(statement) }
+    guard sqlite3_step(statement) == SQLITE_ROW else { throw failure() }
+    let value = Self.int(statement, 0)
+    writeTransactionDataVersion = writing ? (value, transactionEnds) : nil
+    return value
   }
   static func originPreflight(url: URL, scope: DatabaseOpenScope, busyMilliseconds: Int32 = 3000) throws -> SQLiteConnection {
     // A completed backup can retain the WAL header without any sidecars. Immutable
@@ -244,7 +293,7 @@ final class SQLiteConnection {
   func rows(_ sql: String, _ values: [SQLValue] = [], _ visit: (OpaquePointer) throws -> Void) throws {
     if !collectionWriteAuthorized && sql != "ROLLBACK" { try verifyPendingCollectionChanges() }
     // Leaving WAL needs the only connection; the idle snapshot would hold the database open.
-    if sql.hasPrefix("PRAGMA journal_mode") { collectionSnapshotSpare = nil }
+    if Self.setsJournalMode(sql) { collectionSnapshotSpare = nil }
     if let proof = collectionMaintenanceProof {
       let command = sql.trimmingCharacters(in: .whitespacesAndNewlines).prefix(7).uppercased()
       if ["CREATE ", "ALTER ", "DROP "].contains(where: command.hasPrefix) { try proof.applySchema(sql) }
@@ -252,7 +301,6 @@ final class SQLiteConnection {
     var statement: OpaquePointer?
     guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw failure() }
     defer { sqlite3_finalize(statement) }
-    if sqlite3_stmt_readonly(statement) == 0 { writeEpoch &+= 1 }
     for (offset, value) in values.enumerated() {
       let index = Int32(offset + 1)
       let result: Int32
@@ -280,6 +328,10 @@ final class SQLiteConnection {
       result = sqlite3_step(statement)
     }
     guard result == SQLITE_DONE else { throw failure() }
+  }
+  static func setsJournalMode(_ sql: String) -> Bool {
+    let text = sql.drop(while: \.isWhitespace)
+    return text.prefix(6).uppercased() == "PRAGMA" && text.range(of: "journal_mode", options: .caseInsensitive) != nil
   }
   func namedRows(_ sql: String, _ values: [SQLValue] = [], _ visit: (DatabaseRow) throws -> Void) throws {
     try rows(sql, values) { try visit(DatabaseRow($0)) }

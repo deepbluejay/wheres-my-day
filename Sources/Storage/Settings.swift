@@ -12,9 +12,10 @@ extension ActivityStorage {
       var apps: [String] = []
       var appLabels: [String: String] = [:], appIdentities: [String: String] = [:]
       var initialized = false
-      try connection.namedRows("SELECT key,value FROM settings ORDER BY key") {
-        let key = try $0.text("key")
-        let value = try $0.text("value")
+      // Read by column index: the gate reads settings again after every other connection's commit.
+      try connection.rows("SELECT key,value FROM settings ORDER BY key") {
+        let key = SQLiteConnection.text($0, 0)
+        let value = SQLiteConnection.text($0, 1)
         switch key {
         case "initialized": initialized = true
         case "subscription.generation": result.connectionGeneration = value

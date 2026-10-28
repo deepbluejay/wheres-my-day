@@ -68,6 +68,23 @@ final class RecorderPolicyTests: XCTestCase {
     XCTAssertFalse(allowed(front, InputCounts(keys: 1), false, StorageSettings(pausedUntil: 101)))
     XCTAssertTrue(allowed(front, InputCounts(keys: 1), false, StorageSettings(pausedUntil: 100)))
   }
+  func testExclusionAnswerFollowsEveryExclusionSettingsChange() {
+    var settings = StorageSettings(excludedApps: ["invented.secret"])
+    let front = FrontObservation(bundleID: "invented.editor", app: "Invented editor", title: "Invented title", observedAt: 0)
+    XCTAssertFalse(RecorderPolicy.excluded(front, settings: settings))
+    let before = settings
+    settings.excludedApps.append("invented.editor")
+    XCTAssertTrue(RecorderPolicy.excluded(front, settings: settings))
+    // The earlier settings, still in use elsewhere, keep their own answer.
+    XCTAssertFalse(RecorderPolicy.excluded(front, settings: before))
+    // A masked label without an identity excludes every application it may stand for.
+    var masked = StorageSettings(excludedApps: ["invented.[secret]"])
+    XCTAssertTrue(masked.excludesApplication("invented.editor"))
+    // Same label, now with an identity: only that application stays excluded.
+    masked.excludedAppPrivacyIdentities["invented.[secret]"] = [ApplicationPrivacyIdentity.digest("invented.other")]
+    XCTAssertFalse(masked.excludesApplication("invented.editor"))
+    XCTAssertTrue(masked.excludesApplication("INVENTED.OTHER"))
+  }
   func testDocumentKeyUsesObservedAddressIndependentlyOfBrowserHint() {
     var front = FrontObservation(title: "Invented title", document: "file:///invented/folder/item")
     XCTAssertEqual(RecorderPolicy.documentKey(front), "/invented/folder/item")

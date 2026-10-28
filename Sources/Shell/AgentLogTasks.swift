@@ -57,7 +57,11 @@ public final class AgentLogTask {
   // Files whose last read in this process found nothing and wrote nothing, with that read's
   // inputs, valid under `receipts`: the ownership revision, table counts and receipt names then.
   private var unchanged: [String: ReadInputs] = [:]
-  private var receipts: (revision: String, counts: String, names: Set<String>)?
+  private var receipts: (revision: String, counts: String, names: Set<String>, sources: Set<AgentLogToolOwnSource>?)?
+  // Files whose recovery read failed, with that read's inputs. Their next attempt with the
+  // same inputs is not charged to the budget, so files that fail every read cannot starve
+  // the others.
+  private var failedRecovery: [String: ReadInputs] = [:]
   public init(reader: AgentLogReader, storage: AgentLogStorage, git: GitCollectionTask? = nil) {
     self.git = git
     self.reader = reader
@@ -117,19 +121,24 @@ public final class AgentLogTask {
       failure = AgentLogReadError.processUnavailable
     }
     // Read before any file, so a receipt added during the scan makes the next scan read again.
-    let ownership: Bool
+    let ownership: Bool, listed = Set(listing.files.map(\.path))
     do {
-      ownership = try forgetUnchanged(listed: Set(listing.files.map(\.path)))
+      ownership = try forgetUnchanged(listed: listed)
     } catch {
       recordFailure(error)
       throw error
     }
     var recoveryBudget = recoveryBudgetPerScan
-    func recovering(_ position: LogPosition?) -> Bool {
-      position.flatMap { try? AgentLogState.decode($0.state) }?.metadataRecoveryOffset != nil
+    // Only a read that continues the stored position is a recovery read; one that starts over
+    // (another inode, or a shorter file) is not.
+    func recovering(_ position: LogPosition?, _ file: AgentLogFile) -> Bool {
+      AgentLogPolicy.continues(position, file: file)
+        && position.flatMap { try? AgentLogState.decode($0.state) }?.metadataRecoveryOffset != nil
     }
     items["listed"] = listing.files.count
+    lock.lock(); failedRecovery = failedRecovery.filter { listed.contains($0.key) }; lock.unlock()
     for file in listing.files {
+      var attempt: ReadInputs?
       do {
         var position = try storage.logPosition(path: file.path)
         // An unchanged file whose last read found nothing and wrote nothing would read the
@@ -141,12 +150,22 @@ public final class AgentLogTask {
         lock.unlock()
         if skip { items["skipped", default: 0] += 1; continue }
         // A remembered read never ends in recovery, so only files read are decoded here.
-        if recovering(position) && recoveryBudget <= 0 { continue }
+        lock.lock()
+        var retry = failedRecovery[file.path].map { $0 == ReadInputs(file, position: position) } ?? false
+        lock.unlock()
+        if recovering(position, file) && recoveryBudget <= 0 { continue }
         var recoveryBatches = 0, first = true
         while true {
           guard !isStopped, try recordingAllowed(at: time) else { return }
-          if recovering(position) { recoveryBudget -= 1; items["recovery_reads", default: 0] += 1 }
+          attempt = nil
+          if recovering(position, file) {
+            if retry { retry = false } else { recoveryBudget -= 1 }
+            items["recovery_reads", default: 0] += 1
+            attempt = ReadInputs(file, position: position)
+          }
           let batch = try reader.read(file, position: position, at: time)
+          attempt = nil
+          lock.lock(); failedRecovery[file.path] = nil; lock.unlock()
           items["reads", default: 0] += 1
           guard try recordingAllowed(at: time) else { return }
           let result = try storage.appendLogEvents(batch.events, evidence: batch.evidence, position: batch.position)
@@ -206,6 +225,7 @@ public final class AgentLogTask {
         recordFailure(error)
         lock.lock()
         status.fileFailures += 1
+        if let attempt { failedRecovery[file.path] = attempt }
         lock.unlock()
         failure = error
       }
@@ -220,8 +240,9 @@ public final class AgentLogTask {
     try reader.ownershipRevision().flatMap { reader in try storage.agentLogOwnershipRevision().map { reader + "|" + $0 } }
   }
   /// Drops remembered reads that a receipt change may affect, and those of files no longer
-  /// listed. An added receipt name drops only the files whose reads consult it; a change to
-  /// the ownership tables, a removed name or an unknown candidate set drops every file.
+  /// listed. An added receipt name drops only the files whose reads consult it, and an added
+  /// own-source row only the files with its device and inode; any other change to the
+  /// ownership tables, a removed name or an unknown candidate set drops every file.
   /// Returns false when ownership cannot be fingerprinted, so nothing is skipped.
   private func forgetUnchanged(listed: Set<String>) throws -> Bool {
     let revision = try ownershipRevision()
@@ -236,18 +257,33 @@ public final class AgentLogTask {
     if last?.revision == revision { return true }
     let counts = try storage.agentLogOwnershipCounts()
     let names = try reader.ownershipReceipts().flatMap { read in try storage.agentLogOwnershipReceipts().map { read.union($0) } }
+    let sources = try storage.agentLogToolOwnSources()
     // A receipt added while the names were listed could be missed; then every file is read.
     let settled = try ownershipRevision() == revision
     lock.lock()
     defer { lock.unlock() }
-    if settled, let last, let counts, counts == last.counts, let names, last.names.isSubset(of: names) {
+    if settled, let last, let counts, let names, last.names.isSubset(of: names),
+      let addedSources = Self.addedOwnSources(last.counts, last.sources, counts, sources) {
       let added = names.subtracting(last.names)
+      let addedFiles = Set(addedSources.map { [$0.device, $0.inode] })
       unchanged = unchanged.filter { path, inputs in
-        reader.ownershipCandidates(path: path, state: inputs.position.state)?.isDisjoint(with: added) ?? false
+        !addedFiles.contains([inputs.device, inputs.inode]) && !addedFiles.contains([inputs.position.device, inputs.position.inode])
+          && reader.ownershipCandidates(path: path, state: inputs.position.state)?.isDisjoint(with: added) ?? false
       }
     } else { unchanged = [:] }
-    if settled, let counts, let names { receipts = (revision, counts, names) } else { receipts = nil }
+    if settled, let counts, let names { receipts = (revision, counts, names, sources) } else { receipts = nil }
     return true
+  }
+  /// The own-source rows added since, when that is the only change to the ownership tables:
+  /// the baseline and revoked counts are equal and every earlier row is still there. A summary
+  /// call adds one such row for its own transcript. nil means anything else changed.
+  private static func addedOwnSources(_ lastCounts: String, _ last: Set<AgentLogToolOwnSource>?,
+    _ counts: String, _ now: Set<AgentLogToolOwnSource>?) -> Set<AgentLogToolOwnSource>? {
+    let before = lastCounts.split(separator: ":"), after = counts.split(separator: ":")
+    guard before.count == 3, after.count == 3, before[0] == after[0], before[2] == after[2] else { return nil }
+    guard let last, let now else { return lastCounts == counts ? [] : nil }
+    guard last.isSubset(of: now), Int(after[1]) == now.count, Int(before[1]) == last.count else { return nil }
+    return now.subtracting(last)
   }
   /// Checkpoint key order is not stable, so states are compared as JSON objects, as the store does.
   private static func samePosition(_ read: LogPosition, _ stored: LogPosition) -> Bool {

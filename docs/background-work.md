@@ -27,7 +27,11 @@ In the code:
 
 - Each item that can fail or wait has a terminal or parked state.
 - Retries back off.
-- An input that no longer exists stops being worked on.
+- An input that no longer exists stops being worked on. One known exception: a Git
+  folder row that validation refuses (for example, first seen before the retention
+  cutoff, or its source in recovery) is validated again every tick. Remembering a refusal
+  would need every input that can lift it in the digest, Secure Input included; live
+  this costs 3-15 visits per tick.
 - Slow work has a bounded budget per tick, and its progress is saved.
 - Every check sorts an item into one of three outcomes:
   - **ready**: do the work;
@@ -43,7 +47,9 @@ In the code:
   repeats for it. A later listing of the same log resumes it.
 - Metadata recovery reads at most 64 MiB per file and 128 MiB across all files per scan
   (`recoveryBatchesPerScan`, `recoveryBudgetPerScan`). Files still in recovery wait for
-  later scans.
+  later scans. Only a read that continues the stored position counts. A file whose
+  recovery read failed is tried again without charge while its inputs are unchanged, so
+  files that fail every read cannot starve the others.
 - Stopping the recorder ends a running agent-log scan before its next 1 MiB batch, and a
   running Git pass at its next cancellation check.
 - Recording off or paused is checked before and after every batch, and by every Git page
@@ -69,8 +75,12 @@ In the code:
   Receipts are handled like this:
   - An added receipt name rereads only the files whose candidate names contain it: the
     path, the homes above it, sessions in the file name, and the checkpoint's sessions.
-  - A change to the ownership tables (own baseline, own sources, revoked sessions) rereads
-    every file. So does a removed receipt name.
+  - An added own-source row rereads only the files with its device and inode. A summary
+    call adds one for its own transcript, plus two session names no listed log consults,
+    so it rereads at most that transcript.
+  - Any other change to the ownership tables (own baseline, own sources, revoked
+    sessions) rereads every file. So does a removed receipt name.
+  - A receipt registered while the names are listed rereads every file in that scan.
   - The first scan after a start reads every file once.
 - **Git discovery** (`GitCollectionTask.discoverAllowed`). A folder is skipped when its last
   visit passed validation and left nothing to do, and since then these are unchanged:
@@ -86,9 +96,14 @@ In the code:
   - the retention day;
   - discovery tombstones.
 
-  Folders in other states are visited every tick, such as a failed read in backoff. A git
-  init in an unversioned folder changes its walk, so the next tick finds it. One discovery
-  tick shares one read-only database connection.
+  Folders in other states are visited every tick, such as a failed read in backoff, and
+  so are folders that validation refused (section 2). A git init in an unversioned folder
+  changes its walk, so the next tick finds it. One discovery tick shares one read-only
+  database connection.
+- **Summaries** (`SummaryService.plan`). Summaries start from 0, so each pass plans over
+  every stored sample. Planning reads only the time, input counts, keeping awake and
+  exclusion of each sample (`planningSamples`). This cost still grows with what is stored:
+  about 1 s of CPU per pass at 21 invented days.
 
 ## 4. Measure it
 
@@ -105,6 +120,11 @@ In the code:
   | `retention`, `summaries` | `removed`; runs only |
   | `screen_collection`, `sample_collection` | `ocr`, `writes`; `writes` |
 
+- `front_*` counts how the probe gate read the front application since the recorder
+  started: settled checks of the front-process call against NSWorkspace
+  (`front_comparisons`, `front_disagreements`), main-thread answers by cause
+  (`front_fallback_missing_symbol`, `_error`, `_no_identity`, `_changed_during_lookup`),
+  and `front_fast_path_disabled=1` once 3 disagreements in a row turned the call off.
 - The figures sit in a file beside the database, rewritten once per tick. They hold only
   numbers and stage names.
 - After every live deploy, check CPU for at least 30 minutes, across several ticks, before

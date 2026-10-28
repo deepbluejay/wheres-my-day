@@ -69,10 +69,36 @@ public enum ApplicationPrivacyIdentity {
   }
 }
 
+/// The answer depends only on the application and the two exclusion settings, so the gate,
+/// which asks for the same application many times per attempt, reuses it until either changes.
+private final class ExclusionAnswers {
+  static let shared = ExclusionAnswers()
+  private let lock = NSLock()
+  private var apps: [String] = []
+  private var identities: [String: Set<String>] = [:]
+  private var answers: [String: Bool] = [:]
+  func answer(_ bundleID: String, _ settings: StorageSettings, _ compute: () -> Bool) -> Bool {
+    lock.lock(); defer { lock.unlock() }
+    // Unchanged settings share their storage, so these comparisons are usually immediate.
+    if apps != settings.excludedApps || identities != settings.excludedAppPrivacyIdentities { answers = [:] }
+    apps = settings.excludedApps; identities = settings.excludedAppPrivacyIdentities
+    if let known = answers[bundleID] { return known }
+    let value = compute()
+    if answers.count >= 64 { answers = [:] }
+    answers[bundleID] = value
+    return value
+  }
+}
+
 public extension StorageSettings {
   func excludesApplication(_ bundleID: String, identity: String? = nil) -> Bool {
-    let identity = identity ?? ApplicationPrivacyIdentity.digest(bundleID)
-    return excludedApps.contains { excluded in
+    guard let identity else {
+      return ExclusionAnswers.shared.answer(bundleID, self) { excludes(bundleID, identity: ApplicationPrivacyIdentity.digest(bundleID)) }
+    }
+    return excludes(bundleID, identity: identity)
+  }
+  private func excludes(_ bundleID: String, identity: String) -> Bool {
+    excludedApps.contains { excluded in
       let label = excluded.lowercased()
       if (excludedAppPrivacyIdentities[label] ?? [ApplicationPrivacyIdentity.digest(excluded)]).contains(identity) { return true }
       // Older settings retained only the masked label. Keep that conservative

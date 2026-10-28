@@ -9,6 +9,8 @@ import XCTest
 /// delivers invented OCR and AX nodes. No Accessibility API is used.
 final class InventedTraversalScreen: AXProbeScreenSource {
   var gateCalls = 2511
+  /// Called with each gate call's index, so writes can land between gate calls as they do live.
+  var between: (Int) -> Void = { _ in }
   var pending: [() -> Void] = []
   var round = 0
   func invalidateProbe() {}
@@ -19,11 +21,11 @@ final class InventedTraversalScreen: AXProbeScreenSource {
     probeEnd: @escaping (AXProbeResult) -> Void, probeWatchdogOCR: @escaping (AXProbePair, Bool) -> Void, probeRefused: @escaping () -> Void, probeCompletion: @escaping (AXProbePair) -> Void,
     completion: @escaping (SourceReading<String>) -> Void) {
     round += 1
-    let round = self.round, gateCalls = self.gateCalls
+    let round = self.round, gateCalls = self.gateCalls, between = self.between
     pending.append {
       _ = permitted(.beforeImage)
       guard probeBegin() == nil else { completion(.absent(.policyRefused)); return }
-      for _ in 0..<gateCalls { guard probePermitted() else { break } }
+      for index in 0..<gateCalls { between(index); guard probePermitted() else { break } }
       var ax = AXProbeResult(status: .completed)
       // A third of the invented nodes change between captures; the rest deduplicate.
       ax.nodes = (0..<240).map { index in
@@ -51,6 +53,10 @@ final class CollectionCPUTests: XCTestCase {
   /// One tick per second with person input (one observation and one sample per second,
   /// sample batches every 5 s), a screen capture with an AX probe every 15 s, and
   /// ACTIVITYPROBE_COLLECTION_CPU_GATES probe gate calls per capture (default 2511).
+  /// As live, writes land between gate calls: every ACTIVITYPROBE_COLLECTION_CPU_OTHER_EVERY
+  /// calls (default 250) a commit by another connection, as the collection and probe content
+  /// writers make, and every ACTIVITYPROBE_COLLECTION_CPU_OWN_EVERY calls (default 500) a
+  /// counter write through the recorder's own connection. 0 turns either off.
   func testOwnerRateCollectionAndProbeCost() throws {
     let environment = ProcessInfo.processInfo.environment
     try XCTSkipUnless(environment["ACTIVITYPROBE_COLLECTION_CPU"] == "1")
@@ -65,6 +71,14 @@ final class CollectionCPUTests: XCTestCase {
     let clock = FakeClock(), sources = FakeSources(), screen = InventedTraversalScreen()
     sources.clock = clock
     screen.gateCalls = environment["ACTIVITYPROBE_COLLECTION_CPU_GATES"].flatMap(Int.init) ?? 2511
+    let otherEvery = environment["ACTIVITYPROBE_COLLECTION_CPU_OTHER_EVERY"].flatMap(Int.init) ?? 250
+    let ownEvery = environment["ACTIVITYPROBE_COLLECTION_CPU_OWN_EVERY"].flatMap(Int.init) ?? 500
+    let other = try ActivityStorage(url: folder.appendingPathComponent("invented.sqlite"), appDataDirectory: folder, databaseScope: .directory(folder))
+    let runID = try store.settings().axProbeRun!.id
+    screen.between = { index in
+      if otherEvery > 0, index % otherEvery == otherEvery - 1 { try? other.countAXProbeEvent(runID: runID, event: .eligible) }
+      if ownEvery > 0, index % ownEvery == ownEvery - 1 { try? store.countAXProbeEvent(runID: runID, event: .eligible) }
+    }
     let loop = RecorderLoop(clock: clock, input: sources, front: sources, secure: sources, awake: sources,
       screen: screen, storage: store, maintenanceStorage: store, ownBundleID: "invented.own")
     func drain() {
@@ -86,6 +100,9 @@ final class CollectionCPUTests: XCTestCase {
     // Warm-up minute: schema, caches and first blobs are not part of the steady rate.
     for _ in 0..<60 { second() }
     loop.flush(); drain()
+    PolicyReadStats.counting = true
+    defer { PolicyReadStats.counting = false }
+    _ = PolicyReadStats.take()
     let start = Self.cpu(), began = ProcessInfo.processInfo.systemUptime
     for _ in 0..<(minutes * 60) { second() }
     // Busy retries leave ready records in the spool; finish them inside the measurement.
@@ -93,6 +110,7 @@ final class CollectionCPUTests: XCTestCase {
     for _ in 0..<200 where spooled() > 0 { loop.flush(); Thread.sleep(forTimeInterval: 0.01) }
     loop.flush(); drain()
     let cpu = Self.cpu() - start, wall = ProcessInfo.processInfo.systemUptime - began
+    let reads = PolicyReadStats.take().sorted { $0.key < $1.key }.map { "\($0.key):\($0.value.hits)/\($0.value.hits + $0.value.misses)" }
     loop.stop(); drain()
     let attempts = try store.connection.integer("SELECT count(*) FROM ax_probe_attempts WHERE json_extract(payload,'$.ax.status')='completed'")
     let observations = try store.connection.integer("SELECT count(*) FROM sample_observations")
@@ -101,7 +119,7 @@ final class CollectionCPUTests: XCTestCase {
     try store.connection.rows("SELECT s||':'||count(*) FROM (SELECT json_extract(payload,'$.ax.status') AS s FROM ax_probe_attempts) GROUP BY s") { statuses.append(SQLiteConnection.text($0, 0)) }
     let spool = spooled()
     print("COLLECTION-CPU statuses=\(statuses) spool=\(spool) health=\(loop.health)")
-    let line = "COLLECTION-CPU minutes=\(minutes) gates=\(screen.gateCalls) cpuSeconds=\(cpu) cpuPerMinute=\(cpu / Double(minutes)) wall=\(wall) completedProbes=\(attempts) observations=\(observations) evidence=\(evidence)"
+    let line = "COLLECTION-CPU minutes=\(minutes) gates=\(screen.gateCalls) cpuSeconds=\(cpu) cpuPerMinute=\(cpu / Double(minutes)) wall=\(wall) completedProbes=\(attempts) observations=\(observations) evidence=\(evidence) policyHits=\(reads)"
     print(line)
     if let log = environment["ACTIVITYPROBE_COLLECTION_CPU_LOG"] {
       try? (line + "\n").appendingFile(log)

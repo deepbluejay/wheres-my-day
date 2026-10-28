@@ -1,7 +1,13 @@
 import Foundation
 
 public protocol SummaryStorage: SummaryTimelineReader, SampleReader, EvidenceReader, IntervalReader, IntervalWriter,
-  ModelCallStore, SettingsStore, ForgottenRangeReader {}
+  ModelCallStore, SettingsStore, ForgottenRangeReader {
+  /// The samples a plan reads, with what it uses: time, input counts, keeping awake, exclusion.
+  func planningSamples(in range: TimeRange) throws -> [TimeSample]
+}
+extension SummaryStorage {
+  public func planningSamples(in range: TimeRange) throws -> [TimeSample] { try samples(in: range) }
+}
 
 public struct SummaryAnswer {
   public var text: String
@@ -382,7 +388,7 @@ public final class SummaryService {
     let range = TimeRange(start, end)
     let calls = try storage.modelCalls(in: TimeRange(Int.min + 1, Int.max))
     let existingRanges = try storage.intervals(in: range).map(\.range)
-    return SummaryPolicy.plan(samples: try storage.samples(in: TimeRange(start - RestPolicy.inputAgeSeconds - 1, end)), forgotten: try storage.forgottenRanges(in: range),
+    return SummaryPolicy.plan(samples: try storage.planningSamples(in: TimeRange(start - RestPolicy.inputAgeSeconds - 1, end)), forgotten: try storage.forgottenRanges(in: range),
       through: end, completed: calls.filter { !$0.pending }.map(\.range) + existingRanges, requested: requested, from: start)
   }
   public func summarize(from start: Int, through end: Int, dayStart: Int, locale: String, requested: Bool = false, at now: Int? = nil) throws {

@@ -10,6 +10,8 @@ import XCTest
 final class PausingAppendStorage: AgentLogStorage {
   let store: ActivityStorage
   var pauseOnAppend: String?
+  /// Runs once, right after the store's receipt names were listed.
+  var afterReceiptListing: (() throws -> Void)?
   init(_ store: ActivityStorage) { self.store = store }
   func settings() throws -> StorageSettings { try store.settings() }
   func saveSettings(_ settings: StorageSettings) throws { try store.saveSettings(settings) }
@@ -19,7 +21,12 @@ final class PausingAppendStorage: AgentLogStorage {
   func prepareAgentLogCollection() throws { try store.prepareAgentLogCollection() }
   func agentLogOwnershipRevision() throws -> String? { try store.agentLogOwnershipRevision() }
   func agentLogOwnershipCounts() throws -> String? { try store.agentLogOwnershipCounts() }
-  func agentLogOwnershipReceipts() throws -> Set<String>? { try store.agentLogOwnershipReceipts() }
+  func agentLogOwnershipReceipts() throws -> Set<String>? {
+    let names = try store.agentLogOwnershipReceipts()
+    if let hook = afterReceiptListing { afterReceiptListing = nil; try hook() }
+    return names
+  }
+  func agentLogToolOwnSources() throws -> Set<AgentLogToolOwnSource>? { try store.agentLogToolOwnSources() }
   func appendLogBatch(_ evidence: [EvidenceText], position: LogPosition) throws -> AppendResult {
     try appendLogEvents([], evidence: evidence, position: position)
   }
@@ -137,6 +144,35 @@ extension GitCollectionTests {
     XCTAssertEqual(try discoveryTick(now + 3600).visits, 0)
   }
 
+  /// The review's mutations of the skip's inputs: each change below must revisit the folder.
+  func testDiscoveryRevisitsAFolderWhoseCheckpointBecameOwn() throws {
+    try commit(); try observe(repo)
+    XCTAssertEqual(try discoveryTick(now + 300).visits, 1)
+    XCTAssertEqual(try discoveryTick(now + 600).visits, 0)
+    // Its source's checkpoint now says the folder is this app's own working folder.
+    let (_, folder, _) = try XCTUnwrap(store.nextGitFolder(after: 0))
+    var state = AgentLogState(); state.tool = "claude"; state.ownWorkingFolder = true
+    try store.connection.run("INSERT OR REPLACE INTO log_positions(path,device,inode,offset,state,seen_ts) VALUES(?,?,?,0,?,?)",
+      [.key(folder.physicalSource.storedKey), .integer(folder.device), .integer(folder.inode), .key(try state.encoded()), .integer(now)])
+    XCTAssertEqual(try discoveryTick(now + 900).visits, 1)
+    XCTAssertEqual(try count("git_working_folders"), 0)
+  }
+  func testDiscoveryRevisitsEveryFolderAfterATombstone() throws {
+    try commit(); try observe(repo)
+    XCTAssertEqual(try discoveryTick(now + 300).visits, 1)
+    XCTAssertEqual(try discoveryTick(now + 600).visits, 0)
+    try store.connection.run("INSERT INTO git_discovery_tombstones(hash) VALUES(?)", [.key(String(repeating: "ab", count: 32))])
+    XCTAssertEqual(try discoveryTick(now + 900).visits, 1)
+  }
+  func testDiscoveryRevisitsEveryFolderAfterARetentionChange() throws {
+    try commit(); try observe(repo)
+    XCTAssertEqual(try discoveryTick(now + 300).visits, 1)
+    XCTAssertEqual(try discoveryTick(now + 600).visits, 0)
+    var settings = try store.settings(); settings.promptRetentionDays += 7
+    try store.saveSettings(settings, at: now + 650)
+    XCTAssertEqual(try discoveryTick(now + 900).visits, 1)
+  }
+
   /// Each validation opened its own read-only connection, about a fifth of its cost. One
   /// discovery tick now shares one.
   func testDiscoveryTickOpensOneSourceSnapshot() throws {
@@ -203,6 +239,89 @@ extension GitCollectionTests {
 }
 
 extension GitCollectionTests {
+  /// A remembered read is narrowed by every session its checkpoint names, including the
+  /// session the ownership lookahead found ahead of the ordinary read.
+  func testReceiptForTheLookaheadSessionRereadsThatLog() throws {
+    let url = try cpuFixtureLog("invented-lookahead", records: cpuRecords(5, session: "invented-lookahead", folder: repo, base: now - 900))
+    let reader = CountingReads(ClaudeAgentLogReader(userHome: root.path, processes: InventedProcesses(), appDataDirectory: root))
+    let logsTask = AgentLogTask(reader: reader, storage: store)
+    try work { try logsTask.scan(at: self.now) }
+    let path = url.resolvingSymlinksInPath().path
+    var position = try XCTUnwrap(store.logPosition(path: path))
+    var state = try AgentLogState.decode(position.state)
+    let lookahead = try XCTUnwrap(AgentLogIdentity.decoded("invented-lookahead-only").session.subject)
+    state.ownershipSession = lookahead
+    position.state = try state.encoded()
+    try store.saveLogPosition(position)
+    try work { try logsTask.scan(at: self.now + 300) }
+    try work { try logsTask.scan(at: self.now + 600) }
+    reader.reads = 0
+    try work { try logsTask.scan(at: self.now + 900) }
+    XCTAssertEqual(reader.reads, 0, "the read is remembered")
+    XCTAssertEqual(try AgentLogState.decode(try XCTUnwrap(store.logPosition(path: path)).state).ownershipSession, lookahead)
+    try AgentLogFiles.ownSources(appDataDirectory: root).registerSession(AgentLogIdentity.decoded("invented-lookahead-only"), tool: .claude)
+    try work { try logsTask.scan(at: self.now + 1200) }
+    XCTAssertEqual(reader.reads, 1)
+  }
+
+  /// A receipt registered after the names were listed is not among them; that scan reads
+  /// every log, so its purge is not left for a later scan.
+  func testReceiptAddedWhileNamesAreListedRereadsEveryLogInThatScan() throws {
+    var urls: [URL] = []
+    for index in 0..<3 {
+      urls.append(try cpuFixtureLog("invented-race-\(index)", records: cpuRecords(5, session: "invented-race-\(index)", folder: repo, base: now - 900)))
+    }
+    let storage = PausingAppendStorage(store)
+    let reader = CountingReads(ClaudeAgentLogReader(userHome: root.path, processes: InventedProcesses(), appDataDirectory: root))
+    let logsTask = AgentLogTask(reader: reader, storage: storage)
+    try work { try logsTask.scan(at: self.now) }
+    try work { try logsTask.scan(at: self.now + 300) }
+    XCTAssertEqual(try count("agent_log_events"), 15)
+    reader.reads = 0
+    let registry = AgentLogFiles.ownSources(appDataDirectory: root)
+    try registry.registerSession(AgentLogIdentity.decoded("invented-race-unrelated"), tool: .claude)
+    storage.afterReceiptListing = { try registry.registerPath(urls[1], tool: .claude) }
+    try work { try logsTask.scan(at: self.now + 600) }
+    XCTAssertNil(storage.afterReceiptListing)
+    XCTAssertEqual(reader.reads, 3)
+    XCTAssertEqual(try count("agent_log_events"), 10)
+  }
+
+  /// A summary call's owned read of its own transcript adds an own-source row, and any count
+  /// change reread every listed log (4-6 s CPU live). Only logs with that row's device and
+  /// inode are read now; any other change to the table still reads every log.
+  func testNewOwnSourceRowRereadsOnlyTheLogWithItsIdentity() throws {
+    var urls: [URL] = []
+    for index in 0..<4 {
+      urls.append(try cpuFixtureLog("invented-own-\(index)", records: cpuRecords(5, session: "invented-own-\(index)", folder: repo, base: now - 900)))
+    }
+    let reader = CountingReads(ClaudeAgentLogReader(userHome: root.path, processes: InventedProcesses(), appDataDirectory: root))
+    let logsTask = AgentLogTask(reader: reader, storage: store)
+    try work { try logsTask.scan(at: self.now) }
+    try work { try logsTask.scan(at: self.now + 300) }
+    reader.reads = 0
+    func addOwnSource(device: Int, inode: Int, path: String) throws {
+      try store.connection.run("INSERT INTO agent_log_tool_own_sources VALUES('claude',?,?,?)", [.integer(device), .integer(inode), .key(path)])
+    }
+    // As a summary call's transcript: a file no listed log is.
+    try addOwnSource(device: 1, inode: 424242, path: "/invented/summary.jsonl")
+    try work { try logsTask.scan(at: self.now + 600) }
+    XCTAssertEqual(reader.reads, 0)
+    // A row with a listed log's identity: that log is read again, and only it.
+    let position = try XCTUnwrap(store.logPosition(path: urls[2].resolvingSymlinksInPath().path))
+    try addOwnSource(device: position.device, inode: position.inode, path: "/invented/other-name.jsonl")
+    try work { try logsTask.scan(at: self.now + 900) }
+    XCTAssertEqual(reader.reads, 1)
+    // A removed row is not an addition: every log is read.
+    try work { try logsTask.scan(at: self.now + 1200) }
+    reader.reads = 0
+    try store.connection.run("DELETE FROM agent_log_tool_own_sources WHERE inode=424242")
+    try work { try logsTask.scan(at: self.now + 1500) }
+    XCTAssertEqual(reader.reads, 4)
+  }
+}
+
+extension GitCollectionTests {
   /// S3: the recovery bound was per file, so after a metadata version change every listed
   /// file would recover up to 64 MiB in one tick, about 0.15 s CPU per MiB. A scan now has
   /// one budget across all files; the rest go on at later scans.
@@ -229,6 +348,32 @@ extension GitCollectionTests {
     XCTAssertEqual(try count("log_positions", recovering), 3)
     for tick in 2...12 { try work { try logsTask.scan(at: self.now + tick * 300) } }
     XCTAssertEqual(try count("log_positions", recovering), 0)
+  }
+
+  /// A file in recovery whose read fails every scan spent one budget unit each scan, so
+  /// enough of them earlier in path order starved every later file. Its retry is now free.
+  func testRecoveryThatFailsEveryReadDoesNotStarveLaterFiles() throws {
+    let reader = ClaudeAgentLogReader(userHome: root.path, processes: InventedProcesses(), appDataDirectory: root)
+    let padding = String(repeating: "x", count: AgentLogFiles.batchBytes)
+    var urls: [URL] = []
+    for name in ["invented-a-unreadable", "invented-b-kept"] {
+      let records: [[String: Any]] = (0..<3).map { ["type": "assistant", "timestamp": now - 100 + $0, "sessionId": name,
+        "cwd": repo.path, "message": ["role": "assistant", "content": padding]] }
+      urls.append(try cpuFixtureLog(name, records: records))
+    }
+    try work { try AgentLogTask(reader: reader, storage: self.store).scan(at: self.now) }
+    for url in urls {
+      try store.connection.run("UPDATE log_positions SET state=json_set(state,'$.metadataRecoveryOffset',0) WHERE path=?",
+        [.key(AgentLogIdentity.decodedPath(url.resolvingSymlinksInPath().path))])
+    }
+    try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: urls[0].path)
+    defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: urls[0].path) }
+    let recovering = "json_extract(state,'$.metadataRecoveryOffset') IS NOT NULL"
+    let logsTask = AgentLogTask(reader: reader, storage: store)
+    logsTask.recoveryBudgetPerScan = 1
+    for tick in 1...8 { try? work { try logsTask.scan(at: self.now + tick * 300) } }
+    XCTAssertGreaterThan(logsTask.health.fileFailures, 0)
+    XCTAssertEqual(try count("log_positions", recovering), 1, "only the unreadable file is still in recovery")
   }
 
   /// S3: nothing could end a scan; the recorder's stop waited for all of it. Stop now ends

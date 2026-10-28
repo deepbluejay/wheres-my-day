@@ -436,10 +436,20 @@ public protocol AgentLogStorage: SettingsStore, LogPositionStore, LogBatchWriter
   func agentLogOwnershipCounts() throws -> String?
   /// The hash-only receipt names in the store's registry; nil when unknown.
   func agentLogOwnershipReceipts() throws -> Set<String>?
+  /// The rows of agent_log_tool_own_sources, the path as a digest; nil when unknown.
+  func agentLogToolOwnSources() throws -> Set<AgentLogToolOwnSource>?
 }
 extension AgentLogStorage {
   public func prepareAgentLogCollection() throws {}
   public func agentLogOwnershipRevision() throws -> String? { nil }
   public func agentLogOwnershipCounts() throws -> String? { nil }
   public func agentLogOwnershipReceipts() throws -> Set<String>? { nil }
+  public func agentLogToolOwnSources() throws -> Set<AgentLogToolOwnSource>? { nil }
+}
+/// A file this app's own tool run wrote. An append consults it by the file's device and inode.
+public struct AgentLogToolOwnSource: Hashable {
+  public let tool: String, device: Int, inode: Int, pathDigest: String
+  public init(tool: String, device: Int, inode: Int, pathDigest: String) {
+    self.tool = tool; self.device = device; self.inode = inode; self.pathDigest = pathDigest
+  }
 }

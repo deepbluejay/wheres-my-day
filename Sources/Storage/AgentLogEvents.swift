@@ -146,6 +146,18 @@ extension ActivityStorage {
     }.map(String.init).joined(separator: ":")
   }
   public func agentLogOwnershipReceipts() throws -> Set<String>? { Set(try ownLogSources().inventory()) }
+  public func agentLogToolOwnSources() throws -> Set<AgentLogToolOwnSource>? {
+    try locked {
+      guard try connection.integer("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='agent_log_tool_own_sources'") == 1 else { return nil }
+      var sources = Set<AgentLogToolOwnSource>()
+      try connection.rows("SELECT tool, device, inode, path FROM agent_log_tool_own_sources") {
+        let path = SQLiteConnection.text($0, 3)
+        sources.insert(AgentLogToolOwnSource(tool: SQLiteConnection.text($0, 0), device: SQLiteConnection.int($0, 1), inode: SQLiteConnection.int($0, 2),
+          pathDigest: SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()))
+      }
+      return sources
+    }
+  }
   func ownLogSources() -> AgentLogOwnSources {
     AgentLogOwnSources(appDataDirectory: appDataDirectory, digest: {
       SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined()
