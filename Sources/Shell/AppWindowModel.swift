@@ -4,32 +4,6 @@ import Outbound
 import Storage
 import SwiftUI
 
-public enum AppWindowTarget: Equatable {
-  case timeline, conversation, settings(SettingsSection)
-  public init?(arguments: [String]) {
-    switch arguments {
-    case [], ["timeline"]: self = .timeline
-    case ["agent-window"]: self = .conversation
-    case ["settings"]: self = .settings(.recording)
-    default:
-      guard arguments.count == 2, arguments[0] == "settings", let section = SettingsSection(rawValue: arguments[1]) else { return nil }
-      self = .settings(section)
-    }
-  }
-  var line: String {
-    switch self {
-    case .timeline: return "timeline"
-    case .conversation: return "agent-window"
-    case .settings(let section): return "settings " + section.rawValue
-    }
-  }
-  init?(line: String) {
-    let arguments = line.split(separator: " ").map(String.init)
-    guard !arguments.isEmpty else { return nil }
-    self.init(arguments: arguments)
-  }
-}
-
 /// Width is a per-window preference. Shrinking the window clamps its display, not the preference.
 public struct AppWindowLayout {
   public static let minimumTimeline = 360.0

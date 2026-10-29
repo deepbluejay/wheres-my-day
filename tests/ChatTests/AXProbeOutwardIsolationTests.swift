@@ -1,5 +1,6 @@
 import Core
 import Foundation
+import Query
 import Shell
 import Storage
 import XCTest

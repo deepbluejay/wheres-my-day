@@ -14,6 +14,19 @@ for argument in "$@"; do
 done
 if [ "${#ARGS[@]}" -gt 0 ]; then set -- "${ARGS[@]}"; else set -- status; fi
 
+# The source a bundle is built from: HEAD and the tree of every tracked and untracked file, read through
+# a private index so the real one is untouched. The checking tools compare it with the source they check.
+source_state() {
+  local head tree folder
+  if ! head=$(git rev-parse --verify -q HEAD 2>/dev/null); then echo 'commit=unknown'; return; fi
+  folder=$(mktemp -d "${TMPDIR:-/tmp}/probe-index.XXXXXX")
+  GIT_INDEX_FILE="$folder/index" git read-tree HEAD
+  GIT_INDEX_FILE="$folder/index" git add -A
+  tree=$(GIT_INDEX_FILE="$folder/index" git write-tree)
+  rm -rf "$folder"
+  printf 'commit=%s\ntree=%s\ndirty=%s\n' "$head" "$tree" "$([ "$tree" = "$(git rev-parse 'HEAD^{tree}')" ] && echo 0 || echo 1)"
+}
+
 build() (
   mkdir -p build
   # Keep the descriptor open in this subshell, including while recovering abandoned stages.
@@ -27,18 +40,25 @@ build() (
   elif [ -n "${SIGNING_IDENTITY:-}" ] && [ "$SIGNING_IDENTITY" != - ]; then
     identity="$SIGNING_IDENTITY"
   else
-    rm -rf "$APP"
+    rm -rf "$APP" build/.bundle-commit
     echo 'Set SIGNING_IDENTITY explicitly, or use --adhoc for isolated development.' >&2
     exit 2
   fi
   # Dependencies come first: a remote that cannot be read stops here and changes nothing, so the
   # bundle already built stays. Nothing below runs, and the command exits without launching it.
-  swift package resolve
+  local resolved=0
+  swift package resolve || resolved=$?
+  if [ "$resolved" -ne 0 ]; then
+    echo 'Dependencies did not resolve: previous bundle kept, not rebuilt.' >&2
+    exit "$resolved"
+  fi
+  local source
+  source=$(source_state)
   # From here an unsuccessful attempt must never leave an older bundle available to launch.
-  rm -rf "$APP"
+  rm -rf "$APP" build/.bundle-commit
 
   STAGE=$(mktemp -d build/.bundle.XXXXXX)
-  trap 'result=$?; rm -rf "$STAGE"; if [ "$result" -ne 0 ]; then rm -rf "$APP"; fi; exit "$result"' EXIT
+  trap 'result=$?; rm -rf "$STAGE"; if [ "$result" -ne 0 ]; then rm -rf "$APP" build/.bundle-commit; fi; exit "$result"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
   trap 'exit 129' HUP
@@ -64,6 +84,7 @@ build() (
   codesign --verify --strict "$helper"
   codesign --verify --strict "$bundle"
   mv "$bundle" "$APP"
+  printf '%s\n' "$source" > build/.bundle-commit
   rm -rf "$STAGE"
   trap - EXIT INT TERM HUP
 )

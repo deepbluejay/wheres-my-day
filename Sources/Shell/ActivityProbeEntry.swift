@@ -7,8 +7,30 @@ import Storage
 
 public enum ActivityProbeEntry {
   /// Production and isolated routes share the same database-open boundary and composition.
+  /// The window is the only branch that may ever reach the account layer. The recorder and every command
+  /// start in `background`, and a build check follows every reference from the process start to confirm that.
   public static func run(arguments: [String], environment: [String: String], userHome: URL, appBinary: URL,
     adapters: RecorderAdapters = .mac) -> Int32 {
+    if let window = windowRequest(arguments: arguments, environment: environment, userHome: userHome, appBinary: appBinary) {
+      let reopen = window.arguments == AppWindowReopen.arguments
+      let target = reopen ? .timeline : AppWindowTarget(arguments: window.arguments)
+      return AppWindowEntry.run(paths: window.paths, target: target, reopen: reopen,
+        codex: .installed("codex", environment: environment, home: userHome.path),
+        claude: .installed("claude", environment: environment, home: userHome.path), environment: environment, isolated: arguments.contains("--isolated-root"))
+    }
+    return background(arguments: arguments, environment: environment, userHome: userHome, appBinary: appBinary, adapters: adapters)
+  }
+  /// Arguments that parse into a Dock presentation, outside the commands decided before any parsing.
+  static func windowRequest(arguments: [String], environment: [String: String], userHome: URL,
+    appBinary: URL) -> (arguments: [String], paths: AppPaths)? {
+    guard !["launch-agent", "convert", "collect"].contains(arguments.first ?? ""), arguments != ["privacy", "mask"],
+      let parsed = try? command(arguments: arguments, environment: environment, userHome: userHome, appBinary: appBinary),
+      ProcessPresentation.mode(arguments: parsed.arguments) == .dock else { return nil }
+    return parsed
+  }
+  /// The recorder and every command: never the window, so never the account layer.
+  static func background(arguments: [String], environment: [String: String], userHome: URL, appBinary: URL,
+    adapters: RecorderAdapters) -> Int32 {
     if arguments.first == "launch-agent" {
       let result = LaunchAgentCommand.run(Array(arguments.dropFirst()), userHome: userHome)
       if !result.output.isEmpty { print(result.output) }; return result.status
@@ -24,13 +46,6 @@ public enum ActivityProbeEntry {
     if arguments.first != "collect" {
       do {
         let parsed = try command(arguments: arguments, environment: environment, userHome: userHome, appBinary: appBinary)
-        if ProcessPresentation.mode(arguments: parsed.arguments) == .dock {
-          let reopen = parsed.arguments == AppWindowReopen.arguments
-          let target = reopen ? .timeline : AppWindowTarget(arguments: parsed.arguments)
-          return AppWindowEntry.run(paths: parsed.paths, target: target, reopen: reopen,
-            codex: .installed("codex", environment: environment, home: userHome.path),
-            claude: .installed("claude", environment: environment, home: userHome.path), environment: environment, isolated: arguments.contains("--isolated-root"))
-        }
         let input = parsed.arguments == ["privacy", "verdicts"] ? FileHandle.standardInput.readDataToEndOfFile() : Data()
         let applications = parsed.arguments == ["privacy", "verdicts"] ? try RetainedCommands.applicationIdentities(paths: parsed.paths) : []
         let result = RetainedCommands.run(parsed.arguments, paths: parsed.paths, input: input, applications: applications)

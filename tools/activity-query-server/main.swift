@@ -1,6 +1,6 @@
 import Core
 import Foundation
-import Shell
+import Query
 import Storage
 
 let environment = ProcessInfo.processInfo.environment

@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import Inbound
 @testable import Outbound
+import Query
 import Shell
 import Storage
 import XCTest

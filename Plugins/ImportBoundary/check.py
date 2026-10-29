@@ -68,6 +68,9 @@ def imported_modules(source):
     return IMPORTS.findall(without_comments_and_strings(source))
 
 
+# The query helper's server and executable never link the app's wiring, even if Shell were declared for them.
+SHELL_FREE = {"Query", "ActivityQueryServer"}
+
 
 
 def check_sources(target, modules, allowed, sources):
@@ -76,6 +79,8 @@ def check_sources(target, modules, allowed, sources):
         for module in imported_modules(pathlib.Path(source).read_text(encoding="utf-8")):
             if target == "Core" and module != "Foundation":
                 raise ValueError(f"Core may import only Foundation; found {module}")
+            if target in SHELL_FREE and module == "Shell":
+                raise ValueError(f"{target} may not import Shell; the query helper stays out of the app's wiring")
             if module in forbidden:
                 raise ValueError(
                     f"{target} may not import {module}; declare only permitted package dependencies"

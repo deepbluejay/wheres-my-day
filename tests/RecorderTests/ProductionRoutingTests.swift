@@ -46,7 +46,8 @@ final class ProductionRoutingTests: XCTestCase {
       databaseScope: configuration.paths.databaseScope)
     _ = try store.patchSettings(.edit(.recording(false), ownBundleID: AppPaths.bundleID, now: 100))
     XCTAssertFalse(try configuration.composition().recordingEnabledAtStartup())
-    XCTAssertEqual(ActivityProbeEntry.run(arguments: ["collect"], environment: [:], userHome: home, appBinary: binary), 0)
+    XCTAssertEqual(ActivityProbeEntry.run(arguments: ["collect"], environment: [:], userHome: home, appBinary: binary,
+      adapters: .refusing("the disabled collect")), 0)
     XCTAssertEqual(ActivityProbeEntry.run(arguments: ["status"], environment: [:], userHome: home, appBinary: binary), 0)
   }
   // Ideal: a plain swift test invocation protects the real home, even with an explicit override.

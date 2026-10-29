@@ -33,16 +33,6 @@ final class AppWindowHealthSource {
   }
 }
 
-/// Answer to a Dock click: an open window comes forward as it is; otherwise the timeline opens.
-enum AppWindowReopen: Equatable {
-  case focus
-  case open(AppWindowTarget)
-  /// An open of the app that reached the recorder comes to the window process as this request.
-  static let line = "reopen"
-  static let arguments = [line]
-  static func route(windowOpen: Bool) -> AppWindowReopen { windowOpen ? .focus : .open(.timeline) }
-}
-
 /// One persistent Dock process owns the menu. The actual window/model is lazy and disposable.
 /// Background menu requests never create a window, permission source, conversation or login client.
 @MainActor final class AppWindowHost: NSObject, NSWindowDelegate, NSApplicationDelegate {

@@ -98,6 +98,20 @@ internal import Foundation.NSObject
                 check_sources("Storage", modules, ["Core", "Storage"], ["fixture.swift"])
             check_sources("Storage", modules, ["Core", "Storage", "VendorKit"], ["fixture.swift"])
 
+    def test_query_target_never_imports_shell_even_when_declared(self):
+        modules = ["Core", "Storage", "Inbound", "Outbound", "Shell", "Query", "ActivityQueryServer"]
+        for target in ["Query", "ActivityQueryServer"]:
+            for text in ["import Shell", "@testable import Shell", "@_exported import Shell"]:
+                with self.subTest(target=target, text=text), \
+                        patch.object(pathlib.Path, "read_text", return_value=f"import Core\n{text}"):
+                    with self.assertRaisesRegex(ValueError, f"{target} may not import Shell; the query helper"):
+                        check_sources(target, modules, modules, ["fixture.swift"])
+        with patch.object(pathlib.Path, "read_text", return_value="import Core\nimport Darwin\nimport Foundation\nimport Outbound"):
+            check_sources("Query", modules, ["Core", "Outbound", "Query"], ["fixture.swift"])
+        # The rule is the query target's own: Shell itself and the executables may still import Shell.
+        with patch.object(pathlib.Path, "read_text", return_value="import Shell"):
+            check_sources("ActivityProbe", modules, ["Shell", "ActivityProbe"], ["fixture.swift"])
+
 
 
 if __name__ == "__main__":

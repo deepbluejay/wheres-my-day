@@ -1,7 +1,7 @@
 import Core
 import Darwin
 import Foundation
-import Shell
+import Query
 import XCTest
 
 extension QueryTests {

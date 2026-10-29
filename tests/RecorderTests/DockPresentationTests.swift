@@ -86,7 +86,7 @@ final class DockPresentationTests: XCTestCase {
     let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     var files = ["Sources/Shell/ActivityProbeEntry.swift", "Sources/Shell/RecorderLifecycle.swift", "Sources/Shell/RecorderLoop.swift",
       "Sources/Shell/RecorderStartup.swift", "Sources/Shell/RecorderControl.swift", "Sources/Shell/RetainedCommands.swift",
-      "Sources/Shell/ConversionCommand.swift", "Sources/Shell/ActivityQueryServer.swift", "tools/activity-query-server/main.swift",
+      "Sources/Shell/ConversionCommand.swift", "Sources/Query/ActivityQueryServer.swift", "tools/activity-query-server/main.swift",
       "Sources/Shell/LaunchAgent.swift", "Sources/Shell/StorageCommandTests.swift", "Sources/Shell/SummaryTask.swift",
       "Sources/Shell/SecurityHealthTask.swift", "Sources/Shell/AgentLogTasks.swift", "Sources/Shell/CommandSupport.swift",
       "Sources/Shell/AppPaths.swift", "Sources/Shell/RecorderWindowLauncher.swift",

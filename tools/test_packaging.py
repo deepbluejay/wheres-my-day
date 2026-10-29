@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -178,20 +179,65 @@ class PackagingTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assert_no_bundle_or_launch()
 
-    # Ideal: a dependency that cannot be resolved stops before the bundle is touched, and nothing launches.
+    # Ideal: a dependency that cannot be resolved stops before the bundle is touched, and nothing launches:
+    # not the recorder, not a command, not a launch agent install. It says the old bundle is still there,
+    # and that bundle keeps the record of the older source it was built from.
     def test_failed_resolve_keeps_previous_bundle_and_launches_nothing(self):
-        for command in ('build', 'start', 'status'):
+        record = self.root / 'build/.bundle-commit'
+        for command in (('build',), ('start',), ('status',), ('launch-agent', 'install', '/invented/ActivityProbe', '--live-switch')):
             with self.subTest(command=command):
                 (self.root / 'events').unlink(missing_ok=True)
                 self.seed_stale_bundle()
+                record.write_text('commit=invented-older\n')
                 (self.root / 'build/.bundle.abandoned').mkdir()
-                result = self.run_wrapper(command, '--adhoc', failure='resolve')
+                result = self.run_wrapper(*command, '--adhoc', failure='resolve')
                 self.assertEqual(result.returncode, 46)
+                self.assertIn('previous bundle kept, not rebuilt', result.stderr)
                 self.assertEqual(self.events(), [['swift', 'package', 'resolve']])
                 self.assertTrue((self.app / 'obsolete-file').exists())
+                self.assertEqual(record.read_text(), 'commit=invented-older\n')
                 self.assertFalse((self.root / 'ran').exists())
                 self.assertFalse((self.root / 'opened').exists())
                 self.assertEqual(list((self.root / 'build').glob('.bundle.*')), [])
+
+    # Ideal: a finished bundle records the source it was built from, an unfinished one leaves no record,
+    # and the checking tools accept a bundle only for the source it records.
+    def test_bundle_records_its_source_and_checks_refuse_another(self):
+        record = self.root / 'build/.bundle-commit'
+        self.assertEqual(self.run_wrapper('build', '--adhoc').returncode, 0)
+        self.assertEqual(record.read_text(), 'commit=unknown\n', 'outside Git the source is unknown')
+        (self.root / '.gitignore').write_text('fake-bin/\nevents\nproducts/\nbuild/\n')
+        git = ['git', '-C', str(self.root), '-c', 'user.name=Invented', '-c', 'user.email=invented@example.invalid']
+        for arguments in (['init', '-q'], ['add', '-A'], ['commit', '-qm', 'invented']):
+            subprocess.run(git + arguments, check=True, capture_output=True)
+        head = subprocess.run(git + ['rev-parse', 'HEAD'], check=True, capture_output=True, text=True).stdout.strip()
+        tree = subprocess.run(git + ['rev-parse', 'HEAD^{tree}'], check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(self.run_wrapper('build', '--adhoc').returncode, 0)
+        self.assertEqual(record.read_text(), f'commit={head}\ntree={tree}\ndirty=0\n')
+        sys.path.insert(0, str(ROOT / 'tools'))
+        from bundle_source import problems
+        self.assertEqual(problems(self.app, self.root), [])
+        # An uncommitted edit or a new untracked file is a different source until the bundle is built again.
+        (self.root / 'Info.plist').write_text('invented edit')
+        self.assertTrue(problems(self.app, self.root))
+        self.assertEqual(self.run_wrapper('build', '--adhoc').returncode, 0)
+        self.assertIn('dirty=1', record.read_text())
+        self.assertEqual(problems(self.app, self.root), [])
+        untracked = self.root / 'invented-untracked.swift'
+        untracked.write_text('// invented')
+        self.assertTrue(problems(self.app, self.root))
+        # Built with the untracked file, the record covers it, and losing the file is a different source again.
+        self.assertEqual(self.run_wrapper('build', '--adhoc').returncode, 0)
+        self.assertEqual(problems(self.app, self.root), [])
+        untracked.unlink()
+        self.assertTrue(problems(self.app, self.root))
+        self.assertEqual(self.run_wrapper('build', '--adhoc').returncode, 0)
+        subprocess.run(git + ['commit', '-qam', 'invented edit'], check=True, capture_output=True)
+        self.assertTrue(problems(self.app, self.root), 'a new commit with the same tree is still another source')
+        # A build that fails after resolution removes the bundle and its record together.
+        self.assertNotEqual(self.run_wrapper('build', '--adhoc', failure='sign-app').returncode, 0)
+        self.assertFalse(record.exists())
+        self.assertTrue(problems(self.app, self.root))
 
     def test_missing_identity_and_implicit_adhoc_are_refused_before_tools(self):
         for identity in (None, '', '-'):
@@ -224,6 +270,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual([Path(call[-1]).name for call in signs],
                          ['ActivityQueryServer', 'ActivityProbe.app', 'ActivityQueryServer', 'ActivityProbe.app'])
         self.assertFalse((self.root / 'ran').exists())
+
 
     def test_explicit_identity_is_passed_without_discovery(self):
         result = self.run_wrapper('build', identity='Invented signing identity')
