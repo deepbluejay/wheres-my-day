@@ -232,6 +232,34 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
       return result
     }
   }
+  /// Samples are only inserted (`insertSample`) and deleted (forget), never moved in time, and forget
+  /// refuses later rows at the forgotten times. A delete of the newest rows lets SQLite reuse their ids,
+  /// which the mark's time then no longer matches.
+  public func sampleChanges(since mark: SampleMark?) throws -> SampleChanges? {
+    try locked {
+      var newest = SampleMark(id: 0, ts: 0)
+      try connection.rows("SELECT id, ts FROM samples ORDER BY id DESC LIMIT 1") {
+        newest = SampleMark(id: SQLiteConnection.int($0, 0), ts: SQLiteConnection.int($0, 1))
+      }
+      guard let mark else { return SampleChanges(newest: newest, earliest: nil, markIntact: true) }
+      var intact = mark.id == 0, earliest: Int?
+      try connection.rows("SELECT ts FROM samples WHERE id=?", [.integer(mark.id)]) { intact = SQLiteConnection.int($0, 0) == mark.ts }
+      try connection.rows("SELECT min(ts) FROM samples WHERE id>? AND id<=?", [.integer(mark.id), .integer(newest.id)]) {
+        if sqlite3_column_type($0, 0) != SQLITE_NULL { earliest = SQLiteConnection.int($0, 0) }
+      }
+      return SampleChanges(newest: newest, earliest: earliest, markIntact: intact)
+    }
+  }
+  public func intervalRanges(in range: TimeRange) throws -> [TimeRange] {
+    try locked {
+      var result: [TimeRange] = []
+      try connection.rows("SELECT start_ts, end_ts FROM intervals WHERE start_ts<? AND end_ts>? ORDER BY start_ts",
+        [.integer(range.end), .integer(range.start)]) {
+        result.append(TimeRange(SQLiteConnection.int($0, 0), SQLiteConnection.int($0, 1)))
+      }
+      return result
+    }
+  }
   @discardableResult func insertInterval(_ interval: NamedInterval) throws -> Bool {
     guard try !forgotten(interval.range) else { return false }
     try connection.run(

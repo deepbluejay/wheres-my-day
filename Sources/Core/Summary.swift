@@ -4,9 +4,31 @@ public protocol SummaryStorage: SummaryTimelineReader, SampleReader, EvidenceRea
   ModelCallStore, SettingsStore, ForgottenRangeReader {
   /// The samples a plan reads, with what it uses: time, input counts, keeping awake, exclusion.
   func planningSamples(in range: TimeRange) throws -> [TimeSample]
+  /// The ranges of the intervals `intervals(in:)` returns, without their text.
+  func intervalRanges(in range: TimeRange) throws -> [TimeRange]
+  /// Sample rows stored after `mark`; nil when the store cannot tell, and then every plan reads in full.
+  func sampleChanges(since mark: SampleMark?) throws -> SampleChanges?
 }
 extension SummaryStorage {
   public func planningSamples(in range: TimeRange) throws -> [TimeSample] { try samples(in: range) }
+  public func intervalRanges(in range: TimeRange) throws -> [TimeRange] { try intervals(in: range).map(\.range) }
+  public func sampleChanges(since mark: SampleMark?) throws -> SampleChanges? { nil }
+}
+/// A sample row by its id and time.
+public struct SampleMark: Equatable {
+  public var id: Int
+  public var ts: Int
+  public init(id: Int, ts: Int) { self.id = id; self.ts = ts }
+}
+/// `newest`: the newest row now. `earliest`: the earliest time among rows after the mark, up to `newest`.
+/// `markIntact`: the marked row still holds its time, so no id at or below it was reused after a delete.
+public struct SampleChanges {
+  public var newest: SampleMark?
+  public var earliest: Int?
+  public var markIntact: Bool
+  public init(newest: SampleMark?, earliest: Int?, markIntact: Bool) {
+    self.newest = newest; self.earliest = earliest; self.markIntact = markIntact
+  }
 }
 
 public struct SummaryAnswer {
@@ -106,13 +128,8 @@ public enum SummaryPolicy {
   public static let maximumWaitSeconds = maximumSeconds
   public static let model = "claude-haiku-5-5"
 
-  /// Missing observations do not end the input-age window. Only observed awake seconds count.
-  public static func plan(samples: [TimeSample], forgotten: [TimeRange], through: Int,
-    completed: [TimeRange] = [], requested: Bool = false, from start: Int? = nil) -> SummaryPlan {
-    func floorMinute(_ ts: Int) -> Int { ts - ((ts % 60 + 60) % 60) }
-    func ceilMinute(_ ts: Int) -> Int { let a = floorMinute(ts); return a == ts ? a : a + 60 }
-    let lower = start ?? samples.map(\.ts).min() ?? through
-    guard lower < through else { return SummaryPlan(pieces: [], waiting: []) }
+  /// The seconds a plan treats as active, merged: input keeps the next input-age seconds active.
+  static func activeRanges(samples: [TimeSample], forgotten: [TimeRange], through: Int, lower: Int) -> [TimeRange] {
     var active: [TimeRange] = []
     for row in samples.sorted(by: { $0.ts < $1.ts }) where row.ts < through {
       guard !forgotten.contains(where: { row.ts >= $0.start && row.ts < $0.end }) else { continue }
@@ -123,6 +140,21 @@ public enum SummaryPolicy {
         active[active.count - 1].end = max(last.end, range.end)
       } else { active.append(range) }
     }
+    return active
+  }
+  /// Missing observations do not end the input-age window. Only observed awake seconds count.
+  public static func plan(samples: [TimeSample], forgotten: [TimeRange], through: Int,
+    completed: [TimeRange] = [], requested: Bool = false, from start: Int? = nil) -> SummaryPlan {
+    planWithActive(samples: samples, forgotten: forgotten, through: through, completed: completed, requested: requested, from: start).plan
+  }
+  /// The plan and the active ranges it was made from.
+  static func planWithActive(samples: [TimeSample], forgotten: [TimeRange], through: Int,
+    completed: [TimeRange], requested: Bool, from start: Int?) -> (plan: SummaryPlan, active: [TimeRange]) {
+    func floorMinute(_ ts: Int) -> Int { ts - ((ts % 60 + 60) % 60) }
+    func ceilMinute(_ ts: Int) -> Int { let a = floorMinute(ts); return a == ts ? a : a + 60 }
+    let lower = start ?? samples.map(\.ts).min() ?? through
+    guard lower < through else { return (SummaryPlan(pieces: [], waiting: []), []) }
+    let active = activeRanges(samples: samples, forgotten: forgotten, through: through, lower: lower)
     // A forgotten partial minute is unavailable as a whole; saved minutes are never rewritten.
     let barriers = (forgotten + completed).map { TimeRange(floorMinute($0.start), ceilMinute($0.end)) }
       .sorted { $0.start < $1.start }
@@ -202,7 +234,7 @@ public enum SummaryPolicy {
       if requested || through >= first.start + maximumWaitSeconds { flush() }
       else { waiting = pending }
     }
-    return SummaryPlan(pieces: ready.sorted { $0.range.start < $1.range.start }, waiting: waiting)
+    return (SummaryPlan(pieces: ready.sorted { $0.range.start < $1.range.start }, waiting: waiting), active)
   }
 
   public static func projectFolder(_ key: String) -> String {
@@ -381,15 +413,52 @@ public final class SummaryService {
   }
   public let format: SummaryFormat
   public private(set) var health = SummaryHealth()
-  public init(storage: SummaryStorage, caller: SummaryCaller, format: SummaryFormat = SummaryFormat()) {
-    self.storage = storage; self.caller = caller; self.format = format
+  /// Held in memory only, as times: active seconds before `settled` as the samples were last read,
+  /// and the newest sample row then. Barriers are reread on every pass, so a deleted call or interval
+  /// reopens what it covered; a sample stored since with an earlier time sends the pass back to a full read.
+  private struct Frontier {
+    var start: Int
+    var settled: Int
+    var active: [TimeRange]
+    var mark: SampleMark
+  }
+  private var frontier: Frontier?
+  /// The last plan's sample reads; skipped is empty when it read in full.
+  private(set) var lastReads: SummaryFrontier.Reads?
+  /// How far `settled` trails the plan's end; samples stored later than this behind their time cost one full read.
+  private let settleLag: Int
+  public init(storage: SummaryStorage, caller: SummaryCaller, format: SummaryFormat = SummaryFormat(), settleLag: Int = 2 * SummaryPolicy.maximumSeconds) {
+    self.storage = storage; self.caller = caller; self.format = format; self.settleLag = settleLag
   }
   public func plan(from start: Int, through end: Int, requested: Bool = false) throws -> SummaryPlan {
+    try plan(from: start, through: end, requested: requested, calls: storage.modelCalls(in: TimeRange(Int.min + 1, Int.max)))
+  }
+  private func plan(from start: Int, through end: Int, requested: Bool, calls: [ModelCall]) throws -> SummaryPlan {
+    func floorMinute(_ ts: Int) -> Int { ts - ((ts % 60 + 60) % 60) }
     let range = TimeRange(start, end)
-    let calls = try storage.modelCalls(in: TimeRange(Int.min + 1, Int.max))
-    let existingRanges = try storage.intervals(in: range).map(\.range)
-    return SummaryPolicy.plan(samples: try storage.planningSamples(in: TimeRange(start - RestPolicy.inputAgeSeconds - 1, end)), forgotten: try storage.forgottenRanges(in: range),
-      through: end, completed: calls.filter { !$0.pending }.map(\.range) + existingRanges, requested: requested, from: start)
+    let forgotten = try storage.forgottenRanges(in: range)
+    let completed = calls.filter { !$0.pending }.map(\.range) + (try storage.intervalRanges(in: range))
+    // Read before any sample, so a row stored during this pass is checked on the next.
+    let changes = try storage.sampleChanges(since: frontier?.mark)
+    var held: Frontier?
+    if let last = frontier, let changes, last.start == start, changes.markIntact,
+      (changes.earliest ?? Int.max) >= last.settled { held = last }
+    let reads = held.flatMap { SummaryFrontier.reads(active: $0.active, barriers: forgotten + completed, start: start, settled: $0.settled, end: end) }
+      ?? SummaryFrontier.Reads(samples: [TimeRange(start - RestPolicy.inputAgeSeconds - 1, end)], skipped: [])
+    if reads.skipped.isEmpty { held = nil }
+    lastReads = reads
+    var samples: [TimeSample] = []
+    for read in reads.samples { samples += try storage.planningSamples(in: read) }
+    let (planned, active) = SummaryPolicy.planWithActive(samples: samples, forgotten: forgotten, through: end,
+      completed: completed + reads.skipped, requested: requested, from: start)
+    frontier = nil
+    if let mark = changes?.newest {
+      let settled = max(held?.settled ?? Int.min, floorMinute(end - settleLag), floorMinute(start))
+      let known = held?.active ?? [], from = held?.settled ?? Int.min
+      frontier = Frontier(start: start, settled: settled,
+        active: known + SummaryFrontier.clipped(active, to: TimeRange(from, settled)), mark: mark)
+    }
+    return planned
   }
   public func summarize(from start: Int, through end: Int, dayStart: Int, locale: String, requested: Bool = false, at now: Int? = nil) throws {
     defer { health.serviceUnavailableUntil = caller.serviceUnavailableUntil }
@@ -402,7 +471,7 @@ public final class SummaryService {
     // Summaries go to Claude: the person's consent to Claude use gates them, and the caller checks the login.
     health.subscriptionConnected = settings.claudeConnected
     guard settings.claudeConnected && RecorderPolicy.recording(settings, at: time) else { return }
-    let planned = try plan(from: start, through: end, requested: requested)
+    let planned = try plan(from: start, through: end, requested: requested, calls: historical)
     health.localPreparationFailed = false
     health.planUsePaused = false
     let pendingKeys = Set(planned.pieces.map { "\($0.range.start):\($0.range.end)" })
