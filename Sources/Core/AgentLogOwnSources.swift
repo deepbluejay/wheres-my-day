@@ -42,6 +42,8 @@ public struct AgentLogOwnSources {
   }
   /// Receipts are only added or removed as directory entries, which changes the folder's
   /// status-change time. "absent" while no receipt was ever registered.
+  /// Exact on APFS (nanosecond times; the link count follows the entries). On a volume with
+  /// 1-2 s times or cached attributes, an add and a delete within one tick can leave it equal.
   public func revision() throws -> String {
     var info = stat()
     guard stat(directory.path, &info) == 0 else {
@@ -50,6 +52,14 @@ public struct AgentLogOwnSources {
     }
     return [Int(info.st_dev), Int(info.st_ino), Int(info.st_nlink), info.st_mtimespec.tv_sec, info.st_mtimespec.tv_nsec,
       info.st_ctimespec.tv_sec, info.st_ctimespec.tv_nsec].map(String.init).joined(separator: ":")
+  }
+  /// The registry folder's file system type, or its parent's before the folder exists; nil
+  /// when unreadable. "apfs" on the default app data volume.
+  public func volumeType() -> String? {
+    var info = statfs()
+    guard statfs(directory.path, &info) == 0
+      || (errno == ENOENT && statfs(directory.deletingLastPathComponent().path, &info) == 0) else { return nil }
+    return withUnsafeBytes(of: &info.f_fstypename) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
   }
   /// Receipt names are one-way hashes; neither receipt contents nor agent files are opened.
   public func visitInventory(_ visit: (String) throws -> Void) throws {

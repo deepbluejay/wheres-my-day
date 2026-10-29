@@ -41,6 +41,10 @@ public final class AgentLogTask {
   /// Recovery reads of 1 MiB across all files per scan, about 20 s CPU. After a metadata
   /// version change every listed file is in recovery at once; the rest wait for later scans.
   var recoveryBudgetPerScan = 128
+  /// Uncharged retries of failed recovery reads per scan. Past them a retry is charged and
+  /// served after the other files, so files that fail every read add at most this many reads
+  /// to the budget and cannot starve the files listed after them.
+  var freeRecoveryRetriesPerScan = 4
   private var stopped = false
   /// Everything a read and its append consult, besides recording permission and the
   /// ownership receipts: the file's identity, size and times, and its stored checkpoint.
@@ -59,9 +63,11 @@ public final class AgentLogTask {
   private var unchanged: [String: ReadInputs] = [:]
   private var receipts: (revision: String, counts: String, names: Set<String>, sources: Set<AgentLogToolOwnSource>?)?
   // Files whose recovery read failed, with that read's inputs. Their next attempt with the
-  // same inputs is not charged to the budget, so files that fail every read cannot starve
-  // the others.
+  // same inputs is not charged to the budget (up to freeRecoveryRetriesPerScan per scan), so
+  // files that fail every read cannot starve the others.
   private var failedRecovery: [String: ReadInputs] = [:]
+  /// The first charged retry the budget left unread in the latest scan; scan thread only.
+  private var deferredResume: String?
   public init(reader: AgentLogReader, storage: AgentLogStorage, git: GitCollectionTask? = nil) {
     self.git = git
     self.reader = reader
@@ -128,7 +134,7 @@ public final class AgentLogTask {
       recordFailure(error)
       throw error
     }
-    var recoveryBudget = recoveryBudgetPerScan
+    var recoveryBudget = recoveryBudgetPerScan, freeRetries = freeRecoveryRetriesPerScan
     // Only a read that continues the stored position is a recovery read; one that starts over
     // (another inode, or a shorter file) is not.
     func recovering(_ position: LogPosition?, _ file: AgentLogFile) -> Bool {
@@ -137,7 +143,15 @@ public final class AgentLogTask {
     }
     items["listed"] = listing.files.count
     lock.lock(); failedRecovery = failedRecovery.filter { listed.contains($0.key) }; lock.unlock()
-    for file in listing.files {
+    // A charged retry is queued again after the listed files (freeRecoveryRetriesPerScan).
+    // Those start where the budget ran out in the previous scan, so each is tried in turn.
+    var queue = listing.files, index = 0, resumeSet = false
+    while index < queue.count {
+      if index == listing.files.count, let start = queue[index...].firstIndex(where: { $0.path == deferredResume }) {
+        queue = Array(queue[..<index]) + queue[start...] + queue[index..<start]
+      }
+      let file = queue[index], firstTurn = index < listing.files.count
+      index += 1
       var attempt: ReadInputs?
       do {
         var position = try storage.logPosition(path: file.path)
@@ -153,13 +167,19 @@ public final class AgentLogTask {
         lock.lock()
         var retry = failedRecovery[file.path].map { $0 == ReadInputs(file, position: position) } ?? false
         lock.unlock()
-        if recovering(position, file) && recoveryBudget <= 0 { continue }
+        let inRecovery = recovering(position, file)
+        if inRecovery && recoveryBudget <= 0 {
+          if !firstTurn && !resumeSet { deferredResume = file.path; resumeSet = true }
+          continue
+        }
+        if inRecovery && firstTurn && retry && freeRetries <= 0 { queue.append(file); continue }
         var recoveryBatches = 0, first = true
         while true {
           guard !isStopped, try recordingAllowed(at: time) else { return }
           attempt = nil
           if recovering(position, file) {
-            if retry { retry = false } else { recoveryBudget -= 1 }
+            if retry && freeRetries > 0 { freeRetries -= 1 } else { recoveryBudget -= 1 }
+            retry = false
             items["recovery_reads", default: 0] += 1
             attempt = ReadInputs(file, position: position)
           }

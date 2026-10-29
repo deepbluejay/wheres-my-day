@@ -41,13 +41,29 @@ private enum NativeFrontProcess {
 /// The deprecated call could one day keep answering with a stale or fixed process, which no
 /// lookup failure would show. Once the front has been settled (no activation) for
 /// `settledSeconds`, at most once per `checkSeconds`, its pid is compared on the main thread
-/// with NSWorkspace's. A switch racing a check gives one disagreement, and the next settled
-/// check agrees again; `disagreementLimit` in a row (over 10 s of settled front) is no race,
-/// so the call is not used again in this process. Read only: nothing is focused or posted.
+/// with NSWorkspace's. While the person switches less than `settledSeconds` apart, a check
+/// also runs after `switchesPerCheck` activations, under the same interval, so a wrong call
+/// is caught during switching too. That check runs in the activation handler, when
+/// NSWorkspace has just named the activated application: an honest call named it before the
+/// activation was delivered, while a stuck, late or lagging one does not name it yet.
+/// `disagreementLimit` in a row (over 10 s apart) is no race, so the call is not used again
+/// in this process. Neither is it after as many among the last `activationWindow` checks on
+/// activation, however long ago those were (minutes or hours): a count of checks, not a time
+/// span. A wrong call agrees there by chance when the person returns to the app it names, and
+/// a settled check agrees with a late one. An honest call disagrees there only when another
+/// activation is already queued behind the one being handled (an app handing focus on within
+/// NSWorkspace's delivery lag), so such a disagreement is held for `raceSeconds`: delivering
+/// an activation of the pid the call named withdraws it, and otherwise it counts at the next
+/// activation or check after that. Read only: nothing is focused or posted.
 enum FrontProcessGuard {
   static let settledSeconds = 3.0
   static let checkSeconds = 5.0
+  static let switchesPerCheck = 2
   static let disagreementLimit = 3
+  /// Queued activations arrive back to back, so this covers delivery lags and main-thread stalls.
+  static let raceSeconds = 0.25
+  /// The bits of `MacFrontWindowSource.activationResults`.
+  static let activationWindow = UInt8.bitWidth
 }
 struct FrontWindowBoundary {
   var application: () -> FrontObservation
@@ -65,8 +81,9 @@ struct FrontWindowBoundary {
   /// NSWorkspace's front pid, read on the main thread only.
   var workspaceProcess: () -> Int32? = { nil }
   var main: (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) }
-  /// Calls the handler on each application activation; returns the call that stops it.
-  var activations: (@escaping () -> Void) -> () -> Void = { _ in {} }
+  /// Calls the handler with the activated pid on each application activation; returns the
+  /// call that stops it.
+  var activations: (@escaping (Int32?) -> Void) -> () -> Void = { _ in {} }
   /// Record only (`status`): nothing reads these counts back.
   var count: (FrontApplicationCount) -> Void = { _ in }
   static var native: FrontWindowBoundary {
@@ -91,7 +108,9 @@ struct FrontWindowBoundary {
     }, workspaceProcess: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
     activations: { handler in
       let center = NSWorkspace.shared.notificationCenter
-      let token = center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil) { _ in handler() }
+      let token = center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil) { note in
+        handler((note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier)
+      }
       return { center.removeObserver(token) }
     }, count: { StageUsage.shared.count($0.rawValue) })
   }
@@ -132,19 +151,37 @@ public final class MacFrontWindowSource: FrontWindowSource {
   private var browsers: [String: Bool] = [:]
   private var front: (process: FrontProcess, observation: FrontObservation)?
   private var settledSince: Double
+  private var switches = 0
   private var lastCheck = -Double.infinity
   private var checking = false
   private var disagreements = 0
+  /// The latest checks on activation, newest in the low bit: 1 when it disagreed.
+  private var activationResults: UInt8 = 0
+  /// A disagreement on activation not counted yet: the pid the call named, and when.
+  private var held: (pid: Int32, at: Double)?
   private var frontProcessOff = false
   private var stopActivations: () -> Void = {}
   public convenience init() { self.init(boundary: .native) }
   init(boundary: FrontWindowBoundary) {
     self.boundary = boundary
     settledSince = boundary.uptime()
-    stopActivations = boundary.activations { [weak self] in
+    // NSWorkspace delivers activations on the main thread, so the check runs there at once.
+    stopActivations = boundary.activations { [weak self] activated in
       guard let self else { return }
       let now = self.boundary.uptime()
-      self.lock.lock(); self.settledSince = now; self.lock.unlock()
+      self.lock.lock()
+      let resolved = self.resolveHeld(now, activated: activated)
+      self.settledSince = now; self.switches += 1
+      let due = !self.checking && !self.frontProcessOff && self.switches >= FrontProcessGuard.switchesPerCheck
+        && now - self.lastCheck >= FrontProcessGuard.checkSeconds
+      if due { self.checking = true; self.lastCheck = now; self.switches = 0 }
+      self.lock.unlock()
+      self.report(resolved)
+      if due {
+        if Thread.isMainThread { self.compareFront(settled: false) } else {
+          self.boundary.main { [weak self] in self?.compareFront(settled: false) }
+        }
+      }
     }
   }
   deinit { stopActivations() }
@@ -154,7 +191,8 @@ public final class MacFrontWindowSource: FrontWindowSource {
   }
   /// The probe gate asks on every AX call. The front process is read on the calling thread;
   /// its identity is looked up once per launch. Otherwise the main thread answers, as before.
-  /// A settled front schedules the occasional check against NSWorkspace (FrontProcessGuard).
+  /// A settled front schedules the occasional check against NSWorkspace (FrontProcessGuard);
+  /// the check after switches runs on activation instead.
   public func frontApplication() -> FrontObservation {
     lock.lock(); let off = frontProcessOff; lock.unlock()
     if !off {
@@ -167,11 +205,11 @@ public final class MacFrontWindowSource: FrontWindowSource {
       let now = boundary.uptime()
       lock.lock()
       let known = front?.process == process ? front?.observation : nil
-      let check = !checking && now - settledSince >= FrontProcessGuard.settledSeconds
-        && now - lastCheck >= FrontProcessGuard.checkSeconds
-      if check { checking = true; lastCheck = now }
+      let check = !checking && now - lastCheck >= FrontProcessGuard.checkSeconds
+        && now - settledSince >= FrontProcessGuard.settledSeconds
+      if check { checking = true; lastCheck = now; switches = 0 }
       lock.unlock()
-      if check { boundary.main { [weak self] in self?.compareFront() } }
+      if check { boundary.main { [weak self] in self?.compareFront(settled: true) } }
       if let known { return known }
       // Still the same launch in front after the lookup, so the identity is that process's.
       guard let observation = boundary.runningApplication(process.pid), observation.processID == process.pid else {
@@ -187,23 +225,52 @@ public final class MacFrontWindowSource: FrontWindowSource {
     if !Thread.isMainThread { return DispatchQueue.main.sync { self.boundary.application() } }
     return boundary.application()
   }
-  /// Runs on the main thread, where activations are delivered, so none lands during it.
-  private func compareFront() {
+  /// Runs on the main thread, where activations are delivered, so none lands during it. A
+  /// check asked for by a settled front still needs it settled; one on activation does not,
+  /// and its disagreement is held, not counted yet (FrontProcessGuard).
+  private func compareFront(settled: Bool) {
     let now = boundary.uptime()
-    lock.lock(); let settled = now - settledSince >= FrontProcessGuard.settledSeconds; lock.unlock()
-    let process = settled ? try? boundary.frontProcess().get() : nil
+    lock.lock(); let ready = !settled || now - settledSince >= FrontProcessGuard.settledSeconds; lock.unlock()
+    let process = ready ? try? boundary.frontProcess().get() : nil
     let workspace = process == nil ? nil : boundary.workspaceProcess()
     lock.lock()
     checking = false
-    guard let process, let workspace else { lock.unlock(); return }
+    let resolved = resolveHeld(now, activated: nil)
+    guard let process, let workspace else { lock.unlock(); report(resolved); return }
     let agrees = process.pid == workspace
-    disagreements = agrees ? 0 : disagreements + 1
-    let disable = !frontProcessOff && disagreements >= FrontProcessGuard.disagreementLimit
-    if disable { frontProcessOff = true; front = nil }
+    let hold = !agrees && !settled && !frontProcessOff
+    var disable = false
+    if hold { held = (process.pid, now) } else { disable = record(agrees: agrees, onActivation: !settled) }
     lock.unlock()
+    report(resolved)
     boundary.count(.comparisons)
-    if !agrees { boundary.count(.disagreements) }
+    if !agrees && !hold { boundary.count(.disagreements) }
     if disable { boundary.count(.disabled) }
+  }
+  /// Under the lock. A held disagreement is withdrawn when the activation of the pid the call
+  /// named is delivered within `raceSeconds`: the call was only ahead of NSWorkspace. After
+  /// that it counts. Returns whether it counted, and whether that turned the call off.
+  private func resolveHeld(_ now: Double, activated: Int32?) -> (counted: Bool, disable: Bool) {
+    guard let pending = held else { return (false, false) }
+    if now - pending.at <= FrontProcessGuard.raceSeconds {
+      if activated == pending.pid { held = nil }
+      return (false, false)
+    }
+    held = nil
+    return (true, record(agrees: false, onActivation: true))
+  }
+  /// Under the lock: the streak, the window of checks on activation, and the turn-off.
+  private func record(agrees: Bool, onActivation: Bool) -> Bool {
+    disagreements = agrees ? 0 : disagreements + 1
+    if onActivation { activationResults = activationResults << 1 | (agrees ? 0 : 1) }
+    let disable = !frontProcessOff && (disagreements >= FrontProcessGuard.disagreementLimit
+      || activationResults.nonzeroBitCount >= FrontProcessGuard.disagreementLimit)
+    if disable { frontProcessOff = true; front = nil; held = nil }
+    return disable
+  }
+  private func report(_ resolved: (counted: Bool, disable: Bool)) {
+    if resolved.counted { boundary.count(.disagreements) }
+    if resolved.disable { boundary.count(.disabled) }
   }
   public func details(for application: FrontObservation) -> FrontObservation {
     if !Thread.isMainThread { return DispatchQueue.main.sync { self.details(for: application) } }

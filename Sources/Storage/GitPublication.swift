@@ -63,6 +63,22 @@ struct GitReadPublication {
   let preparedAt: Int
   var state: GitWorkState = .prepared
   var cancellation: GitTaskCancellation?
+  /// Masked refs not yet staged, while they may still equal the active frontier. Nil once
+  /// staging went through the gate. Only for this read, and bounded (gitHeldRefLimit).
+  var held: [GitStagedRef]? = []
+  var heldBytes = 0
+  /// Settled: the refs equal this active frontier (token, ref count), and none was staged.
+  var unchanged: (token: String, count: Int)?
+  /// Settled: the refs differ, so the staged refs are not compared again.
+  var differs = false
+}
+
+/// A staged or stored ref, by identity without the frontier token. Names compare as bytes.
+struct GitStagedRef: Equatable {
+  let identity: String, name: String, tip: String
+  static func == (a: GitStagedRef, b: GitStagedRef) -> Bool {
+    a.identity == b.identity && a.tip == b.tip && a.name.utf8.elementsEqual(b.name.utf8)
+  }
 }
 
 struct GitDiscoveryPublication {
@@ -101,7 +117,8 @@ enum GitPublicationOperation {
 
 /// Hash-only ownership answers, in memory only. A candidate found absent stays absent while
 /// the receipt registry and the baseline are unchanged. A selector found holding no owned row
-/// also needs every folder row unchanged, which the source revision counts.
+/// also needs every folder row unchanged, which the source revision counts. Each set is
+/// cleared when it reaches gitOwnershipMemoLimit entries (65,536 by default, a few MB).
 struct GitOwnershipMemo {
   var registry: String?
   var absent = Set<String>()
@@ -205,7 +222,11 @@ extension ActivityStorage {
       for candidate in authority where !gitOwnershipMemo.absent.contains(candidate) {
         gitOwnershipLookups += 1
         if try registry.containsAuthority([candidate]) { owned.append(try $0.int("id")); break }
-        if state != nil { gitOwnershipMemo.absent.insert(candidate) }
+        if state != nil {
+          // New sessions keep adding candidates while the registry is unchanged.
+          if gitOwnershipMemo.absent.count >= gitOwnershipMemoLimit { gitOwnershipMemo.absent.removeAll() }
+          gitOwnershipMemo.absent.insert(candidate)
+        }
       }
     }
     for id in owned {
@@ -214,12 +235,21 @@ extension ActivityStorage {
     if !owned.isEmpty { try cleanGitOrphans() }
     // Read inside this transaction before its write: a write to any folder row moves the
     // revision, and a rollback restores the rows this answer was found for.
-    else if source != nil { gitOwnershipMemo.clean.insert(scope) }
+    else if source != nil {
+      if gitOwnershipMemo.clean.count >= gitOwnershipMemoLimit { gitOwnershipMemo.clean.removeAll() }
+      gitOwnershipMemo.clean.insert(scope)
+    }
   }
 
-  /// The receipt registry folder's revision and the baseline. Both only grow; the folder
-  /// changes status whenever a receipt is added or removed.
+  /// The receipt registry folder's revision and the baseline. The folder changes status
+  /// whenever a receipt is added or removed. The key assumes:
+  /// - APFS for the registry folder: nanosecond times and an entry count. On another volume
+  ///   (1-2 s times, or a network volume's cached attributes) an add plus a delete within
+  ///   one tick could leave it equal, so there no state is given and nothing is remembered;
+  /// - an insert-only agent_log_own_baseline (AgentLogBaseline): any change raises its
+  ///   count. A future delete from it needs a real revision here.
   private func gitOwnershipState(_ registry: AgentLogOwnSources) throws -> String {
+    guard gitOwnershipVolumeType(registry) == "apfs" else { throw StorageError.busy("Git ownership state needs APFS") }
     var baseline = ""
     try connection.namedRows("SELECT count(*) AS n,COALESCE(min(receipt),'') AS low,COALESCE(max(receipt),'') AS high FROM agent_log_own_baseline") {
       baseline = [String(try $0.int("n")), try $0.text("low"), try $0.text("high")].joined(separator: ":")

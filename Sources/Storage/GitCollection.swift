@@ -959,20 +959,41 @@ extension ActivityStorage {
       try gitUnit("frontier-export")
     }
   }
-  public func stageGitRef(repo: Int, name: String, tip: String) throws {
-    try stageGitRef(repo: repo, name: GitMaskedText.prepare(name, in: FileManager.default.temporaryDirectory),
-      identity: Self.gitDigest(name), tip: tip)
-  }
-  public func stageGitRef(repo: Int, name: GitMaskedText, identity: String, tip: String) throws {
-    try checkGitCancellation()
-    let small = try name.smallText() ?? ""
+  private func stageGitRef(repo: Int, staged ref: GitStagedRef) throws {
     let now = try gitLocked { gitReads[repo]?.preparedAt }
     guard let now else { throw StorageError.busy("Git ref stage has no preparation receipt") }
     guard case .admitted = try publishGit(.frontier(.staging(repo)), now: now, {
       try gitStageLocked { try gitStage().run("INSERT OR REPLACE INTO git_next_refs VALUES(?,?,?,?)",
-        [.integer(repo), .key(identity), .maskedText(small), .key(tip)]) }
+        [.integer(repo), .key(ref.identity), .maskedText(ref.name), .key(ref.tip)]) }
     }) else { throw StorageError.busy("Git ref staging interrupted") }
+  }
+  public func stageGitRef(repo: Int, name: String, tip: String) throws {
+    try stageGitRef(repo: repo, name: GitMaskedText.prepare(name, in: FileManager.default.temporaryDirectory),
+      identity: Self.gitDigest(name), tip: tip)
+  }
+  /// Masked name bytes a read holds in memory before staging any ref (gitHeldRefLimit).
+  static let gitHeldRefBytes = 4 << 20
+  public func stageGitRef(repo: Int, name: GitMaskedText, identity: String, tip: String) throws {
+    try checkGitCancellation()
+    let small = try name.smallText() ?? ""
+    // Refs that may equal the active frontier wait in memory, so an unchanged repository
+    // costs one gated refresh instead of one staging publication per ref.
+    let held = try gitLocked { () throws -> Bool? in
+      guard let read = gitReads[repo] else { return nil }
+      guard read.state == .admitted else { throw StorageError.busy("Git ref staging interrupted") }
+      guard let held = read.held, name.byteCount <= 65536, held.count < gitHeldRefLimit,
+        read.heldBytes + small.utf8.count <= Self.gitHeldRefBytes else { return false }
+      gitReads[repo]?.held?.append(GitStagedRef(identity: identity, name: small, tip: tip))
+      gitReads[repo]?.heldBytes += small.utf8.count
+      return true
+    }
+    guard let held else { throw StorageError.busy("Git ref stage has no preparation receipt") }
+    if held { return }
+    try stageHeldGitRefs(repo: repo)
+    try stageGitRef(repo: repo, staged: GitStagedRef(identity: identity, name: small, tip: tip))
     if name.byteCount <= 65536 { return }
+    let now = try gitLocked { gitReads[repo]?.preparedAt }
+    guard let now else { throw StorageError.busy("Git ref stage has no preparation receipt") }
     var ordinal = 0
     try name.forEachChunk { bytes in
       try checkGitCancellation()
@@ -982,6 +1003,34 @@ extension ActivityStorage {
       }) else { throw StorageError.busy("Git ref staging interrupted") }
       ordinal += 1; try gitUnit("staging"); Thread.sleep(forTimeInterval: 0.001)
     }
+  }
+  /// Stages the refs held so far, in read order, and every later ref as it is read.
+  private func stageHeldGitRefs(repo: Int) throws {
+    let held = try gitLocked { () -> [GitStagedRef] in
+      defer { gitReads[repo]?.held = nil; gitReads[repo]?.heldBytes = 0 }
+      return gitReads[repo]?.held ?? []
+    }
+    for ref in held { try stageGitRef(repo: repo, staged: ref) }
+  }
+  /// After a read's last ref. Held refs equal to the active frontier are never staged, and the
+  /// read refreshes that frontier at its end; any difference stages them all through the gate.
+  public func settleGitRefStage(repo: Int) throws {
+    guard let held = try gitLocked({ gitReads[repo]?.held }) else { return }
+    // Staging keeps the last ref read for an identity.
+    var latest: [String: GitStagedRef] = [:]
+    for ref in held { latest[ref.identity] = ref }
+    let refs = latest.values.sorted { $0.identity.utf8.lexicographicallyPrecedes($1.identity.utf8) }
+    if let active = try gitActiveFrontier(repo: repo, equals: refs) {
+      // "Unchanged" is kept until finishGitRead, possibly slices later. Safe: the refresh
+      // checks this token and the row count again, and nothing rewrites a git_refs name or tip in place.
+      try gitLocked {
+        gitReads[repo]?.unchanged = active
+        gitReads[repo]?.held = nil; gitReads[repo]?.heldBytes = 0
+      }
+      return
+    }
+    try gitLocked { gitReads[repo]?.differs = true }
+    try stageHeldGitRefs(repo: repo)
   }
   private func gitStage() throws -> SQLiteConnection {
     try checkGitCancellation()
@@ -1031,7 +1080,8 @@ extension ActivityStorage {
   public func finishGitRead(repo: Int, now: Int, succeeded: Bool, readFailure: Bool = false) throws {
     try finishGitRead(repo: repo, now: now, outcome: succeeded ? .accounted : readFailure ? .nativeFailure : .interrupted)
   }
-  public func finishGitRead(repo: Int, now: Int, outcome: GitReadFinish) throws {
+  public func finishGitRead(repo: Int, now: Int, outcome finish: GitReadFinish) throws {
+    var outcome = finish
     defer { try? gitLocked {
       _ = gitReads.removeValue(forKey: repo)
     } }
@@ -1047,10 +1097,16 @@ extension ActivityStorage {
         try? cancelGitStaging(cancellation)
       } else { try? clearGitRefStage(repo: repo) }
     }
+    // Refs still held are settled here when the reader did not. A refused staging ends the
+    // read as interrupted, as it does while reading refs.
+    if outcome == .accounted {
+      do { try settleGitRefStage(repo: repo) } catch is StorageError { outcome = .interrupted }
+    }
     if outcome != .accounted {
       try gitLocked { try connection.run("UPDATE git_repositories SET pending_frontier='',pending_ref_count=0 WHERE id=?", [.integer(repo)]) }
     }
-    if outcome == .accounted, let active = try gitUnchangedFrontier(repo: repo) {
+    let settled = try gitLocked { (gitReads[repo]?.unchanged, gitReads[repo]?.differs == true) }
+    if outcome == .accounted, let active = try settled.0 ?? (settled.1 ? nil : gitUnchangedFrontier(repo: repo)) {
       // Writing the same refs under a new token every read never settles. The refresh moves
       // their observation time exactly as a rewrite would, under the same gate.
       try beforeGitFrontierPublication?()
@@ -1123,26 +1179,63 @@ extension ActivityStorage {
   /// The active frontier when the staged refs equal it in identity, name and tip. A ref name
   /// long enough to be kept in chunks, staged or stored, never compares equal.
   private func gitUnchangedFrontier(repo: Int) throws -> (token: String, count: Int)? {
-    try gitLocked {
+    var cursor: String?
+    // The stage is read only once an active frontier exists to compare with.
+    return try gitActiveFrontier(repo: repo) { limit in
+      try gitLocked { try gitStageLocked { () throws -> [GitStagedRef]? in
+        let stage = try gitStage()
+        if cursor == nil, try stage.integer("SELECT EXISTS(SELECT 1 FROM git_next_ref_text WHERE repo_id=?)", [.integer(repo)]) != 0 { return nil }
+        var page: [GitStagedRef] = []
+        try stage.namedRows("SELECT identity,name,tip FROM git_next_refs WHERE repo_id=? AND identity>? ORDER BY identity LIMIT ?",
+          [.integer(repo), .key(cursor ?? ""), .integer(limit)]) {
+          page.append(GitStagedRef(identity: try $0.text("identity"), name: try $0.text("name"), tip: try $0.text("tip")))
+        }
+        cursor = page.last?.identity ?? cursor ?? ""
+        return page
+      } }
+    }
+  }
+  /// The active frontier when `refs`, in identity order, equal it whole.
+  private func gitActiveFrontier(repo: Int, equals refs: [GitStagedRef]) throws -> (token: String, count: Int)? {
+    var next = 0
+    return try gitActiveFrontier(repo: repo) { limit in
+      defer { next = min(next + limit, refs.count) }
+      return Array(refs[next..<min(next + limit, refs.count)])
+    }
+  }
+  /// The active frontier when the refs `staged` gives (nil: none can equal it), up to a page
+  /// at a time in identity order, equal it whole. Each page is one hold of the storage lock, with a cancellation
+  /// check between pages, however many refs a repository has. A stored name kept in chunks
+  /// never compares equal.
+  private func gitActiveFrontier(repo: Int, staged: (Int) throws -> [GitStagedRef]?) throws -> (token: String, count: Int)? {
+    let page = gitFrontierComparePage
+    let token = try gitLocked { () throws -> String? in
       var token = ""
       try connection.namedRows("SELECT frontier FROM git_repositories WHERE id=? AND pending_frontier=''", [.integer(repo)]) { token = try $0.text("frontier") }
       guard !token.isEmpty, try connection.integer("SELECT EXISTS(SELECT 1 FROM git_refs r JOIN git_value_text v ON v.kind=3 AND v.owner_id=r.id WHERE r.repo_id=? AND r.frontier=?)",
         [.integer(repo), .key(token)]) == 0 else { return nil }
-      var stored: [[String]] = []
-      try connection.namedRows("SELECT identity,name,tip FROM git_refs WHERE repo_id=? AND frontier=? ORDER BY identity", [.integer(repo), .key(token)]) {
-        let identity = try $0.text("identity")
-        guard identity.hasPrefix(token + ":") else { throw StorageError.busy("Git frontier identity has no token") }
-        stored.append([String(identity.dropFirst(token.count + 1)), try $0.text("name"), try $0.text("tip")])
-      }
-      var staged: [[String]] = []
-      let chunked = try gitStageLocked { () throws -> Bool in
-        let stage = try gitStage()
-        try stage.namedRows("SELECT identity,name,tip FROM git_next_refs WHERE repo_id=? ORDER BY identity", [.integer(repo)]) {
-          staged.append([try $0.text("identity"), try $0.text("name"), try $0.text("tip")])
+      return token
+    }
+    guard let token else { return nil }
+    // Every row of the frontier in identity order, so a row without the token prefix is seen.
+    // No writer leaves one; if one exists, the rewrite replaces it instead of failing each read.
+    var cursor = "", count = 0
+    while true {
+      let stored = try gitLocked { () throws -> [GitStagedRef]? in
+        var rows: [GitStagedRef] = [], prefixed = true
+        try connection.namedRows("SELECT identity,name,tip FROM git_refs WHERE repo_id=? AND frontier=? AND identity>? ORDER BY identity LIMIT ?",
+          [.integer(repo), .key(token), .key(cursor), .integer(page)]) {
+          let identity = try $0.text("identity")
+          cursor = identity
+          guard prefixed, identity.hasPrefix(token + ":") else { prefixed = false; return }
+          rows.append(GitStagedRef(identity: String(identity.dropFirst(token.count + 1)), name: try $0.text("name"), tip: try $0.text("tip")))
         }
-        return try stage.integer("SELECT EXISTS(SELECT 1 FROM git_next_ref_text WHERE repo_id=?)", [.integer(repo)]) != 0
+        return prefixed ? rows : nil
       }
-      return !chunked && !stored.isEmpty && stored == staged ? (token, stored.count) : nil
+      guard let stored, try stored == staged(page) else { return nil }
+      count += stored.count
+      if stored.count < page { return count > 0 ? (token, count) : nil }
+      try gitUnit("frontier-compare")
     }
   }
   public func gitCommitKnown(repo: Int, hash: String) throws -> Bool {

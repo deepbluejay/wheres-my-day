@@ -266,6 +266,7 @@ final class CountingReads: AgentLogReader {
   let wrapped: ClaudeAgentLogReader
   var reads = 0
   var afterRead: (() -> Void)?
+  var beforeRead: ((AgentLogFile) throws -> Void)?
   init(_ wrapped: ClaudeAgentLogReader) { self.wrapped = wrapped }
   var name: String { wrapped.name }
   func files() throws -> [AgentLogFile] { try wrapped.files() }
@@ -273,6 +274,7 @@ final class CountingReads: AgentLogReader {
   func read(_ file: AgentLogFile, position: LogPosition?, at time: Int) throws -> AgentLogBatch {
     reads += 1
     defer { afterRead?() }
+    try beforeRead?(file)
     return try wrapped.read(file, position: position, at: time)
   }
   func ownershipRevision() throws -> String? { try wrapped.ownershipRevision() }

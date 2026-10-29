@@ -27,6 +27,14 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
   var gitPublishCalls = 0
   var gitOwnershipLookups = 0
   var gitOwnershipMemo = GitOwnershipMemo()
+  // Entries in each memo set before it is cleared, and the registry volume's type; test seams.
+  var gitOwnershipMemoLimit = 65_536
+  var gitOwnershipVolumeType: (AgentLogOwnSources) -> String? = { $0.volumeType() }
+  // Refs a Git read holds in memory before staging any, past which (or past gitHeldRefBytes)
+  // every ref is staged through the gate as it is read; and frontier rows compared per hold
+  // of the storage lock. Test seams.
+  var gitHeldRefLimit = 4096
+  var gitFrontierComparePage = 256
   let url: URL
   let databaseScope: DatabaseOpenScope
   let ownBundleID: String

@@ -376,6 +376,107 @@ extension GitCollectionTests {
     XCTAssertEqual(try count("log_positions", recovering), 1, "only the unreadable file is still in recovery")
   }
 
+  /// gate-cpu S1: every file whose recovery read keeps failing got one uncharged read per scan,
+  /// so the budget no longer capped recovery work. Free retries now have their own cap.
+  func testFreeRecoveryRetriesHaveTheirOwnCapPerScan() throws {
+    let reader = ClaudeAgentLogReader(userHome: root.path, processes: InventedProcesses(), appDataDirectory: root)
+    let padding = String(repeating: "x", count: AgentLogFiles.batchBytes)
+    var urls: [URL] = []
+    for index in 0..<5 {
+      let name = "invented-failing-\(index)"
+      let records: [[String: Any]] = (0..<3).map { ["type": "assistant", "timestamp": now - 100 + $0, "sessionId": name,
+        "cwd": repo.path, "message": ["role": "assistant", "content": padding]] }
+      urls.append(try cpuFixtureLog(name, records: records))
+    }
+    try work { try AgentLogTask(reader: reader, storage: self.store).scan(at: self.now) }
+    for url in urls {
+      try store.connection.run("UPDATE log_positions SET state=json_set(state,'$.metadataRecoveryOffset',0) WHERE path=?",
+        [.key(AgentLogIdentity.decodedPath(url.resolvingSymlinksInPath().path))])
+      try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: url.path)
+    }
+    defer { for url in urls { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path) } }
+    let logsTask = AgentLogTask(reader: reader, storage: store)
+    logsTask.recoveryBudgetPerScan = 1
+    logsTask.freeRecoveryRetriesPerScan = 2
+    var attempts: [Int] = []
+    for tick in 1...8 {
+      let failures = logsTask.health.fileFailures
+      try? work { try logsTask.scan(at: self.now + tick * 300) }
+      attempts.append(logsTask.health.fileFailures - failures)
+    }
+    // No scan reads more than the free retries plus the budget; without the cap all five.
+    XCTAssertEqual(attempts.max(), 3, "\(attempts)")
+  }
+
+  /// cpu-shoulds S2: more failing files than the free retries plus the budget, listed ahead
+  /// of a healthy one, spent the budget on charged retries every scan and starved it. Charged
+  /// retries now wait until the other files have had their turn.
+  func testChargedRecoveryRetriesDoNotStarveLaterFiles() throws {
+    let reader = ClaudeAgentLogReader(userHome: root.path, processes: InventedProcesses(), appDataDirectory: root)
+    let padding = String(repeating: "x", count: AgentLogFiles.batchBytes)
+    var urls: [URL] = []
+    for name in ["invented-a-failing-0", "invented-a-failing-1", "invented-b-kept"] {
+      let records: [[String: Any]] = (0..<3).map { ["type": "assistant", "timestamp": now - 100 + $0, "sessionId": name,
+        "cwd": repo.path, "message": ["role": "assistant", "content": padding]] }
+      urls.append(try cpuFixtureLog(name, records: records))
+    }
+    try work { try AgentLogTask(reader: reader, storage: self.store).scan(at: self.now) }
+    for url in urls {
+      try store.connection.run("UPDATE log_positions SET state=json_set(state,'$.metadataRecoveryOffset',0) WHERE path=?",
+        [.key(AgentLogIdentity.decodedPath(url.resolvingSymlinksInPath().path))])
+    }
+    for url in urls.prefix(2) { try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: url.path) }
+    defer { for url in urls { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path) } }
+    let recovering = "json_extract(state,'$.metadataRecoveryOffset') IS NOT NULL"
+    let logsTask = AgentLogTask(reader: reader, storage: store)
+    logsTask.recoveryBudgetPerScan = 1
+    logsTask.freeRecoveryRetriesPerScan = 1
+    var attempts: [Int] = []
+    for tick in 1...12 {
+      let failures = logsTask.health.fileFailures
+      try? work { try logsTask.scan(at: self.now + tick * 300) }
+      attempts.append(logsTask.health.fileFailures - failures)
+    }
+    XCTAssertEqual(try count("log_positions", recovering), 2, "only the failing files are still in recovery")
+    // The failing files are still tried every scan, within the free retry plus the budget.
+    XCTAssertEqual(attempts.min(), 1, "\(attempts)")
+    XCTAssertEqual(attempts.max(), 2, "\(attempts)")
+  }
+
+  /// cpu-shoulds S-c: among charged retries the listing order decided, so a file whose read
+  /// failed only once, listed after more files that fail every read than the budget covers,
+  /// was not tried again while they kept failing. Each scan now starts where the last ran out.
+  func testChargedRetriesAreServedInTurnAcrossScans() throws {
+    let reader = CountingReads(ClaudeAgentLogReader(userHome: root.path, processes: InventedProcesses(), appDataDirectory: root))
+    let padding = String(repeating: "x", count: AgentLogFiles.batchBytes)
+    var urls: [URL] = []
+    for name in ["invented-a-failing-0", "invented-a-failing-1", "invented-a-failing-2", "invented-b-once"] {
+      let records: [[String: Any]] = (0..<3).map { ["type": "assistant", "timestamp": now - 100 + $0, "sessionId": name,
+        "cwd": repo.path, "message": ["role": "assistant", "content": padding]] }
+      urls.append(try cpuFixtureLog(name, records: records))
+    }
+    try work { try AgentLogTask(reader: reader, storage: self.store).scan(at: self.now) }
+    for url in urls {
+      try store.connection.run("UPDATE log_positions SET state=json_set(state,'$.metadataRecoveryOffset',0) WHERE path=?",
+        [.key(AgentLogIdentity.decodedPath(url.resolvingSymlinksInPath().path))])
+    }
+    // The same inputs every scan: the failure is the read's, not the file's.
+    var failing = Set(urls.map(\.lastPathComponent))
+    reader.beforeRead = { file in
+      if failing.contains(URL(fileURLWithPath: file.path).lastPathComponent) { throw AgentLogReadError.processUnavailable }
+    }
+    let recovering = "json_extract(state,'$.metadataRecoveryOffset') IS NOT NULL"
+    let logsTask = AgentLogTask(reader: reader, storage: store)
+    logsTask.recoveryBudgetPerScan = 4
+    try? work { try logsTask.scan(at: self.now + 300) }
+    XCTAssertEqual(logsTask.health.fileFailures, 4)
+    failing.remove(urls[3].lastPathComponent)
+    logsTask.recoveryBudgetPerScan = 1
+    logsTask.freeRecoveryRetriesPerScan = 1
+    for tick in 2...12 { try? work { try logsTask.scan(at: self.now + tick * 300) } }
+    XCTAssertEqual(try count("log_positions", recovering), 3, "only the files that fail every read are still in recovery")
+  }
+
   /// S3: nothing could end a scan; the recorder's stop waited for all of it. Stop now ends
   /// it before the next batch.
   func testStopEndsAScanBeforeItsNextBatch() throws {

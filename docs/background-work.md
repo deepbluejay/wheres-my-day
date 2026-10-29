@@ -49,7 +49,8 @@ In the code:
   (`recoveryBatchesPerScan`, `recoveryBudgetPerScan`). Files still in recovery wait for
   later scans. Only a read that continues the stored position counts. A file whose
   recovery read failed is tried again without charge while its inputs are unchanged, so
-  files that fail every read cannot starve the others.
+  files that fail every read cannot starve the others. At most 4 such free retries run
+  per scan (`freeRecoveryRetriesPerScan`); later ones are charged.
 - Stopping the recorder ends a running agent-log scan before its next 1 MiB batch, and a
   running Git pass at its next cancellation check.
 - Recording off or paused is checked before and after every batch, and by every Git page
@@ -100,6 +101,34 @@ In the code:
   so are folders that validation refused (section 2). A git init in an unversioned folder
   changes its walk, so the next tick finds it. One discovery tick shares one read-only
   database connection.
+- **Git history** (`finishGitRead`). A repository whose refs equal its active frontier
+  is not rewritten. One gated refresh moves the refs' observation time and `last_read`,
+  as a rewrite would have.
+  - "Equal" is every ref's identity, masked name and tip, compared whole. Any ref added,
+    removed, renamed, moved or force-moved back, or a worktree HEAD on another commit,
+    rewrites the frontier. A ref name long enough to be kept in chunks never compares
+    equal.
+  - The refs read from Git are held in memory until the last one, then compared, and
+    staged through the gate only if they differ (`settleGitRefStage`). An unchanged
+    repository costs the ref export plus one publication. Past 4096 refs or 4 MiB of
+    names, every ref is staged as it is read and the staged refs are compared instead.
+  - The compare reads 256 rows per hold of the storage lock, with a cancellation check
+    between pages.
+  - The refresh is refused like a rewrite: recording off or paused (current and
+    historical), Secure Input, forget, retention, revocation and own sources. It also
+    needs the same frontier active, nothing pending, and the same ref count, so a forget
+    or retention that removed refs meanwhile makes the next read rewrite.
+- **Git ownership** (`reconcileGitOwnership`, inside every Git publication). Candidates
+  found absent from the receipt registry are not looked up again while the registry
+  state is unchanged. That state is the registry folder's stat (device, inode, link
+  count, mtime and ctime in nanoseconds) plus the own baseline's count, min and max.
+  - A selector (repository, folder id or identity) found holding no owned row is skipped
+    while the state and the Git source revision are unchanged. The source revision moves
+    with any write to the folder rows, revocations, own sources, positions and
+    discovery tombstones.
+  - The key assumes APFS and an insert-only own baseline. Off APFS, nothing is
+    remembered and every candidate is looked up.
+  - Each set is cleared at 65,536 entries.
 - **Summaries** (`SummaryService.plan`). Summaries start from 0, so each pass plans over
   every stored sample. Planning reads only the time, input counts, keeping awake and
   exclusion of each sample (`planningSamples`). This cost still grows with what is stored:
@@ -120,11 +149,14 @@ In the code:
   | `retention`, `summaries` | `removed`; runs only |
   | `screen_collection`, `sample_collection` | `ocr`, `writes`; `writes` |
 
-- `front_*` counts how the probe gate read the front application since the recorder
-  started: settled checks of the front-process call against NSWorkspace
-  (`front_comparisons`, `front_disagreements`), main-thread answers by cause
-  (`front_fallback_missing_symbol`, `_error`, `_no_identity`, `_changed_during_lookup`),
-  and `front_fast_path_disabled=1` once 3 disagreements in a row turned the call off.
+- `front_*` counts how the front application was read since the recorder started, by the
+  probe gate and by each tick's front observation, which share one read:
+  - checks of the front-process call against NSWorkspace (`front_comparisons`,
+    `front_disagreements`), after 3 s with no switch or after 8 switches, at most once
+    per 5 s;
+  - main-thread answers by cause (`front_fallback_missing_symbol`, `_error`,
+    `_no_identity`, `_changed_during_lookup`);
+  - `front_fast_path_disabled=1` once 3 disagreements in a row turned the call off.
 - The figures sit in a file beside the database, rewritten once per tick. They hold only
   numbers and stage names.
 - After every live deploy, check CPU for at least 30 minutes, across several ticks, before

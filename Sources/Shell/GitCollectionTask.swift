@@ -708,6 +708,8 @@ public final class GitCollectionTask {
       try storage.stageGitRef(repo: repo.id, name: name, identity: identity, tip: tip)
       try input.write(contentsOf: Data((tip + "\n").utf8))
     }
+    // Refs equal to the active frontier are not staged, and none stays in memory past here.
+    try storage.settleGitRefStage(repo: repo.id)
     try input.close()
     let output = try FileHandle(forWritingTo: hashes)
     defer { try? output.close() }

@@ -67,7 +67,7 @@ public final class StageUsage {
 /// How the front application read went, so a macOS change to the front-process call shows in
 /// `status`. Counts only.
 public enum FrontApplicationCount: String, CaseIterable {
-  /// Settled checks of the front-process call against NSWorkspace, and those that disagreed.
+  /// Checks of the front-process call against NSWorkspace, and those that disagreed.
   case comparisons = "front_comparisons"
   case disagreements = "front_disagreements"
   /// Gate calls answered on the main thread instead, by cause.

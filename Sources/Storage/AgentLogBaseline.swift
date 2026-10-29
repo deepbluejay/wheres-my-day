@@ -11,6 +11,8 @@ extension SQLiteConnection {
 extension ActivityStorage {
   /// Inventory only known app-owned directories and hash-only launch receipts, never log contents.
   /// The database keeps the initial proof even if the filesystem registry is later lost.
+  /// Insert-only, once: no code deletes from agent_log_own_baseline, and the Git ownership
+  /// memo key (gitOwnershipState) counts on that.
   public func prepareAgentLogCollection() throws {
     try locked { try connection.transaction { try establishAgentLogBaseline() } }
   }
