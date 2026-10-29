@@ -91,6 +91,14 @@ internal import Foundation.NSObject
         with patch.object(pathlib.Path, "read_text", return_value="import Foundation\nimport Core"):
             check_sources("Storage", modules, ["Core", "Storage"], ["fixture.swift"])
 
+    def test_undeclared_external_product_module(self):
+        modules = ["Core", "Storage", "VendorKit"]
+        with patch.object(pathlib.Path, "read_text", return_value="import VendorKit"):
+            with self.assertRaisesRegex(ValueError, "Storage may not import VendorKit"):
+                check_sources("Storage", modules, ["Core", "Storage"], ["fixture.swift"])
+            check_sources("Storage", modules, ["Core", "Storage", "VendorKit"], ["fixture.swift"])
+
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -47,23 +47,37 @@ extension ConversationConfiguration {
   }
   /// The script the login button hands to Terminal, which runs it with the person's full rights.
   var claudeLoginFolder: URL { ClaudeLoginScript(appData: appDataDirectory).folder }
+  /// Folders of other features under app data, which both agents otherwise reach. Their data enters a
+  /// conversation only through a channel designed for it, never by an agent reading or changing the folder.
+  var closedAppDataFolders: [URL] {
+    [
+    ]
+  }
+  /// APFS opens a folder under any casing of its name. The sandboxes compare the resolved path, so only Claude's
+  /// file tools, which compare the rule text, also get the name as a pattern that matches every casing.
+  static func anyCase(_ url: URL) -> [String] {
+    let name = url.lastPathComponent.map { $0.isLetter ? "[\($0.lowercased())\($0.uppercased())]" : String($0) }.joined()
+    return spellings(url.deletingLastPathComponent()).map { $0 + "/" + name }
+  }
   private func unique(_ paths: [String]) -> [String] {
     var seen = Set<String>()
     return paths.filter { seen.insert($0).inserted }
   }
 
   /// Closed to Claude's file tools and its sandbox: login files, the macOS keychain files, the person's CLI
-  /// settings, the app's Codex home and its earlier Claude folder. Claude reads its own login in its own process.
+  /// settings, the app's Codex home, its earlier Claude folder and other features' folders. Claude reads its
+  /// own login in its own process.
   func claudeDeniedPaths(_ personal: ClaudePersonalHome) -> [String] {
     let homes = personalClaudeHomes(personal)
-    return unique(([codexHome, legacyClaudeHome] + homes.map(\.credentials) + personalCodexLogins
+    return unique(([codexHome, legacyClaudeHome] + closedAppDataFolders + homes.map(\.credentials) + personalCodexLogins
       + keychains(personal) + personalSettings(personal)).flatMap(Self.spellings))
   }
-  /// Codex needs its own home readable for its shell; its login files, Claude's folders, the keychain files
-  /// and the person's CLI settings are closed.
+  /// Codex needs its own home readable for its shell; its login files, Claude's folders, the keychain files,
+  /// the person's CLI settings and other features' folders are closed.
   var codexDeniedPaths: [String] {
     let personal = ClaudePersonalHome(userHome: userHome, configOverride: command.claudeConfigDirectory())
     return unique(([legacyClaudeHome, codexHome.appendingPathComponent("auth.json"), codexHome.appendingPathComponent(".credentials.json")]
+      + closedAppDataFolders
       + personalClaudeHomes(personal).map(\.configDirectory) + personalCodexLogins
       + keychains(personal) + personalSettings(personal)).flatMap(Self.spellings))
   }
@@ -131,7 +145,7 @@ extension ConversationConfiguration {
       "allowUnsandboxedCommands": false,
       "filesystem": ["denyRead": denied, "denyWrite": denied + protected, "allowWrite": writable]]
     return ConversationDiagnostics.claudeSettings.merging(["permissions": ["deny": rules(["Read", "Edit"], denied)
-      + rules(["Edit"], protected) + Self.claudeKeychainCommands], "sandbox": sandbox, "disableAllHooks": true,
+      + rules(["Read", "Edit"], closedAppDataFolders.flatMap(Self.anyCase)) + rules(["Edit"], protected) + Self.claudeKeychainCommands], "sandbox": sandbox, "disableAllHooks": true,
       "includeGitInstructions": false, "autoMemoryEnabled": false,
       "pluginConfigs": ["cc-plugin-agents-md@builtin": ["options": ["instructionFiles": "managed-only"]]]]) { _, fence in fence }
   }
