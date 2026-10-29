@@ -75,10 +75,12 @@ struct GitDiscoveryPublication {
 }
 
 enum GitFrontierPublication {
-  case staging(Int), begin(Int), row(Int, String), chunk(Int, String, Int), certify(Int, String, Int), nativeFailure(Int)
+  /// refresh(repo, active frontier, its ref count) re-observes an active frontier the staged refs equal.
+  case staging(Int), begin(Int), row(Int, String), chunk(Int, String, Int), certify(Int, String, Int), refresh(Int, String, Int), nativeFailure(Int)
   var repo: Int {
     switch self {
-    case .staging(let repo), .begin(let repo), .row(let repo, _), .chunk(let repo, _, _), .certify(let repo, _, _), .nativeFailure(let repo): return repo
+    case .staging(let repo), .begin(let repo), .row(let repo, _), .chunk(let repo, _, _), .certify(let repo, _, _), .refresh(let repo, _, _),
+      .nativeFailure(let repo): return repo
     }
   }
 }
@@ -95,6 +97,16 @@ enum GitPublicationOperation {
   case commitCompletion(Int)
 
   case frontier(GitFrontierPublication)
+}
+
+/// Hash-only ownership answers, in memory only. A candidate found absent stays absent while
+/// the receipt registry and the baseline are unchanged. A selector found holding no owned row
+/// also needs every folder row unchanged, which the source revision counts.
+struct GitOwnershipMemo {
+  var registry: String?
+  var absent = Set<String>()
+  var source: Int?
+  var clean = Set<String>()
 }
 
 enum GitPublicationRefusal: Equatable {
@@ -115,6 +127,7 @@ extension ActivityStorage {
     // temporaries after each unit releases the writer, independent of payload size.
     try autoreleasepool {
       try gitLocked {
+        gitPublishCalls += 1
         do {
           let result: GitPublicationResult<T> = try gitTransaction(certifying: true) {
             try reconcileGitOwnership(operation)
@@ -146,21 +159,41 @@ extension ActivityStorage {
   private func reconcileGitOwnership(_ operation: GitPublicationOperation) throws {
     let selector: String
     let value: SQLValue
+    let scope: String
     switch operation {
     case .discovery(let context):
       switch context.phase {
-      case .touch(let id), .branch(let id), .complete(let id): selector = "id=?"; value = .integer(id)
-      case .register, .touchValidation: selector = "identity=?"; value = .key(Self.gitFolderKey(context.folder))
+      case .touch(let id), .branch(let id), .complete(let id): selector = "id=?"; value = .integer(id); scope = "id:\(id)"
+      case .register, .touchValidation:
+        let key = Self.gitFolderKey(context.folder)
+        selector = "identity=?"; value = .key(key); scope = "identity:" + key
       }
-    case .diagnostic(.folder(let id)): selector = "id=?"; value = .integer(id)
+    case .diagnostic(.folder(let id)): selector = "id=?"; value = .integer(id); scope = "id:\(id)"
     case .diagnostic(.repository(let repo)):
-      selector = "repo_id=?"; value = .integer(repo)
-    case .commitParent(let receipt): selector = "repo_id=?"; value = .integer(receipt.repo)
+      selector = "repo_id=?"; value = .integer(repo); scope = "repo:\(repo)"
+    case .commitParent(let receipt): selector = "repo_id=?"; value = .integer(receipt.repo); scope = "repo:\(receipt.repo)"
     case .commitUnit(let id), .commitCompletion(let id):
       guard let receipt = gitCommitReads[id] else { return }
-      selector = "repo_id=?"; value = .integer(receipt.repo)
-    case .frontier(let frontier): selector = "repo_id=?"; value = .integer(frontier.repo)
+      selector = "repo_id=?"; value = .integer(receipt.repo); scope = "repo:\(receipt.repo)"
+    case .frontier(let frontier): selector = "repo_id=?"; value = .integer(frontier.repo); scope = "repo:\(frontier.repo)"
     }
+    // One baseline read per publish instead of one query per candidate.
+    var baseline: Set<String>?
+    let registry = ownLogSources(retainedReceipt: { key in
+      if baseline == nil {
+        var keys = Set<String>()
+        try self.connection.rows("SELECT receipt FROM agent_log_own_baseline") { keys.insert(SQLiteConnection.text($0, 0)) }
+        baseline = keys
+      }
+      return baseline!.contains(key)
+    })
+    // Read before any candidate: a receipt added meanwhile changes the state the next publish
+    // reads. Without a state every candidate is looked up, as when nothing is remembered.
+    let state = try? gitOwnershipState(registry)
+    if state == nil || gitOwnershipMemo.registry != state { gitOwnershipMemo = GitOwnershipMemo(registry: state) }
+    let source = state == nil ? nil : try gitSourceRevision()
+    if source == nil || gitOwnershipMemo.source != source { gitOwnershipMemo.source = source; gitOwnershipMemo.clean = [] }
+    if source != nil, gitOwnershipMemo.clean.contains(scope) { return }
     var owned: [Int] = []
     try connection.namedRows("SELECT id,ownership_authority FROM git_working_folders WHERE \(selector)", [value]) {
       try checkGitCancellation()
@@ -168,12 +201,30 @@ extension ActivityStorage {
       // Legacy links cannot authorize publication until raw discovery supplies authority.
       guard !encoded.isEmpty else { return }
       let authority = try JSONDecoder().decode([String].self, from: Data(encoded.utf8))
-      if try ownLogSources().containsAuthority(authority) { owned.append(try $0.int("id")) }
+      guard !authority.isEmpty else { throw AgentLogOwnSources.AuthorityError.invalidReceipt }
+      for candidate in authority where !gitOwnershipMemo.absent.contains(candidate) {
+        gitOwnershipLookups += 1
+        if try registry.containsAuthority([candidate]) { owned.append(try $0.int("id")); break }
+        if state != nil { gitOwnershipMemo.absent.insert(candidate) }
+      }
     }
     for id in owned {
       try connection.run("DELETE FROM git_working_folders WHERE id=?", [.integer(id)])
     }
     if !owned.isEmpty { try cleanGitOrphans() }
+    // Read inside this transaction before its write: a write to any folder row moves the
+    // revision, and a rollback restores the rows this answer was found for.
+    else if source != nil { gitOwnershipMemo.clean.insert(scope) }
+  }
+
+  /// The receipt registry folder's revision and the baseline. Both only grow; the folder
+  /// changes status whenever a receipt is added or removed.
+  private func gitOwnershipState(_ registry: AgentLogOwnSources) throws -> String {
+    var baseline = ""
+    try connection.namedRows("SELECT count(*) AS n,COALESCE(min(receipt),'') AS low,COALESCE(max(receipt),'') AS high FROM agent_log_own_baseline") {
+      baseline = [String(try $0.int("n")), try $0.text("low"), try $0.text("high")].joined(separator: ":")
+    }
+    return try registry.revision() + "|" + baseline
   }
 
   /// A failed child stream may already own durable chunks. Latch interruption
@@ -203,7 +254,7 @@ extension ActivityStorage {
       case .branch, .touch, .touchValidation: break
       }
     case .commitCompletion(let id): gitCommitReads[id]?.state = .complete
-    case .frontier(.certify(let repo, _, _)): gitReads[repo]?.state = .complete
+    case .frontier(.certify(let repo, _, _)), .frontier(.refresh(let repo, _, _)): gitReads[repo]?.state = .complete
     case .diagnostic, .commitParent, .commitUnit, .frontier: break
     }
   }
@@ -326,6 +377,11 @@ extension ActivityStorage {
     let token: String
     switch operation {
     case .staging, .begin: return nil
+    case .refresh(_, let active, let count):
+      // The active frontier is still the one the staged refs were compared with, whole.
+      guard try connection.integer("SELECT count(*) FROM git_repositories WHERE id=? AND frontier=? AND pending_frontier=''", [.integer(repo), .key(active)]) == 1,
+        try connection.integer("SELECT count(*) FROM git_refs WHERE repo_id=? AND frontier=?", [.integer(repo), .key(active)]) == count else { return .interrupted }
+      return nil
     case .row(_, let value), .chunk(_, let value, _), .certify(_, let value, _): token = value
     case .nativeFailure: return nil
     }
@@ -335,7 +391,7 @@ extension ActivityStorage {
       guard try connection.integer("SELECT count(*) FROM git_refs WHERE id=? AND repo_id=? AND frontier=?", [.integer(id), .integer(repo), .key(token)]) == 1 else { return .interrupted }
     case .certify(_, _, let count):
       guard try connection.integer("SELECT pending_ref_count FROM git_repositories WHERE id=?", [.integer(repo)]) == count else { return .interrupted }
-    case .staging, .begin, .row, .nativeFailure: break
+    case .staging, .begin, .row, .refresh, .nativeFailure: break
     }
     return nil
   }

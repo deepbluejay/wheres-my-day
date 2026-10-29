@@ -23,6 +23,10 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
   let gitSnapshotKey = "ActivityProbe.GitSourceSnapshot." + UUID().uuidString
   // Test seam: read-only connections opened to prepare Git sources.
   var gitSourceSnapshotOpens = 0
+  // Test seams: publishGit calls and ownership candidates looked up in the receipt registry.
+  var gitPublishCalls = 0
+  var gitOwnershipLookups = 0
+  var gitOwnershipMemo = GitOwnershipMemo()
   let url: URL
   let databaseScope: DatabaseOpenScope
   let ownBundleID: String

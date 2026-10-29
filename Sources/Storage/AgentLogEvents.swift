@@ -159,11 +159,15 @@ extension ActivityStorage {
     }
   }
   func ownLogSources() -> AgentLogOwnSources {
+    ownLogSources(retainedReceipt: { key in
+      try self.connection.integer("SELECT EXISTS(SELECT 1 FROM agent_log_own_baseline WHERE receipt=?)", [.key(key)]) != 0
+    })
+  }
+  /// The registry with the caller's answer for the database baseline.
+  func ownLogSources(retainedReceipt: @escaping (String) throws -> Bool) -> AgentLogOwnSources {
     AgentLogOwnSources(appDataDirectory: appDataDirectory, digest: {
       SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined()
-    }, retainedReceipt: { key in
-      try self.connection.integer("SELECT EXISTS(SELECT 1 FROM agent_log_own_baseline WHERE receipt=?)", [.key(key)]) != 0
-    }, receiptExists: { url in
+    }, retainedReceipt: retainedReceipt, receiptExists: { url in
       var info = stat()
       while true {
         if stat(url.path, &info) == 0 { return true }

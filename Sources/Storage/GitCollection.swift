@@ -1050,6 +1050,16 @@ extension ActivityStorage {
     if outcome != .accounted {
       try gitLocked { try connection.run("UPDATE git_repositories SET pending_frontier='',pending_ref_count=0 WHERE id=?", [.integer(repo)]) }
     }
+    if outcome == .accounted, let active = try gitUnchangedFrontier(repo: repo) {
+      // Writing the same refs under a new token every read never settles. The refresh moves
+      // their observation time exactly as a rewrite would, under the same gate.
+      try beforeGitFrontierPublication?()
+      _ = try publishGit(.frontier(.refresh(repo, active.token, active.count)), now: now) {
+        try connection.run("UPDATE git_refs SET ts=? WHERE repo_id=? AND frontier=?", [.integer(now), .integer(repo), .key(active.token)])
+        try connection.run("UPDATE git_repositories SET last_read=? WHERE id=?", [.integer(now), .integer(repo)])
+      }
+      return
+    }
     var cursor = ""
     var state: GitWorkState = .interrupted
     var published = 0
@@ -1108,6 +1118,31 @@ extension ActivityStorage {
           try connection.run("UPDATE git_repositories SET failures=failures+1 WHERE id=?", [.integer(repo)])
         }
       } catch is CancellationError { return }
+    }
+  }
+  /// The active frontier when the staged refs equal it in identity, name and tip. A ref name
+  /// long enough to be kept in chunks, staged or stored, never compares equal.
+  private func gitUnchangedFrontier(repo: Int) throws -> (token: String, count: Int)? {
+    try gitLocked {
+      var token = ""
+      try connection.namedRows("SELECT frontier FROM git_repositories WHERE id=? AND pending_frontier=''", [.integer(repo)]) { token = try $0.text("frontier") }
+      guard !token.isEmpty, try connection.integer("SELECT EXISTS(SELECT 1 FROM git_refs r JOIN git_value_text v ON v.kind=3 AND v.owner_id=r.id WHERE r.repo_id=? AND r.frontier=?)",
+        [.integer(repo), .key(token)]) == 0 else { return nil }
+      var stored: [[String]] = []
+      try connection.namedRows("SELECT identity,name,tip FROM git_refs WHERE repo_id=? AND frontier=? ORDER BY identity", [.integer(repo), .key(token)]) {
+        let identity = try $0.text("identity")
+        guard identity.hasPrefix(token + ":") else { throw StorageError.busy("Git frontier identity has no token") }
+        stored.append([String(identity.dropFirst(token.count + 1)), try $0.text("name"), try $0.text("tip")])
+      }
+      var staged: [[String]] = []
+      let chunked = try gitStageLocked { () throws -> Bool in
+        let stage = try gitStage()
+        try stage.namedRows("SELECT identity,name,tip FROM git_next_refs WHERE repo_id=? ORDER BY identity", [.integer(repo)]) {
+          staged.append([try $0.text("identity"), try $0.text("name"), try $0.text("tip")])
+        }
+        return try stage.integer("SELECT EXISTS(SELECT 1 FROM git_next_ref_text WHERE repo_id=?)", [.integer(repo)]) != 0
+      }
+      return !chunked && !stored.isEmpty && stored == staged ? (token, stored.count) : nil
     }
   }
   public func gitCommitKnown(repo: Int, hash: String) throws -> Bool {

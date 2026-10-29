@@ -1,6 +1,6 @@
 {
   "notes": "Reviewed nonpublication mutations: schema/adoption, irreversible privacy erasure/markers, bounded debt invalidation/disposal, and masked TEMP deletion selection. Gate-internal refusal/abandonment writes are part of authorization, not caller bypasses. Any change requires reviewing this inventory. CollectionFileCursor owns a private empty-filename SQLite manifest; its complete source digest pins the isolated adapter. Collection proof copies are restricted to SQLiteConnection temporary proof databases. Backfill progress marks (git_backfill_progress) only skip occurrences already offered to discovery; they never authorize a publication, and deleting the largest agent-log event id lowers them. Forget narrows its TEMP selection in the final unit so rows published in a batch gap are not cascaded. Finished-source receipts and the checkpoint-pass mark keep their value in the git_backfill_progress key (event_id 0) and likewise only skip work already offered. After narrowing, the final unit takes back only tombstones this forget added for rows that stay and are not in the range by themselves. Concatenated literals are joined before matching, and a non-literal operand is marked \\\\(+). A literal after a non-literal + operand, or one that starts with an interpolation, is marked \\\\(+) or kept as is when it still shows a statement tail (FROM, INTO, SET or git_); the reads this lists are rows/integer executions. A checkpoint pass saves its start as a write floor (a checkpoints:floor: key, event_id 0) before its first page, so later checkpoint writes stay above the mark it saves; saving the mark removes the floor.",
-  "gated_sites": 20,
+  "gated_sites": 22,
   "nonpublication": [
     {
       "file": "Sources/Storage/AXProbeStorage.swift",
@@ -627,6 +627,20 @@
       "sql": "INSERT OR REPLACE INTO git_next_ref_text VALUES(?,?,?,?)",
       "gated": true,
       "operation": "publishGit(.frontier(.staging(repo)), now: now,"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "finishGitRead",
+      "sql": "UPDATE git_refs SET ts=? WHERE repo_id=? AND frontier=?",
+      "gated": true,
+      "operation": "publishGit(.frontier(.refresh(repo, active.token, active.count)), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "finishGitRead",
+      "sql": "UPDATE git_repositories SET last_read=? WHERE id=?",
+      "gated": true,
+      "operation": "publishGit(.frontier(.refresh(repo, active.token, active.count)), now: now)"
     },
     {
       "file": "Sources/Storage/GitCollection.swift",
