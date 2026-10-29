@@ -7,7 +7,8 @@ import Storage
 
 public enum ActivityProbeEntry {
   /// Production and isolated routes share the same database-open boundary and composition.
-  public static func run(arguments: [String], environment: [String: String], userHome: URL, appBinary: URL) -> Int32 {
+  public static func run(arguments: [String], environment: [String: String], userHome: URL, appBinary: URL,
+    adapters: RecorderAdapters = .mac) -> Int32 {
     if arguments.first == "launch-agent" {
       let result = LaunchAgentCommand.run(Array(arguments.dropFirst()), userHome: userHome)
       if !result.output.isEmpty { print(result.output) }; return result.status
@@ -54,21 +55,21 @@ public enum ActivityProbeEntry {
         try RecorderWindowLauncher.launch(paths: paths, target: nil, environment: environment)
       }
       guard enabled else { return 0 }
-      let clock = WallRecorderClock()
+      let clock = adapters.clock()
       // The real adapters are constructed here only after isolation and startup validation.
-      let connections = try composition.recorder(processes: configuration.isolated ? NoAgentLogProcesses() : MacAgentLogProcessSource(), fileVault: FileVaultReader(),
+      let connections = try composition.recorder(processes: configuration.isolated ? NoAgentLogProcesses() : adapters.processes(), fileVault: adapters.fileVault(),
         from: 0, dayStart: { time in
           let settings = try? connectionsDayStart(paths: paths)
           return (try? TimelineDay.range(containing: time, dayStartHour: settings ?? TimelineDay.defaultDayStartHour, calendar: .current).start) ?? time
         }, locale: {
           (try? composition.queryStorage().settings().general["outputLanguage"]) ?? Locale.current.identifier
         }, recorderLock: guardOwner.recorderLock)
-      let input = MacInputSource()
-      let loop = connections.makeLoop(clock: clock, input: input, front: MacFrontWindowSource(),
-        secure: MacSecureInputSource(), awake: MacDisplayAwakeSource(), screen: MacScreenTextSource(), ownBundleID: AppPaths.bundleID)
-      let lifecycle = RecorderLifecycle(loop: loop, clock: clock, startInput: { _ = input.start() },
-        stopInput: input.stop, observeSession: { MacRecorderSessionObserver(receive: $0) },
-        initialSnapshot: MacRecorderSessionObserver.snapshot, requestSummary: { connections.summaryTask?.request(through: $0) })
+      let sources = adapters.sources()
+      let loop = connections.makeLoop(clock: clock, input: sources.input, front: sources.front,
+        secure: sources.secure, awake: sources.awake, screen: sources.screen, ownBundleID: AppPaths.bundleID)
+      let lifecycle = RecorderLifecycle(loop: loop, clock: clock, startInput: sources.startInput,
+        stopInput: sources.stopInput, observeSession: adapters.observeSession,
+        initialSnapshot: adapters.initialSnapshot, requestSummary: { connections.summaryTask?.request(through: $0) })
       // An open of the app starts the window process the same way as the menu at startup;
       // a running window process gets the request from that launch instead.
       // Isolated and test recorders never launch a window, so they never take opens either.
@@ -86,14 +87,10 @@ public enum ActivityProbeEntry {
       }
       loop.recordingDisabled = stop
       MainActor.assumeIsolated { events.endSession = stop }
-      signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
-      let signals = [SIGTERM, SIGINT].map { number -> DispatchSourceSignal in
-        let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
-        source.setEventHandler(handler: stop)
-        source.resume(); return source
-      }
+      let signals = adapters.signals(stop)
       try guardOwner.publish()
       lifecycle.start()
+      if let running = adapters.running { DispatchQueue.main.async { running(loop, stop) } }
       withExtendedLifetime((guardOwner, connections, lifecycle, signals)) { MainActor.assumeIsolated { events.run() } }
       // run returns only after the stop's drain; the lock and pid file go with guardOwner.
       return 0
@@ -170,6 +167,54 @@ public enum ActivityProbeEntry {
 }
 
 public enum IsolatedEntryError: Error { case arguments, paths }
+
+/// What a started recorder attaches to the Mac: its clock, collectors, session and signal observers.
+/// `mac` is the product's. A test injects fakes, so the same `collect` start runs with recording on
+/// without any collector, permission request or signal handler.
+public struct RecorderAdapters {
+  public struct Sources {
+    public var input: InputCountSource, front: FrontWindowSource, secure: SecureInputSource
+    public var awake: DisplayAwakeSource, screen: ScreenTextSource
+    public var startInput: () -> Void, stopInput: () -> Void
+    public init(input: InputCountSource, front: FrontWindowSource, secure: SecureInputSource, awake: DisplayAwakeSource,
+      screen: ScreenTextSource, startInput: @escaping () -> Void, stopInput: @escaping () -> Void) {
+      self.input = input; self.front = front; self.secure = secure; self.awake = awake; self.screen = screen
+      self.startInput = startInput; self.stopInput = stopInput
+    }
+  }
+  public var clock: () -> RecorderClock
+  public var processes: () -> AgentLogProcessSource
+  public var fileVault: () -> FileVaultStatusSource
+  public var sources: () -> Sources
+  public var observeSession: (@escaping (RecorderSessionEvent) -> Void) -> AnyObject?
+  public var initialSnapshot: () -> RecorderSessionSnapshot
+  /// Installs the stop on the process signals; returns what must live as long as the recorder.
+  public var signals: (@escaping () -> Void) -> [Any]
+  /// Called once on the main queue after the recorder starts, with its loop and stop. The product has none.
+  public var running: ((RecorderLoop, @escaping () -> Void) -> Void)?
+  public init(clock: @escaping () -> RecorderClock, processes: @escaping () -> AgentLogProcessSource,
+    fileVault: @escaping () -> FileVaultStatusSource, sources: @escaping () -> Sources,
+    observeSession: @escaping (@escaping (RecorderSessionEvent) -> Void) -> AnyObject?,
+    initialSnapshot: @escaping () -> RecorderSessionSnapshot, signals: @escaping (@escaping () -> Void) -> [Any],
+    running: ((RecorderLoop, @escaping () -> Void) -> Void)? = nil) {
+    self.clock = clock; self.processes = processes; self.fileVault = fileVault; self.sources = sources
+    self.observeSession = observeSession; self.initialSnapshot = initialSnapshot; self.signals = signals; self.running = running
+  }
+  public static var mac: RecorderAdapters { RecorderAdapters(clock: { WallRecorderClock() }, processes: { MacAgentLogProcessSource() },
+    fileVault: { FileVaultReader() }, sources: {
+      let input = MacInputSource()
+      return Sources(input: input, front: MacFrontWindowSource(), secure: MacSecureInputSource(), awake: MacDisplayAwakeSource(),
+        screen: MacScreenTextSource(), startInput: { _ = input.start() }, stopInput: input.stop)
+    }, observeSession: { MacRecorderSessionObserver(receive: $0) }, initialSnapshot: MacRecorderSessionObserver.snapshot,
+    signals: { stop in
+      signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
+      return [SIGTERM, SIGINT].map { number -> DispatchSourceSignal in
+        let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+        source.setEventHandler(handler: stop)
+        source.resume(); return source
+      }
+    }) }
+}
 
 public struct IsolatedRecorderConfiguration {
   public let paths: AppPaths

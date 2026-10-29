@@ -36,6 +36,8 @@ public struct ConversationConfiguration {
     environment: [String: String] = ProcessInfo.processInfo.environment, timeout: TimeInterval = 600,
     appDataDirectory: URL? = nil, appBinary: URL,
     skipApprovals: Bool = false, approvalTimeout: TimeInterval = 60) {
+    // A closed folder name with a pattern character would make Claude's any-case rule miss the folder.
+    precondition(Self.closedAppDataFolderNames.allSatisfy(Self.isPlainFolderName), "closed app-data folder name is not plain")
     self.command = command; self.userHome = userHome; self.toolServer = toolServer; self.database = database
     let appData = appDataDirectory ?? AppDataPaths.directory(in: userHome)
     self.appDataDirectory = appData

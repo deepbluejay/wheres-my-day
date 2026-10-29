@@ -25,7 +25,9 @@ tool, args = Path(sys.argv[0]).name, sys.argv[1:]
 with (root / 'events').open('a') as events:
     events.write(json.dumps([tool, *args]) + '\n')
 failure = os.environ.get('FAILURE', '')
-if tool == 'swift':
+if tool == 'swift' and args == ['package', 'resolve']:
+    if failure == 'resolve': sys.exit(46)
+elif tool == 'swift':
     if os.environ.get('PAUSE_BUILD') and '--product' in args and args[-1] == 'ActivityProbe':
         (root / 'paused').touch()
         while not (root / 'resume').exists(): time.sleep(0.02)
@@ -176,6 +178,21 @@ class PackagingTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assert_no_bundle_or_launch()
 
+    # Ideal: a dependency that cannot be resolved stops before the bundle is touched, and nothing launches.
+    def test_failed_resolve_keeps_previous_bundle_and_launches_nothing(self):
+        for command in ('build', 'start', 'status'):
+            with self.subTest(command=command):
+                (self.root / 'events').unlink(missing_ok=True)
+                self.seed_stale_bundle()
+                (self.root / 'build/.bundle.abandoned').mkdir()
+                result = self.run_wrapper(command, '--adhoc', failure='resolve')
+                self.assertEqual(result.returncode, 46)
+                self.assertEqual(self.events(), [['swift', 'package', 'resolve']])
+                self.assertTrue((self.app / 'obsolete-file').exists())
+                self.assertFalse((self.root / 'ran').exists())
+                self.assertFalse((self.root / 'opened').exists())
+                self.assertEqual(list((self.root / 'build').glob('.bundle.*')), [])
+
     def test_missing_identity_and_implicit_adhoc_are_refused_before_tools(self):
         for identity in (None, '', '-'):
             with self.subTest(identity=identity):
@@ -196,7 +213,8 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual({str(path.relative_to(self.app)) for path in self.app.rglob('*') if path.is_file()}, expected)
         calls = self.events()
         builds = [call for call in calls if call[0] == 'swift']
-        self.assertEqual(builds, [['swift', 'build', '--jobs', '1', '--product', 'ActivityProbe'],
+        self.assertEqual(builds, [['swift', 'package', 'resolve'],
+                                 ['swift', 'build', '--jobs', '1', '--product', 'ActivityProbe'],
                                  ['swift', 'build', '--jobs', '1', '--product', 'ActivityQueryServer'],
                                  ['swift', 'build', '--jobs', '1', '--show-bin-path']])
         signs = [call for call in calls if call[0] == 'codesign']

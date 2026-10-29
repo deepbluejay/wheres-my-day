@@ -20,17 +20,22 @@ build() (
   # The kernel releases the lock even after SIGKILL; never unlink its shared inode.
   exec 9>build/.packaging.lock
   /usr/bin/python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)'
-  # An unsuccessful attempt must never leave an older bundle available to launch.
-  rm -rf "$APP" build/.bundle.*
+  rm -rf build/.bundle.*
   local identity
   if [ "$ADHOC" = 1 ]; then
     identity=-
   elif [ -n "${SIGNING_IDENTITY:-}" ] && [ "$SIGNING_IDENTITY" != - ]; then
     identity="$SIGNING_IDENTITY"
   else
+    rm -rf "$APP"
     echo 'Set SIGNING_IDENTITY explicitly, or use --adhoc for isolated development.' >&2
     exit 2
   fi
+  # Dependencies come first: a remote that cannot be read stops here and changes nothing, so the
+  # bundle already built stays. Nothing below runs, and the command exits without launching it.
+  swift package resolve
+  # From here an unsuccessful attempt must never leave an older bundle available to launch.
+  rm -rf "$APP"
 
   STAGE=$(mktemp -d build/.bundle.XXXXXX)
   trap 'result=$?; rm -rf "$STAGE"; if [ "$result" -ne 0 ]; then rm -rf "$APP"; fi; exit "$result"' EXIT

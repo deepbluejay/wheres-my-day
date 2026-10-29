@@ -49,9 +49,17 @@ extension ConversationConfiguration {
   var claudeLoginFolder: URL { ClaudeLoginScript(appData: appDataDirectory).folder }
   /// Folders of other features under app data, which both agents otherwise reach. Their data enters a
   /// conversation only through a channel designed for it, never by an agent reading or changing the folder.
+  static let closedAppDataFolderNames: [String] = [
+  ]
   var closedAppDataFolders: [URL] {
-    [
-    ]
+    Self.closedAppDataFolderNames.map { appDataDirectory.appendingPathComponent($0, isDirectory: true) }
+  }
+  /// `anyCase` writes a closed name into a pattern without escaping it, so the name may hold only characters
+  /// no rule reads as a pattern: ASCII letters, digits, `.`, `_` and `-`. `.` and `..` would name app data or above.
+  static func isPlainFolderName(_ name: String) -> Bool {
+    !name.isEmpty && name != "." && name != ".." && name.unicodeScalars.allSatisfy {
+      ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || "._-".unicodeScalars.contains($0)
+    }
   }
   /// APFS opens a folder under any casing of its name. The sandboxes compare the resolved path, so only Claude's
   /// file tools, which compare the rule text, also get the name as a pattern that matches every casing.
