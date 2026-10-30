@@ -68,6 +68,13 @@ def imported_modules(source):
     return IMPORTS.findall(without_comments_and_strings(source))
 
 
+def spi_imports(source):
+    """The modules imported with an @_spi attribute, which opens a package's SPI surface."""
+    source = source.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    return [match.group(1) for match in IMPORTS.finditer(without_comments_and_strings(source))
+            if re.search(r"@_spi\b", match.group())]
+
+
 # The query helper's server and executable never link the app's wiring, even if Shell were declared for them.
 SHELL_FREE = {"Query", "ActivityQueryServer"}
 
@@ -85,6 +92,8 @@ def check_sources(target, modules, allowed, sources):
                 raise ValueError(
                     f"{target} may not import {module}; declare only permitted package dependencies"
                 )
+
+
 
 
 def main():

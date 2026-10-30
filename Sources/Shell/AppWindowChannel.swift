@@ -23,6 +23,8 @@ final class AppWindowChannel {
   private var made: (socket: ino_t, lock: ino_t) = (0, 0)
   private var source: DispatchSourceRead?
   private var reading: [Int32: DispatchSourceRead] = [:]
+  /// Answers nothing more, but holds the lifetime lock until `close` or the end of the process.
+  private var refusing = false
   private let state = NSLock()
   private let accepting = DispatchQueue(label: "window.channel")
   private var lockPath: String { socket.path + ".lock" }
@@ -97,6 +99,7 @@ final class AppWindowChannel {
       Darwin.close(lock)
     }
   }
+
 
   /// Stops listening. A command waiting for an answer, or started after this, opens a new window.
   func close() {
@@ -195,7 +198,7 @@ final class AppWindowChannel {
 
   private var isOpen: Bool {
     state.lock(); defer { state.unlock() }
-    return source != nil
+    return source != nil && !refusing
   }
 
   private func folderLock() -> Int32? {
