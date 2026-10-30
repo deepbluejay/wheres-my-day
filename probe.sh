@@ -83,6 +83,11 @@ build() (
   codesign --force --sign "$identity" "$bundle"
   codesign --verify --strict "$helper"
   codesign --verify --strict "$bundle"
+  # A source edited while it was built may or may not be in the bundle, so neither state can be recorded.
+  if [ "$(source_state)" != "$source" ]; then
+    echo 'The source changed during the build: bundle removed, not recorded.' >&2
+    exit 3
+  fi
   mv "$bundle" "$APP"
   printf '%s\n' "$source" > build/.bundle-commit
   rm -rf "$STAGE"

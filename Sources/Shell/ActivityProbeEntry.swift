@@ -7,8 +7,7 @@ import Storage
 
 public enum ActivityProbeEntry {
   /// Production and isolated routes share the same database-open boundary and composition.
-  /// The window is the only branch that may ever reach the account layer. The recorder and every command
-  /// start in `background`, and a build check follows every reference from the process start to confirm that.
+  /// Only here is the window chosen; the recorder and every command start in `background`.
   public static func run(arguments: [String], environment: [String: String], userHome: URL, appBinary: URL,
     adapters: RecorderAdapters = .mac) -> Int32 {
     if let window = windowRequest(arguments: arguments, environment: environment, userHome: userHome, appBinary: appBinary) {
@@ -28,7 +27,7 @@ public enum ActivityProbeEntry {
       ProcessPresentation.mode(arguments: parsed.arguments) == .dock else { return nil }
     return parsed
   }
-  /// The recorder and every command: never the window, so never the account layer.
+  /// The recorder and every command: never the window.
   static func background(arguments: [String], environment: [String: String], userHome: URL, appBinary: URL,
     adapters: RecorderAdapters) -> Int32 {
     if arguments.first == "launch-agent" {

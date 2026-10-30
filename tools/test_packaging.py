@@ -40,6 +40,8 @@ elif tool == 'swift':
         if failure == product: sys.exit(41)
         directory = root / 'products'
         directory.mkdir(exist_ok=True)
+        if os.environ.get('EDIT_DURING_BUILD') and product == 'ActivityQueryServer':
+            (root / 'invented-source.swift').write_text('// edited while the build ran')
         if failure != 'missing-helper' or product != 'ActivityQueryServer':
             path = directory / product
             if os.environ.get('NATIVE_PRODUCT'):
@@ -238,6 +240,35 @@ class PackagingTests(unittest.TestCase):
         self.assertNotEqual(self.run_wrapper('build', '--adhoc', failure='sign-app').returncode, 0)
         self.assertFalse(record.exists())
         self.assertTrue(problems(self.app, self.root))
+
+    # Ideal: a source edited during the build is recorded as neither the source before nor the one after.
+    def test_source_edited_during_the_build_is_not_recorded(self):
+        record = self.root / 'build/.bundle-commit'
+        (self.root / '.gitignore').write_text('fake-bin/\nevents\nproducts/\nbuild/\n')
+        (self.root / 'invented-source.swift').write_text('// before the build')
+        git = ['git', '-C', str(self.root), '-c', 'user.name=Invented', '-c', 'user.email=invented@example.invalid']
+        for arguments in (['init', '-q'], ['add', '-A'], ['commit', '-qm', 'invented']):
+            subprocess.run(git + arguments, check=True, capture_output=True)
+        for command in (('build',), ('status',)):
+            with self.subTest(command=command):
+                subprocess.run(git + ['checkout', '-q', '--', 'invented-source.swift'], check=True, capture_output=True)
+                (self.root / 'events').unlink(missing_ok=True)
+                self.seed_stale_bundle()
+                record.write_text('commit=invented-older\n')
+                environment = dict(self.environment, EDIT_DURING_BUILD='1')
+                result = subprocess.run(['/bin/bash', str(self.root / 'probe.sh'), *command, '--adhoc'],
+                                        env=environment, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 3, result.stderr)
+                self.assertIn('The source changed during the build: bundle removed, not recorded.', result.stderr)
+                # Checked after the signature is verified, so nothing later can change the bundle unseen.
+                self.assertEqual(self.events()[-1][0], 'codesign')
+                self.assertIn('--verify', self.events()[-1])
+                self.assertFalse(record.exists())
+                self.assert_no_bundle_or_launch()
+        # Without the edit the same tree builds and records.
+        subprocess.run(git + ['checkout', '-q', '--', 'invented-source.swift'], check=True, capture_output=True)
+        self.assertEqual(self.run_wrapper('build', '--adhoc').returncode, 0)
+        self.assertIn('dirty=0', record.read_text())
 
     def test_missing_identity_and_implicit_adhoc_are_refused_before_tools(self):
         for identity in (None, '', '-'):

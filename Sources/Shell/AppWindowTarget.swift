@@ -1,7 +1,7 @@
 import Core
 
 /// What a window request asks for. Every command and the recorder decide their presentation with these,
-/// so they live apart from the window-only files, where a scan of the recorder's sources sees them.
+/// so they live apart from the window-only files.
 public enum AppWindowTarget: Equatable {
   case timeline, conversation, settings(SettingsSection)
   public init?(arguments: [String]) {

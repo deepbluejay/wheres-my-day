@@ -28,6 +28,8 @@ extension QueryTests {
     }
     lines += try leaseDecisions().map { "lease \($0.0) \($0.1)" }
     lines += try executableRuns().map { "executable \($0)" }
+    // Last: these rows share the database the executable reads.
+    lines += try privacyReplies()
     let text = lines.joined(separator: "\n") + "\n"
     if ProcessInfo.processInfo.environment["QUERY_SERVER_GOLDEN_RECORD"] == "1" {
       try Data(text.utf8).write(to: Self.golden)
@@ -113,6 +115,41 @@ extension QueryTests {
       tool("search_activity", "{\(range)}"), tool("search_activity", "{\(range),\"query\":7}"),
       request("resources/list"), request("prompts/get"), request("ping")]))
     return sequences
+  }
+
+  /// An hour after the shared rows: a name the redaction masks, minutes the app's own
+  /// bundle (in either case) or an excluded sample hide, and a forgotten range inside one interval.
+  private func privacyReplies() throws -> [String] {
+    let base = start + 3600
+    try writer.appendIntervals([
+      NamedInterval(range: TimeRange(base, base + 180), name: "Invented card 4111 1111 1111 1111",
+        description: "order 1234 5678 9012 3456", kind: .work, project: "Invented 4111111111111111"),
+      NamedInterval(range: TimeRange(base + 180, base + 300), name: "Invented own window", kind: .work),
+      NamedInterval(range: TimeRange(base + 300, base + 480), name: "Invented forgotten", description: "Invented gone", kind: .work),
+      NamedInterval(range: TimeRange(base + 480, base + 600), name: "Invented after", kind: .personal),
+      NamedInterval(range: TimeRange(base + 600, base + 720), name: "Invented flagged", kind: .work),
+    ])
+    try writer.appendSamples([TimeSample(ts: base + 200, bundleID: ActivityProbeIdentity.bundleID),
+      TimeSample(ts: base + 260, bundleID: ActivityProbeIdentity.bundleID.uppercased()),
+      TimeSample(ts: base + 620, bundleID: "invented.flagged", excluded: true), TimeSample(ts: base + 780, keys: 1)])
+    let forgotten = TimeRange(base + 360, base + 420)
+    let preview = try writer.previewDeletion(in: forgotten, allowOver24Hours: false)
+    try writer.deleteRecords(in: forgotten, confirmation: preview.confirmation, allowOver24Hours: false)
+    let queries = ActivityQueries(storage: reader, calendar: calendar, now: { base + 1200 })
+    let server = ActivityQueryServer(queries: queries, authorized: { true })
+    func tool(_ name: String, _ arguments: String) -> String {
+      #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":""# + name + #"","arguments":"# + arguments + "}}"
+    }
+    let range = "\"from\":\(base),\"to\":\(base + 900)"
+    let requests = [#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+      tool("recent_work", "{\(range)}"), tool("time_breakdown", "{\(range)}"),
+      tool("search_activity", "{\(range),\"query\":\"Invented\"}"), tool("search_activity", "{\(range),\"query\":\"4111\"}"),
+      tool("search_activity", "{\(range),\"query\":\"forgotten\"}"), tool("search_activity", "{\(range),\"query\":\"own window\"}"),
+      tool("what_was_i_doing", "{\"at\":\(base + 60),\"minutes\":1}"), tool("what_was_i_doing", "{\"at\":\(base + 390),\"minutes\":1}"),
+      tool("what_was_i_doing", "{\"at\":\(base + 210),\"minutes\":1}"), tool("day_summary", "{\"at\":\(base)}")]
+    return requests.enumerated().map { index, request in
+      "reply privacy#\(index) " + (server.reply(to: Data(request.utf8)).map(Self.canonical) ?? "<none>")
+    }
   }
 
   /// Each lease condition changed alone from one valid lease, plus the boundaries of size and expiry.

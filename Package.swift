@@ -9,7 +9,8 @@ let package = Package(
     .target(name: "Storage", dependencies: ["Core"], linkerSettings: [.linkedLibrary("sqlite3")], plugins: ["ImportBoundary"]),
     .target(name: "Inbound", dependencies: ["Core"], plugins: ["ImportBoundary"]),
     .target(name: "Outbound", dependencies: ["Core"], plugins: ["ImportBoundary"]),
-    .target(name: "Shell", dependencies: ["Core", "Storage", "Inbound", "Outbound"], resources: [.copy("AgentCleanup")], plugins: ["ImportBoundary"]),
+    .target(name: "Shell", dependencies: ["Core", "Storage", "Inbound", "Outbound",
+    ], resources: [.copy("AgentCleanup")], plugins: ["ImportBoundary"]),
     // The query helper's server stays out of Shell, so its executable links neither the app's wiring nor the window.
     .target(name: "Query", dependencies: ["Core", "Outbound"], plugins: ["ImportBoundary"]),
     .executableTarget(name: "agent-cleanup", dependencies: ["Shell"], path: "tools/agent-cleanup"),
