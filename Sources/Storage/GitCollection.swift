@@ -916,6 +916,31 @@ extension ActivityStorage {
       return result
     }
   }
+  /// The gate refuses every further unit of a repository marked here. It stops a running
+  /// read too: its preparation check turns false and the Git child is killed.
+  public func setGitRepositoryCopy(_ repo: Int, _ copy: Bool) throws {
+    try gitLocked {
+      if copy { gitCopyRepositories.insert(repo) } else { gitCopyRepositories.remove(repo) }
+    }
+  }
+  /// The working trees a repository's folders were resolved to, as stored. A stored path
+  /// that was masked names nothing on disk; its raw form comes from a live observation.
+  public func gitRepositoryTopLevels(_ repo: Int) throws -> Set<String> {
+    try gitLocked {
+      var tops = Set<String>()
+      try connection.namedRows("SELECT DISTINCT top_level FROM git_working_folders WHERE repo_id=? AND complete=1", [.integer(repo)]) {
+        tops.insert(try $0.text("top_level"))
+      }
+      return tops
+    }
+  }
+  /// The repository already admitted with this raw common directory, if any.
+  public func gitRepositoryID(commonDirectory: String) throws -> Int? {
+    try gitLocked {
+      let id = try connection.integer("SELECT COALESCE(max(id),0) FROM git_repositories WHERE identity=?", [.key(Self.gitDigest(commonDirectory))])
+      return id == 0 ? nil : id
+    }
+  }
   public func gitReopenBlocked(repo: Int, blocked: Bool, now: Int) throws {
     _ = try publishGit(.diagnostic(.repository(repo)), now: now) {
       try connection.run("UPDATE git_repositories SET reopen_blocked=? WHERE id=?",
@@ -1247,7 +1272,7 @@ extension ActivityStorage {
   public func gitPreparationGeneration(repo: Int, now: Int) throws -> Int? {
     try gitLocked {
       guard try gitRecordingAllowed(at: now),
-        try connection.integer("SELECT count(*) FROM git_repositories WHERE id=? AND \(collectibleGitRepository)", [.integer(repo)]) == 1 else { return nil }
+        try gitRepositoryPermitted(repo) else { return nil }
       return try gitPrivacyGeneration()
     }
   }
@@ -1279,7 +1304,7 @@ extension ActivityStorage {
     try gitLocked {
       try gitPolicyAllowed(generation: generation, policy: policy, now: now)
         && connection.integer("SELECT count(*) FROM git_tombstones WHERE hash=?", [.key(hash)]) == 0
-        && connection.integer("SELECT count(*) FROM git_repositories WHERE id=? AND \(collectibleGitRepository)", [.integer(repo)]) == 1
+        && gitRepositoryPermitted(repo)
     }
   }
   public func gitReadNeedsRetry(repo: Int) throws -> Bool {

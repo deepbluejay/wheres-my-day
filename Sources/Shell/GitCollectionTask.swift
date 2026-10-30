@@ -68,8 +68,22 @@ public final class GitCollectionTask {
   var commitReads = 0
   /// Discovery, backfill and history are measured as stages; usage is only recorded.
   var usage = StageUsage.shared
+  // Where the stage's current run began, for its checkpoints: CPU on its thread, and counters.
+  private var discoveryRun = (cpu: UInt64(0), visits: 0, skips: 0)
+  private var backfillRun = (cpu: UInt64(0), rows: 0, checkpoints: 0, offers: 0)
+  private var historyRun = (cpu: UInt64(0), reads: 0)
   private var rawDirectories: [Int: String] = [:]
   private var rawWorkingFolders: [Int: String] = [:]
+  // A tool's copy of a repository. All under discoveryLock. Raw folders refused, with the
+  // time, cost no Git child until the answer expires. A repository's verdict is reached
+  // once from its stored working trees, plus the raw ones observed in this process.
+  static let copyStatus = "refused_copy"
+  private static let refusedFolderLimit = 4096
+  private enum CopyVerdict { case decided(copy: Bool, at: Int), failed(at: Int, failures: Int) }
+  private let copies: GitCopyCheck
+  private var refusedFolders: [String: Int] = [:]
+  private var copyVerdicts: [Int: CopyVerdict] = [:]
+  private var rawTopLevels: [Int: Set<String>] = [:]
   private let cancellation = GitTaskCancellation()
   private let scratchParent: URL
   private let scratchRoot: URL
@@ -80,6 +94,7 @@ public final class GitCollectionTask {
     scratchRoot = scratchDirectory.appendingPathComponent("activityprobe-git-task-" + UUID().uuidString)
     storage.setGitSecureInput(secureInput)
     self.storage = storage; self.reader = reader; self.sliceDuration = sliceDuration
+    copies = GitCopyCheck(reader: reader)
     historyQueue.async { [weak self] in
       guard let self, !self.isStopped else { return }
       try? self.storage.withGitCancellation(self.cancellation) {
@@ -144,6 +159,8 @@ public final class GitCollectionTask {
           try reader.directoryLocation(folder.folder)
         }) {
           rawDirectories[repo] = location.commonDirectory
+          rawTopLevels[repo, default: []].insert(location.topLevel)
+          copyVerdicts[repo] = nil
           try storage.gitReopenBlocked(repo: repo, blocked: false, now: now)
         }
       }
@@ -155,6 +172,7 @@ public final class GitCollectionTask {
       if let known = try storage.knownGitFolder(folder) { rawWorkingFolders[known.id] = folder.folder }
       return .other
     }
+    if let refused = refusedFolders[folder.folder], abs(now - refused) < GitCopyCheck.lifetime { return .other }
     let previous = try storage.gitUnlinkedFolderState(folder)
     // No Git child for a folder outside every repository: it is not a read failure, and a
     // later git init is still found by this path check at the next occurrence.
@@ -171,16 +189,20 @@ public final class GitCollectionTask {
     guard let generation = try storage.gitObservationGeneration(now: now) else { return .other }
     let policy = try storage.gitPreparationPolicy()
     var prepared: GitPreparedRepositoryLocation
+    var copy = false
     do {
       prepared = try reader.withCancellation(cancellation: cancellation, shouldContinue: {
         !self.isStopped && (try? self.storage.gitPolicyAllowed(generation: generation, policy: policy, now: now)) == true
       }) {
         try beforeLocationPrepared?(folder.folder)
-        return try reader.preparedLocation(folder.folder)
+        let location = try reader.preparedLocation(folder.folder)
+        copy = try copies.isCopy(topLevel: location.location.topLevel, commonDirectory: location.location.commonDirectory, now: now)
+        return location
       }
     } catch {
       // Any read error, such as a path that cannot be resolved, is this folder's failure
-      // with the usual backoff, so it cannot stop the batch or hold a backfill mark.
+      // with the usual backoff, so it cannot stop the batch or hold a backfill mark. That
+      // includes the copy check: a repository it cannot clear is refused until the retry.
       guard !isStopped, (error as? GitReadError) != .cancelled else { return .other }
       try storage.rememberGitFolder(folder, location: nil, status: "failed", now: now, position: position, preparationGeneration: generation, preparationPolicy: policy)
       if let known = try storage.knownGitFolder(folder) { rawWorkingFolders[known.id] = folder.folder }
@@ -189,11 +211,33 @@ public final class GitCollectionTask {
     do {
       try afterLocationPrepared?(&prepared)
       let location = prepared.location
+      if copy {
+        if refusedFolders.count >= Self.refusedFolderLimit { refusedFolders.removeAll() }
+        refusedFolders[folder.folder] = now
+        if previous?.status != Self.copyStatus {
+          try storage.rememberGitFolder(folder, location: nil, status: Self.copyStatus, now: now, position: position, preparationGeneration: generation, preparationPolicy: policy)
+        }
+        if let known = try storage.knownGitFolder(folder) { rawWorkingFolders[known.id] = folder.folder }
+        // Its repository may already be admitted through another folder; that read stops now.
+        if let repo = try storage.gitRepositoryID(commonDirectory: location.commonDirectory) {
+          rawDirectories[repo] = location.commonDirectory
+          rawTopLevels[repo, default: []].insert(location.topLevel)
+          copyVerdicts[repo] = nil
+          _ = try reader.withCancellation(cancellation: cancellation, shouldContinue: { self.readAllowed(at: now) }) {
+            try refusedAsCopy(repo: repo, directory: location.commonDirectory, now: now)
+          }
+        }
+        return .other
+      }
       // Publication failures belong to storage, and must never create a failed Git discovery.
       try storage.rememberGitFolder(folder, location: location, status: "ready", now: now, position: position,
         preparedBranch: prepared.branch, preparationGeneration: generation, preparationPolicy: policy)
       if let known = try storage.knownGitFolder(folder), let repo = known.repo {
         rawDirectories[repo] = location.commonDirectory
+        rawTopLevels[repo, default: []].insert(location.topLevel)
+        // A working tree that is not a copy makes the whole repository the owner's.
+        copyVerdicts[repo] = nil
+        try storage.setGitRepositoryCopy(repo, false)
         try storage.gitReopenBlocked(repo: repo, blocked: false, now: now)
         rawWorkingFolders[known.id] = folder.folder
         return .registered
@@ -464,6 +508,7 @@ public final class GitCollectionTask {
           allowed: allowed), try allowed() else { return false }
         try storage.saveGitBackfillProgress(last, source: position)
         cursor = last.id
+        checkpointBackfill()
       }
     }
   }
@@ -488,6 +533,7 @@ public final class GitCollectionTask {
         guard let pageLast = page.last else { break }
         guard try offer(page.rows.map(\.folder), now: now, fromStored: true, position: nil, allowed: allowed), try allowed() else { return false }
         cursor = pageLast.id; storedLast = pageLast; storedCursor = cursor
+        checkpointBackfill()
       }
       // A clock set back below the mark rereads every checkpoint once instead of skipping some.
       // A resumed pass keeps the time and threshold of the attempt that started at cursor 0.
@@ -506,6 +552,7 @@ public final class GitCollectionTask {
         guard let pageLast = page.last else { break }
         guard try offer(page.rows.map(\.folder), now: now, fromStored: true, position: nil, allowed: allowed), try allowed() else { return false }
         checkpointCursor = pageLast.id
+        checkpointBackfill()
       }
       let last = storedLast
       storedCursor = nil; storedLast = nil; checkpointCursor = 0; checkpointSince = nil
@@ -518,14 +565,17 @@ public final class GitCollectionTask {
   }
   private func measureBackfill(_ body: () throws -> Void) rethrows {
     try usage.measure("git_backfill") { items in
-      schedulingLock.lock(); let rows = backfillRows, checkpoints = checkpointRows, offers = backfillOffers; schedulingLock.unlock()
-      defer {
-        schedulingLock.lock()
-        items["rows"] = backfillRows - rows; items["checkpoints"] = checkpointRows - checkpoints; items["offers"] = backfillOffers - offers
-        schedulingLock.unlock()
-      }
+      schedulingLock.lock(); backfillRun = (StageUsage.threadCPU(), backfillRows, checkpointRows, backfillOffers); schedulingLock.unlock()
+      defer { items = backfillItems() }
       try body()
     }
+  }
+  private func backfillItems() -> [String: Int] {
+    schedulingLock.lock(); defer { schedulingLock.unlock() }
+    return ["rows": backfillRows - backfillRun.rows, "checkpoints": checkpointRows - backfillRun.checkpoints, "offers": backfillOffers - backfillRun.offers]
+  }
+  private func checkpointBackfill() {
+    usage.checkpoint("git_backfill", cpuNanoseconds: StageUsage.threadCPU() &- backfillRun.cpu, items: backfillItems())
   }
   private func countRows(_ page: GitBackfillPage) {
     schedulingLock.lock(); backfillRows += page.rows.count; schedulingLock.unlock()
@@ -566,6 +616,7 @@ public final class GitCollectionTask {
     defer { scheduleBackfill() }
     try usage.measure("git_discovery") { items in
       let visits = discoveryVisits, skips = discoverySkips
+      discoveryRun = (StageUsage.threadCPU(), visits, skips)
       defer { items["visited"] = discoveryVisits - visits; items["skipped"] = discoverySkips - skips }
       try storage.withGitCancellation(cancellation) { try discoverAllowed(at: now) }
     }
@@ -578,6 +629,8 @@ public final class GitCollectionTask {
     guard try storage.gitRecordingAllowed(at: now) else { return }
     rawDirectories = try rawDirectories.filter { try cancellation.check(); return try storage.gitRepositoryExists($0.key) }
     rawWorkingFolders = try rawWorkingFolders.filter { try cancellation.check(); return try storage.gitFolderExists($0.key) }
+    copyVerdicts = try copyVerdicts.filter { try cancellation.check(); return try storage.gitRepositoryExists($0.key) }
+    rawTopLevels = try rawTopLevels.filter { try cancellation.check(); return try storage.gitRepositoryExists($0.key) }
     requestStoredBackfill(at: now)
     // Any change to what every visit consults, such as a receipt, forget, pause or the
     // retention day, revisits every folder.
@@ -588,6 +641,8 @@ public final class GitCollectionTask {
     try storage.withGitSourceSnapshot {
       while let (id, folder, repo) = try storage.nextGitFolder(after: folderCursor) {
         guard !isStopped, try storage.gitRecordingAllowed(at: now) else { return }
+        usage.checkpoint("git_discovery", cpuNanoseconds: StageUsage.threadCPU() &- discoveryRun.cpu,
+          items: ["visited": discoveryVisits - discoveryRun.visits, "skipped": discoverySkips - discoveryRun.skips])
         folderCursor = id
         visited.insert(id)
         var observation = folder
@@ -616,7 +671,7 @@ public final class GitCollectionTask {
         if repo == nil && seen.exists { try observe(observation, now: now) }
         // The inputs this visit left behind. A visit with them again writes nothing: the
         // presence already matches and an unversioned folder stays unversioned.
-        if repo != nil || !seen.exists || seen.outside == true { discoveryUnchanged[id] = try inputs(seen) }
+        if repo != nil || !seen.exists || seen.outside == true || refusedFolders[observation.folder] != nil { discoveryUnchanged[id] = try inputs(seen) }
       }
       discoveryUnchanged = discoveryUnchanged.filter { visited.contains($0.key) }
     }
@@ -627,6 +682,7 @@ public final class GitCollectionTask {
     guard !isStopped else { return }
     try usage.measure("git_history") { items in
       let reads = commitReads
+      historyRun = (StageUsage.threadCPU(), reads)
       defer { items["commits"] = commitReads - reads }
       try storage.withGitCancellation(cancellation) {
         try reader.withCancellation(cancellation: cancellation, shouldContinue: { self.readAllowed(at: now) }) { try scanHistoryAllowed(at: now) }
@@ -643,6 +699,11 @@ public final class GitCollectionTask {
         guard !isStopped, try storage.gitRecordingAllowed(at: now) else { return }
         advanced = true
         do {
+          if try refusedAsCopy(repo: repo.id, directory: repo.directory, now: now) {
+            if pending.removeValue(forKey: repo.id) != nil { try storage.finishGitRead(repo: repo.id, now: now, outcome: .interrupted) }
+            completed.insert(repo.id)
+            continue
+          }
           let read: PendingGitRead
           if let existing = pending[repo.id] { read = existing }
           else { read = try prepare(repo, now: now); pending[repo.id] = read }
@@ -650,6 +711,7 @@ public final class GitCollectionTask {
             try storage.finishGitRead(repo: repo.id, now: now, outcome: .accounted)
             pending.removeValue(forKey: repo.id); completed.insert(repo.id)
           }
+          usage.checkpoint("git_history", cpuNanoseconds: StageUsage.threadCPU() &- historyRun.cpu, items: ["commits": commitReads - historyRun.reads])
         } catch {
           pending.removeValue(forKey: repo.id); completed.insert(repo.id)
           // Only an actual Git read error counts as a read failure. Storage admission,
@@ -662,6 +724,35 @@ public final class GitCollectionTask {
       pending = try pending.filter { try cancellation.check(); return try storage.gitRepositoryExists($0.key) }
       if !advanced { return }
     }
+  }
+  /// Whether a repository's read must stop: every working tree that still exists is a tool's
+  /// copy, or none could be cleared and the check failed, which retries with the usual backoff.
+  /// A repository with no working tree left to judge keeps the behavior it had.
+  private func refusedAsCopy(repo: Int, directory: String, now: Int) throws -> Bool {
+    discoveryLock.lock(); defer { discoveryLock.unlock() }
+    var failures = 0
+    switch copyVerdicts[repo] {
+    case .decided(let copy, let at)? where abs(now - at) < GitCopyCheck.lifetime: return copy
+    case .failed(let at, let count)?:
+      if now >= at, now - at < Self.retryDelay(failures: count) { return true }
+      failures = count
+    default: break
+    }
+    let common = rawDirectories[repo] ?? directory
+    var copy = false, owner = false, failed = false
+    let tops = try storage.gitRepositoryTopLevels(repo).union(rawTopLevels[repo] ?? [])
+    for top in tops.sorted() where top.hasPrefix("/") && FileManager.default.fileExists(atPath: top) {
+      do {
+        if try copies.isCopy(topLevel: top, commonDirectory: common, now: now) { copy = true } else { owner = true; break }
+      } catch {
+        guard !isStopped, (error as? GitReadError) != .cancelled else { throw error }
+        failed = true
+      }
+    }
+    let refused = !owner && (copy || failed)
+    try storage.setGitRepositoryCopy(repo, refused)
+    copyVerdicts[repo] = !owner && failed ? .failed(at: now, failures: failures + 1) : .decided(copy: refused, at: now)
+    return refused
   }
   private func prepare(_ repo: StoredGitRepository, now: Int) throws -> PendingGitRead {
     guard let generation = try storage.gitPreparationGeneration(repo: repo.id, now: now) else { throw GitReadError.cancelled }

@@ -139,7 +139,8 @@ In the code:
 - Each stage records its thread CPU time and item counts. `status` shows them:
   - `stage_<name>_last_*` covers the latest maintenance tick;
   - `stage_<name>_total_*` covers the time since the recorder started;
-  - `stage_usage_at` is the time of the last tick.
+  - `stage_<name>_running_*` is a run not finished yet, as of its latest checkpoint, and counts in neither of the above. Only the Git stages report it so far: `git_history` after each time slice, `git_backfill` after each page, `git_discovery` at each folder;
+  - `stage_usage_at` is the time of the last tick. The file is also rewritten at most once a minute while a stage runs longer than that.
 - The stages:
 
   | Stage | Items |

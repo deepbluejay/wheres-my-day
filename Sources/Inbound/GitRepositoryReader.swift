@@ -38,6 +38,7 @@ public final class GitRepositoryReader {
   private let permissionKey = "ActivityProbe.GitPermission." + UUID().uuidString
   var beforePreparedChunk: ((Int) throws -> Void)?
   var afterPreparedUnit: ((String) throws -> Void)?
+  var beforeIgnoreCheck: (() throws -> Void)?
   public init(timeout: TimeInterval = 30) { self.timeout = timeout }
   var activeProcessIDs: [Int32] {
     processLock.lock(); defer { processLock.unlock() }; return Array(processes.keys)
@@ -80,13 +81,18 @@ public final class GitRepositoryReader {
   }
   public func run(at path: String, _ arguments: [String], input: URL? = nil,
     consume: (Data) throws -> Void) throws {
+    _ = try run(at: path, arguments, input: input, succeeding: [0], consume: consume)
+  }
+  /// Returns the exit status, one of `succeeding`; any other is a failed read.
+  private func run(at path: String, _ arguments: [String], input: URL? = nil, succeeding: Set<Int32>,
+    consume: (Data) throws -> Void) throws -> Int32 {
     guard !Thread.isMainThread else { throw GitReadError.mainThread }
     let permission = Thread.current.threadDictionary[permissionKey] as? GitReadPermission
     guard permission?.allows() != false else { throw GitReadError.cancelled }
     processLock.lock(); let generation = cancellationGeneration; processLock.unlock()
     // Built-ins only: aliases and remote/credential commands have no collection entry point.
     guard let command = arguments.first,
-      ["rev-parse", "symbolic-ref", "for-each-ref", "worktree", "merge-base", "show", "diff-tree", "cat-file", "rev-list"].contains(command)
+      ["rev-parse", "symbolic-ref", "for-each-ref", "worktree", "merge-base", "show", "diff-tree", "cat-file", "rev-list", "check-ignore"].contains(command)
     else { throw GitReadError.failed }
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
@@ -157,7 +163,22 @@ public final class GitRepositoryReader {
     process.waitUntilExit()
     guard !cancelled() else { throw GitReadError.cancelled }
     guard !progress.timedOut(after: timeout) else { throw GitReadError.timedOut }
-    guard process.terminationStatus == 0 else { throw GitReadError.failed }
+    guard succeeding.contains(process.terminationStatus) else { throw GitReadError.failed }
+    return process.terminationStatus
+  }
+  /// Whether the repository of the working tree `top` ignores `path` inside it, by its own
+  /// rules. Status 1 is a clean "no"; a tracked path, such as a submodule, is never ignored.
+  /// The rules are that repository's: this reader runs without the owner's global Git config.
+  public func ignores(_ path: String, inWorkTree top: String) throws -> Bool {
+    let prefix = top.hasSuffix("/") ? top : top + "/"
+    guard path.hasPrefix(prefix) else { throw GitReadError.failed }
+    try beforeIgnoreCheck?()
+    // "./" keeps a name starting with ":" from reading as pathspec magic.
+    return try run(at: top, ["check-ignore", "-q", "--", "./" + path.dropFirst(prefix.count)], succeeding: [0, 1]) { _ in } == 0
+  }
+  /// False inside a bare repository or a .git directory: Git is there, a working tree is not.
+  public func insideWorkTree(_ folder: String) throws -> Bool {
+    try value(at: folder, ["rev-parse", "--is-inside-work-tree"]) == "true"
   }
   public func tokens(at path: String, _ arguments: [String], separator: UInt8 = 0, input: URL? = nil,
     visit: (String) throws -> Void) throws {

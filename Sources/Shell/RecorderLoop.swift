@@ -134,7 +134,7 @@ public final class RecorderLoop {
   private var maintenanceRunning = false
   private var maintenanceResults: [String] = []
   /// Called on the maintenance queue after each tick's tasks with every stage's usage.
-  var publishUsage: ((StageUsage.Snapshot) -> Void)?
+  var publishUsage: ((StageUsage.Snapshot) -> Void)? { didSet { usage.publishProgress(publishUsage) } }
   let usage: StageUsage
 
   public init(

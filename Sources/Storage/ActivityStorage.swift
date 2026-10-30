@@ -49,6 +49,9 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
   var gitFolderPreparations: [String: GitFolderPreparation] = [:]
   var gitCommitReads: [Int: GitCommitPublication] = [:]
   var gitReads: [Int: GitReadPublication] = [:]
+  /// Repositories the Git task found to be a tool's copy, or could not yet tell apart from
+  /// one. In memory only: the task decides again in each process.
+  var gitCopyRepositories = Set<Int>()
   var gitStageConnection: SQLiteConnection?
   var gitStageCancellation: GitTaskCancellation?
   let gitStageLock = NSRecursiveLock()

@@ -29,6 +29,60 @@ final class StageUsageTests: XCTestCase {
     XCTAssertGreaterThan(usage.roll(at: 40).stages["spin"]!.lastCPUNanoseconds, 0)
   }
 
+  /// A run still going shows only in `running`; its end moves it to `last` and `total`.
+  func testCheckpointShowsARunWithoutChangingFinishedCounters() {
+    let usage = StageUsage()
+    usage.record("invented", cpuNanoseconds: 1_000_000, items: ["reads": 1])
+    _ = usage.roll(at: 5)
+    usage.checkpoint("invented", cpuNanoseconds: 7_000_000, items: ["reads": 9], at: 100)
+    usage.checkpoint("invented", cpuNanoseconds: 8_000_000, items: ["reads": 10], at: 110)
+    var stage = usage.roll(at: 120).stages["invented"]!
+    XCTAssertEqual(stage.running, StageUsage.Running(cpuNanoseconds: 8_000_000, items: ["reads": 10], since: 100, at: 110))
+    XCTAssertEqual(stage.lastRuns, 0); XCTAssertEqual(stage.last, [:]); XCTAssertEqual(stage.lastCPUNanoseconds, 0)
+    XCTAssertEqual(stage.totalRuns, 1); XCTAssertEqual(stage.total, ["reads": 1]); XCTAssertEqual(stage.totalCPUNanoseconds, 1_000_000)
+    // A later tick still shows the run.
+    XCTAssertNotNil(usage.roll(at: 130).stages["invented"]!.running)
+    usage.record("invented", cpuNanoseconds: 9_000_000, items: ["reads": 11])
+    stage = usage.roll(at: 140).stages["invented"]!
+    XCTAssertNil(stage.running)
+    XCTAssertEqual(stage.lastRuns, 1); XCTAssertEqual(stage.last, ["reads": 11]); XCTAssertEqual(stage.total, ["reads": 12])
+  }
+  /// A short run writes nothing extra; a long one publishes at most once per interval.
+  func testCheckpointPublishesOnlyARunOlderThanTheInterval() {
+    let usage = StageUsage(), interval = StageUsage.progressInterval
+    var published: [StageUsage.Snapshot] = []
+    usage.publishProgress { published.append($0) }
+    _ = usage.roll(at: 3)
+    usage.checkpoint("invented", cpuNanoseconds: 1, at: 1000)
+    usage.checkpoint("invented", cpuNanoseconds: 2, at: 1000 + interval - 1)
+    XCTAssertEqual(published.count, 0)
+    usage.checkpoint("invented", cpuNanoseconds: 3, at: 1000 + interval)
+    XCTAssertEqual(published.count, 1)
+    usage.checkpoint("invented", cpuNanoseconds: 4, at: 1000 + interval + 1)
+    XCTAssertEqual(published.count, 1)
+    usage.checkpoint("invented", cpuNanoseconds: 5, at: 1000 + 2 * interval)
+    XCTAssertEqual(published.count, 2)
+    // The tick's time stays the tick's, and its rolling is not done here.
+    XCTAssertEqual(published[1].time, 3)
+    XCTAssertEqual(published[1].stages["invented"]?.running?.cpuNanoseconds, 5)
+  }
+  /// The recorder's own publication also serves long runs, between ticks.
+  func testRecorderLoopPublishesProgressBetweenTicks() {
+    let usage = StageUsage(), clock = FakeClock(), sources = FakeSources(); sources.clock = clock
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let storage = try! ActivityStorage(url: root.appendingPathComponent("invented.sqlite"), appDataDirectory: root, databaseScope: .directory(root))
+    let loop = RecorderLoop(clock: clock, input: sources, front: sources, secure: sources, awake: sources,
+      screen: sources, storage: storage, maintenanceStorage: storage, ownBundleID: "invented.own", usage: usage)
+    var published = 0
+    loop.publishUsage = { _ in published += 1 }
+    usage.checkpoint("invented", cpuNanoseconds: 1, at: 1000)
+    usage.checkpoint("invented", cpuNanoseconds: 2, at: 1000 + StageUsage.progressInterval)
+    XCTAssertEqual(published, 1)
+    loop.stop()
+  }
+
   /// Each maintenance tick ends by publishing every stage, retention included, and
   /// `status` shows the published figures.
   func testMaintenanceTickPublishesStageUsageThatStatusShows() throws {

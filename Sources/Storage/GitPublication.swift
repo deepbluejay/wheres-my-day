@@ -315,6 +315,7 @@ extension ActivityStorage {
       switch diagnostic {
       case .repository(let repo): return try gitRepositoryPermitted(repo) ? nil : .interrupted
       case .folder(let id):
+        guard try !gitFolderInCopyRepository(id) else { return .interrupted }
         var eligible = false
         try connection.namedRows("SELECT f.ts,f.last_seen,f.folder,f.tool FROM git_working_folders f WHERE f.id=? AND \(gitPermittedSourcePredicate)", [.integer(id)]) {
           let time = try $0.int("ts")
@@ -388,7 +389,8 @@ extension ActivityStorage {
           producer.state == .admitted, gitProducerAllowed(producer.cancellation) else { return .interrupted }
         guard try connection.integer("SELECT count(*) FROM git_working_folders WHERE id=? AND complete=0", [.integer(id)]) == 1 else { return .interrupted }
       case .touch(let id):
-        guard try connection.integer("SELECT count(*) FROM git_working_folders WHERE id=? AND complete=1", [.integer(id)]) == 1 else { return .interrupted }
+        guard try !gitFolderInCopyRepository(id),
+          try connection.integer("SELECT count(*) FROM git_working_folders WHERE id=? AND complete=1", [.integer(id)]) == 1 else { return .interrupted }
       }
       return nil
     }
@@ -444,7 +446,13 @@ extension ActivityStorage {
   }
 
   func gitRepositoryPermitted(_ repo: Int) throws -> Bool {
-    try connection.integer("SELECT count(*) FROM git_repositories WHERE id=? AND \(collectibleGitRepository)", [.integer(repo)]) == 1
+    try !gitCopyRepositories.contains(repo)
+      && connection.integer("SELECT count(*) FROM git_repositories WHERE id=? AND \(collectibleGitRepository)", [.integer(repo)]) == 1
+  }
+
+  private func gitFolderInCopyRepository(_ id: Int) throws -> Bool {
+    guard !gitCopyRepositories.isEmpty else { return false }
+    return try gitCopyRepositories.contains(connection.integer("SELECT COALESCE(repo_id,0) FROM git_working_folders WHERE id=?", [.integer(id)]))
   }
 
   private func gitNativeTimeRefusal(_ receipt: GitCommitPublication) throws -> GitPublicationRefusal? {

@@ -2,7 +2,8 @@ import Core
 import Foundation
 
 /// Per-stage CPU and item counts sit beside the database, like the collection health
-/// counts: numbers and stage names only, rewritten once per maintenance tick.
+/// counts: numbers and stage names only, rewritten once per maintenance tick and, while a
+/// stage runs long, at most once per StageUsage.progressInterval.
 extension ActivityStorage {
   private var stageUsageLeaf: String { url.lastPathComponent + ".stage-usage" }
   public func saveStageUsage(_ snapshot: StageUsage.Snapshot) throws {
@@ -15,7 +16,8 @@ extension ActivityStorage {
     return try JSONDecoder().decode(StageUsage.Snapshot.self, from: data)
   }
   /// `stage_<name>_last_cpu_ms` covers the latest maintenance tick; `_total_` the time since
-  /// the recorder started, as do the `front_` counts.
+  /// the recorder started, as do the `front_` counts. `_running_` is a run not finished yet,
+  /// as of its latest checkpoint, and is in neither.
   public func stageUsageStatus() -> String {
     let read: StageUsage.Snapshot?
     do { read = try stageUsage() } catch { return "stage_usage_unreadable=1" }
@@ -31,6 +33,10 @@ extension ActivityStorage {
       }
       output.append("stage_\(name)_total_cpu_ms=\(stage.totalCPUNanoseconds / 1_000_000) stage_\(name)_total_runs=\(stage.totalRuns)")
       for item in stage.total.keys.sorted() { output.append("stage_\(name)_total_\(item)=\(stage.total[item]!)") }
+      if let running = stage.running {
+        output.append("stage_\(name)_running_cpu_ms=\(running.cpuNanoseconds / 1_000_000) stage_\(name)_running_since=\(running.since) stage_\(name)_running_at=\(running.at)")
+        for item in running.items.keys.sorted() { output.append("stage_\(name)_running_\(item)=\(running.items[item]!)") }
+      }
     }
     return output.joined(separator: " ")
   }
