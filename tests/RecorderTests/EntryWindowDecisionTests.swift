@@ -22,7 +22,8 @@ final class EntryWindowDecisionTests: XCTestCase {
     table += SettingsSection.allCases.map { ["settings", $0.rawValue] }
     table += table.map { $0 + isolated } + table.map { isolated + $0 } + table.map { $0 + refused } + [isolated, ["collect", "extra"] + isolated]
     // What presents in the Dock, written out rather than asked of `ProcessPresentation.mode`, after the isolation pairs.
-    let sections = ["recording", "exclusions", "retention", "dayStart", "subscription", "claude", "conversation", "permissions", "security"]
+    let sections = ["recording", "exclusions", "retention", "dayStart", "subscription", "claude", "conversation", "permissions", "security",
+    ]
     XCTAssertEqual(sections, SettingsSection.allCases.map(\.rawValue), "a new settings section belongs in this table")
     let dock: [[String]] = [[], ["timeline"], ["menu-bar"], ["reopen"], ["agent-window"], ["settings"]] + sections.map { ["settings", $0] }
     func withoutIsolation(_ arguments: [String]) -> [String] {

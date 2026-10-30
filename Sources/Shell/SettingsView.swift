@@ -63,10 +63,15 @@ public struct SettingsPage: View {
     Button(action: action) { text(label).underline() }.buttonStyle(.plain).padding(.vertical, 4)
   }
   private func rule() -> some View { Rectangle().fill(palette.ink.opacity(0.25)).frame(height: 1) }
+  /// The sections on the page, in order.
+  var sections: [SettingsSection] { SettingsSection.allCases.filter(isShown) }
+  private func isShown(_ section: SettingsSection) -> Bool {
+    return true
+  }
   public var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       text(.title).accessibilityAddTraits(.isHeader).font(.system(size: 34, weight: .semibold)).padding(.bottom, 28)
-      ForEach(SettingsSection.allCases, id: \.self) { section in
+      ForEach(sections, id: \.self) { section in
         VStack(alignment: .leading, spacing: 14) {
           rule()
           text(SettingsLabel.section(section)).font(.system(size: 20, weight: .semibold))
@@ -380,7 +385,7 @@ public enum SettingsOffscreenRender {
   @MainActor public static func planWelcomePNG(strings: SettingsStrings, dark: Bool, scale: Double = 2) -> Data? {
     png(ChatGPTPlanWelcome(strings: strings).background(TimelinePalette(dark: dark).paper), width: 380, dark: dark, scale: scale)
   }
-  @MainActor private static func png<V: View>(_ view: V, width: Double, dark: Bool, scale: Double) -> Data? {
+  @MainActor static func png<V: View>(_ view: V, width: Double, dark: Bool, scale: Double) -> Data? {
     let content = view
       .environment(\.colorScheme, dark ? .dark : .light)
     // AppKit-backed fields cannot be drawn by ImageRenderer. A detached hosting view

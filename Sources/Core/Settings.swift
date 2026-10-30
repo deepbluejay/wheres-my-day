@@ -1,6 +1,8 @@
 import Foundation
 
-public enum SettingsSection: String, CaseIterable { case recording, exclusions, retention, dayStart, subscription, claude, conversation, permissions, security }
+public enum SettingsSection: String, CaseIterable {
+  case recording, exclusions, retention, dayStart, subscription, claude, conversation, permissions, security
+}
 public extension ChatProvider {
   var settingsSection: SettingsSection { self == .claude ? .claude : .subscription }
 }

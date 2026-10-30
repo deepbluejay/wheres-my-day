@@ -37,7 +37,8 @@ final class SettingsPresentationTests: XCTestCase {
   func testAllLabelsAndErrorsTranslatedAndBundled() throws {
     let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: resources)) as? [String: Any])
     let catalog = try XCTUnwrap(object["strings"] as? [String: [String: Any]])
-    for key in SettingsLabel.allCases.map(\.rawValue) + SettingsMessage.allCases.map(\.rawValue) {
+    let names = SettingsLabel.allCases
+    for key in names.map(\.rawValue) + SettingsMessage.allCases.map(\.rawValue) {
       let item = try XCTUnwrap(catalog[key], key)
       XCTAssertEqual(item["extractionState"] as? String, "manual", key)
       let translations = try XCTUnwrap(item["localizations"] as? [String: [String: Any]], key)

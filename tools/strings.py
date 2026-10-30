@@ -24,6 +24,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CATALOG = ROOT / "Resources/Localizable.xcstrings"
 INFOPLIST_CATALOG = ROOT / "Resources/InfoPlist.xcstrings"
+CATALOGS = [CATALOG, INFOPLIST_CATALOG]
 LANGUAGES = ["ko", "ja", "zh-Hans", "zh-Hant", "de", "fr", "es", "ru"]
 STRINGS_DIR = ROOT / ".build/strings"
 
@@ -105,7 +106,7 @@ def specifiers(text):
 
 def check():
     missing_any = False
-    for path in (CATALOG, INFOPLIST_CATALOG):
+    for path in CATALOGS:
         strings = load(path)["strings"]
         live = {k: v for k, v in strings.items() if v.get("extractionState") != "stale"}
         for language in LANGUAGES:
@@ -115,7 +116,7 @@ def check():
                 value = unit.get("stringUnit", {}).get("value")
                 if value is None and "variations" in unit:
                     value = unit["variations"]["plural"]["other"]["stringUnit"]["value"]
-                if value is not None and path == CATALOG and specifiers(value) != specifiers(key):
+                if value is not None and path != INFOPLIST_CATALOG and specifiers(value) != specifiers(key):
                     missing_any = True
                     print(f"{path.name} {language}: format specifiers differ: {key!r} → {value!r}")
             if missing:
@@ -129,7 +130,7 @@ def check():
 
 
 def compile_into(directory):
-    for path in (CATALOG, INFOPLIST_CATALOG):
+    for path in CATALOGS:
         if path.exists():
             # No code looks a stale key up, so it has no place in the built bundle.
             catalog = load(path)
