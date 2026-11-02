@@ -100,7 +100,7 @@ extension GitCollectionTests {
         try writeStopField(output, mebibytes: mebibytes, byte: 118); try output.close()
         task.afterLocationPrepared = { $0.branch = GitMaskedText(maskedFile: file, byteCount: mebibytes << 20) }
       }
-      if phase == "frontier-cleanup" { try scan() }
+      if phase == "frontier-cleanup" { try scan(); try forgetReadDigest() }
       var units = 0, preparationArmed = false, stoppedAt: Double?, receiptAtStop = ""
       var branchUnits = 0, chunksAtStop = 0, finishedAt = 0.0
       let finished = DispatchSemaphore(value: 0)

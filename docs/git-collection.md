@@ -59,6 +59,10 @@ while finishing that commit. Completed rows persist across restart; old ref tips
 in place until spool EOF, so a restart retries only uncompleted commits. Temporary
 spools use an owned 0700 directory and 0600 files and are removed when released.
 
+A repository whose ref files, policy and frontier did not change is not read at all, and
+is read in full at least every 6 hours; see `docs/background-work.md`. The stat walk starts
+no Git child and runs on the history queue with no lock held.
+
 Commit preparation runs outside the shared storage lock and writer transaction.
 The prepared storage interface keeps up to 65,536 masked UTF-8 bytes per field in
 memory and publishes larger fields through 65,536-byte chunk transactions. The parent

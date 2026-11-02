@@ -40,13 +40,13 @@ Both stores must be inside the explicit home and have verified user scope. It ac
 JSON map and deliberately refuses the hooks file or ledger as the registration store.
 
 ```sh
-swift build --product agent-cleanup --jobs 1
-.build/debug/agent-cleanup --dry-run \
+tools/swiftpm build --product agent-cleanup --jobs 1
+"$(tools/swiftpm build --show-bin-path)/agent-cleanup" --dry-run \
   --home /absolute/canonical/operator-selected-home \
   --old-app /exact/old/ActivityProbe \
   --old-hook /exact/old/ActivityProbeHook \
   --claude-mcp-file operator-established-user-store.json
-.build/debug/agent-cleanup --apply --live-switch \
+"$(tools/swiftpm build --show-bin-path)/agent-cleanup" --apply --live-switch \
   --home /absolute/canonical/operator-selected-home \
   --old-app /exact/old/ActivityProbe \
   --old-hook /exact/old/ActivityProbeHook \
@@ -90,5 +90,5 @@ using the tool on them. Do not broaden the allowlist or treat a blocked run as s
 `python3 -I tools/test_agent_cleanup.py` exercises byte-exact output, foreign positional approvals,
 mixed/modified commands, legacy commands, mismatched hashes, private backups, idempotence, gating,
 missing/unreadable/malformed files, symlink/hardlink/path traversal, concurrent saves and partial
-failure reporting. `swift test --jobs 1` runs the same suite through XCTest. No real agent CLI or
+failure reporting. `tools/swiftpm test --jobs 1` runs the same suite through XCTest. No real agent CLI or
 personal settings are needed.

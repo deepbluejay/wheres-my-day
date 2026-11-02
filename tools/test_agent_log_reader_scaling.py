@@ -7,6 +7,7 @@ import re
 import subprocess
 import tempfile
 import time
+SWIFTPM = str(Path(__file__).with_name("swiftpm"))  # names the build system; see that file
 
 REPO = Path(__file__).resolve().parent.parent
 MIB = 1 << 20
@@ -17,8 +18,12 @@ def main():
     parser.add_argument("--build-path", type=Path, help="Existing Swift debug bin directory")
     parser.add_argument("--recorder-pid", type=int, help="Wait for this authorized recorder to reach <=1 percent CPU before each writer timing case")
     args = parser.parse_args()
+    if not args.build_path:
+        # A plain swift build leaves this folder alone, so its objects are built here.
+        for target in ("Inbound", "Storage"):
+            subprocess.run([SWIFTPM, "build", "--jobs", "1", "--target", target], cwd=REPO, check=True, capture_output=True)
     debug = args.build_path or Path(subprocess.check_output(
-        ["swift", "build", "--show-bin-path"], cwd=REPO, text=True).strip())
+        [SWIFTPM, "build", "--show-bin-path"], cwd=REPO, text=True, stderr=subprocess.DEVNULL).strip())
     objects = [p for module in ("Core", "Inbound", "Storage")
                for p in sorted((debug / f"{module}.build").glob("*.swift.o"))]
     assert objects, "Build the package before running the scaling regression"

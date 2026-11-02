@@ -83,7 +83,7 @@ extension QueryTests {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
     process.arguments = [repo.appendingPathComponent("tests/ChatTests/Fixtures/interactive_pipe.py").path,
-      repo.appendingPathComponent(".build/debug/ActivityQueryServer").path]
+      BuiltProducts.queryServer.path]
     process.environment = ["HOME": root.path, "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1",
       QueryToolContract.leaseVariable: lease.path, QueryToolContract.tokenVariable: value.token,
       QueryToolContract.databaseVariable: database.path, QueryToolContract.appDataVariable: root.path]

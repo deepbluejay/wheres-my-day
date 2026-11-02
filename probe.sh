@@ -62,10 +62,10 @@ build() (
   trap 'exit 130' INT
   trap 'exit 143' TERM
   trap 'exit 129' HUP
-  swift build --jobs 1 --product ActivityProbe
-  swift build --jobs 1 --product ActivityQueryServer
+  tools/swiftpm build --jobs 1 --product ActivityProbe
+  tools/swiftpm build --jobs 1 --product ActivityQueryServer
   local products bundle helper
-  products=$(swift build --jobs 1 --show-bin-path)
+  products=$(tools/swiftpm build --jobs 1 --show-bin-path)
   bundle="$STAGE/ActivityProbe.app"
   helper="$bundle/Contents/MacOS/ActivityQueryServer"
   mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"

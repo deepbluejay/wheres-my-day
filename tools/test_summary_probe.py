@@ -13,7 +13,16 @@ import threading
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
+SWIFTPM = str(ROOT / 'tools/swiftpm')  # names the build system; see that file
 START, END = 1791817200, 1791903600
+
+
+def setUpModule():
+    # Built here because a plain swift build leaves these products alone, and the debug link follows whichever ran last.
+    global DEBUG
+    for product in ('SummaryProbe', 'ActivityProbe'):
+        subprocess.run([SWIFTPM, 'build', '--jobs', '1', '--product', product], cwd=ROOT, check=True, capture_output=True)
+    DEBUG = Path(subprocess.check_output([SWIFTPM, 'build', '--show-bin-path'], cwd=ROOT, text=True, stderr=subprocess.DEVNULL).strip())
 
 
 @contextlib.contextmanager
@@ -79,7 +88,7 @@ class MeasurementBoundsTest(unittest.TestCase):
             yield folder, env
 
     def probe(self, env, *args):
-        return subprocess.run([str(ROOT / '.build/debug/SummaryProbe'), *map(str, args)],
+        return subprocess.run([str(DEBUG / 'SummaryProbe'), *map(str, args)],
                               env=env, capture_output=True, text=True)
 
     def test_pending_call_is_not_previous_context(self):
@@ -117,7 +126,7 @@ class MeasurementBoundsTest(unittest.TestCase):
             witness.execute('SELECT count(*) FROM model_calls').fetchall()
             app_data = folder
             isolated = dict(env, ACTIVITYPROBE_DB=str(database))
-            command = [str(ROOT / '.build/debug/ActivityProbe'), 'privacy', 'forget', str(START + 60), str(START + 120),
+            command = [str(DEBUG / 'ActivityProbe'), 'privacy', 'forget', str(START + 60), str(START + 120),
                        '--isolated-root', str(folder.parent), '--app-data', str(app_data)]
             preview = subprocess.run(command, env=isolated, capture_output=True, text=True)
             self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)

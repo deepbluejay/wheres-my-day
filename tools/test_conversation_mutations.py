@@ -2,11 +2,12 @@
 """Prove the consent completeness property rejects production mutations.
 
 Run only against an expendable copy: python3 tools/test_conversation_mutations.py /tmp/ap-.../repo
-The caller supplies isolated HOME, DB and test paths, just as for swift test.
+The caller supplies isolated HOME, DB and test paths, just as for tools/swiftpm test.
 """
 import pathlib
 import subprocess
 import sys
+SWIFTPM = str(pathlib.Path(__file__).with_name('swiftpm'))  # names the build system; see that file
 
 
 def main():
@@ -53,7 +54,7 @@ def main():
                 'question-grants': 'ConversationAcceptingPathsTests/testQuestionGrantWitnessesHaveOnlySubmitAndDecline|ConversationAcceptingPathsTests/testEveryEnabledButtonOverWholeInventoryPreservesAcceptingContract',
                 'empty-properties': 'ConversationAcceptingPathsTests/testIndirectFieldWitnessesRefuseOnce|ConversationAcceptingPathsTests/testEveryEnabledButtonOverWholeInventoryPreservesAcceptingContract',
             }.get(name, 'ConversationDecisionTests/testCompletenessMutationWitnesses|ConversationAccessibilityTests/testAccessibilityMutationWitness|ConversationAccessibilityTests/testWholePageRequestIdentityMutationWitness')
-            result = subprocess.run(['swift', 'test', '--jobs', '1', '--filter', selected],
+            result = subprocess.run([SWIFTPM, 'test', '--jobs', '1', '--filter', selected],
                                     cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             (repo.parent / f'mutation-{name}.log').write_text(result.stdout)
             if result.returncode == 0 or ('XCTAssert' not in result.stdout and 'failed -' not in result.stdout) or 'Build complete!' not in result.stdout:
@@ -61,7 +62,7 @@ def main():
             print(f'{name}: property rejected mutation, exit {result.returncode}', flush=True)
         finally:
             path.write_bytes(original)
-    result = subprocess.run(['swift', 'test', '--jobs', '1', '--filter',
+    result = subprocess.run([SWIFTPM, 'test', '--jobs', '1', '--filter',
                              'ConversationDecisionTests/testCompletenessMutationWitnesses|ConversationAccessibilityTests/testAccessibilityMutationWitness|ConversationAccessibilityTests/testWholePageRequestIdentityMutationWitness|ConversationSelectionTests|ConversationAcceptingPathsTests'], cwd=repo)
     if result.returncode:
         raise SystemExit('Restored production must pass the same property')

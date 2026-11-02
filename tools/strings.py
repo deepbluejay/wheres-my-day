@@ -20,6 +20,7 @@ import pathlib
 import plistlib
 import subprocess
 import sys
+SWIFTPM = str(pathlib.Path(__file__).with_name("swiftpm"))  # names the build system; see that file
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CATALOG = ROOT / "Resources/Localizable.xcstrings"
@@ -42,7 +43,7 @@ def save(path, catalog):
 
 def extract():
     subprocess.run(
-        ["swift", "build", "--jobs", "1", "-Xswiftc", "-emit-localized-strings", "-Xswiftc", "-emit-localized-strings-path",
+        [SWIFTPM, "build", "--jobs", "1", "-Xswiftc", "-emit-localized-strings", "-Xswiftc", "-emit-localized-strings-path",
          "-Xswiftc", str(STRINGS_DIR)], cwd=ROOT, check=True, capture_output=True)
     found = {}
     for path in STRINGS_DIR.glob("*.stringsdata"):

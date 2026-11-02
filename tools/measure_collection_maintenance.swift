@@ -1,5 +1,5 @@
 // Invented, opt-in cost fixture. Compile with the built Core/Storage objects and
-// -I .build/debug/Modules -lsqlite3, then pass an owned scratch root and a mode.
+// -I "$(tools/swiftpm build --show-bin-path)/Modules" -lsqlite3, then pass an owned scratch root and a mode.
 import Core
 import Darwin
 import Foundation

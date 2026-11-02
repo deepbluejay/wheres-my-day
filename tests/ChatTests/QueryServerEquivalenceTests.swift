@@ -215,8 +215,7 @@ extension QueryTests {
 
   /// The executable itself: its start-up guards, a session over the pipe, and revocation mid-run.
   private func executableRuns() throws -> [String] {
-    let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-    let binary = repo.appendingPathComponent(".build/debug/ActivityQueryServer")
+    let binary = BuiltProducts.queryServer
     let folder = root.appendingPathComponent("executable")
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     let database = root.appendingPathComponent("invented.sqlite").path

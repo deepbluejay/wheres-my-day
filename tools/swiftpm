@@ -1,0 +1,26 @@
+#!/bin/sh
+# Every build, test and run of this package goes through here, so this is the one line that names the build system.
+#
+# Why native, measured on Swift 6.4.2 (Xcode 27.2), whose default is swiftbuild. Its products differ from what this
+# project has always shipped: Bundle.module no longer falls back to the build folder, so a bundle without the resource
+# bundle traps; the executables stamp SDK 14.0 rather than the real SDK; and they carry an absolute rpath into .build.
+# Its objects live under out/Intermediates.noindex, which tools/health_recorder_paths.py and the fixtures do not read.
+#
+# A plain `swift build` writes elsewhere (.build/out) and repoints .build/debug at it. So nothing here reads .build/debug:
+# ask `tools/swiftpm build --show-bin-path`, which names the folder only this script's builds write.
+#
+# SwiftPM marks native deprecated and prints so on stderr with every use. When it is removed this script fails, and so
+# does probe.sh, with no bundle. If native ever stays accepted but moves its output, health_recorder_paths.py stops with
+# "no objects". Neither can pass quietly. Then the move to swiftbuild is one job: this line, the reader and the three
+# differences above.
+set -eu
+case "${1:-}" in
+  build | test | run) ;;
+  *)
+    echo "usage: tools/swiftpm build|test|run [swift options]" >&2
+    exit 2
+    ;;
+esac
+command=$1
+shift
+exec swift "$command" --build-system native "$@"

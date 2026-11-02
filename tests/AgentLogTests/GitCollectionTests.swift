@@ -66,6 +66,8 @@ final class GitCollectionTests: XCTestCase {
     try work { try self.task.observe(observation, now: scan ?? self.now) }
   }
   func scan(_ time: Int? = nil) throws { try work { try self.task.scan(at: time ?? self.now) } }
+  /// For a test of what a full read does when nothing changed: such a read would be skipped.
+  func forgetReadDigest() throws { try store.connection.run("DELETE FROM git_read_fingerprints") }
   func count(_ table: String, _ predicate: String = "1") throws -> Int {
     try store.locked { try self.store.connection.integer("SELECT count(*) FROM \(table) WHERE \(predicate)") }
   }

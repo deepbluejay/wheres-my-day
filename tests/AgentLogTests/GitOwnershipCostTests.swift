@@ -66,6 +66,7 @@ extension GitCollectionTests {
     // Five invented branches, main and the worktree head.
     XCTAssertEqual(settled.count, 7)
     let calls = store.gitPublishCalls
+    try forgetReadDigest()
     try scan(now + 300)
     XCTAssertEqual(try frontierRows(), settled, "an unchanged frontier is rewritten")
     XCTAssertEqual(try count("git_refs"), 7)
@@ -115,6 +116,7 @@ extension GitCollectionTests {
     try scan()
     let settled = try frontierRows()
     let calls = store.gitPublishCalls
+    try forgetReadDigest()
     try scan(now + 300)
     XCTAssertEqual(try frontierRows(), settled)
     XCTAssertEqual(try count("git_refs", "ts=\(now + 300)"), 7)
@@ -167,6 +169,7 @@ extension GitCollectionTests {
     try expectRewrite("HEAD detached") { try git(["checkout", "-q", "--detach", "main"]) }
     // And with nothing changed, the next read refreshes again.
     let token = try activeToken(), calls = store.gitPublishCalls
+    try forgetReadDigest()
     try scan(time + 300)
     XCTAssertEqual(try activeToken(), token)
     XCTAssertEqual(store.gitPublishCalls - calls, 2)
@@ -185,6 +188,7 @@ extension GitCollectionTests {
     store.gitFrontierComparePage = 2
     var pages = 0
     store.afterGitUnit = { phase in if phase == "frontier-compare" { pages += 1 } }
+    try forgetReadDigest()
     try scan(now + 300)
     // Seven refs: three full pages, then one.
     XCTAssertEqual(pages, 3)
@@ -194,6 +198,7 @@ extension GitCollectionTests {
     store.gitHeldRefLimit = 3
     pages = 0
     let calls = store.gitPublishCalls
+    try forgetReadDigest()
     try scan(now + 600)
     XCTAssertEqual(pages, 3)
     XCTAssertEqual(store.gitPublishCalls - calls, 7 + 2)
@@ -201,6 +206,7 @@ extension GitCollectionTests {
     XCTAssertEqual(try count("git_refs", "ts=\(now + 600)"), 7)
     // A stop between pages ends the read before its refresh.
     store.afterGitUnit = { [unowned self] phase in if phase == "frontier-compare" { self.task.stop() } }
+    try forgetReadDigest()
     try? scan(now + 900)
     store.afterGitUnit = nil
     XCTAssertEqual(try frontierRows(), settled)
@@ -217,6 +223,7 @@ extension GitCollectionTests {
     try scan()
     let token = try activeToken()
     try store.connection.run("UPDATE git_refs SET identity='invented-untokened' WHERE id=(SELECT min(id) FROM git_refs)")
+    try forgetReadDigest()
     try scan(now + 300)
     XCTAssertNotEqual(try activeToken(), token)
     XCTAssertEqual(try count("git_repositories", "last_read=\(now + 300)"), 1)
@@ -235,6 +242,7 @@ extension GitCollectionTests {
       self.store.beforeGitFrontierPublication = nil
       try self.store.saveSettings(StorageSettings(pausedUntil: self.now + 900), at: self.now + 300)
     }
+    try forgetReadDigest()
     try scan(now + 300)
     XCTAssertEqual(try count("git_repositories", "last_read=\(now + 300)"), 0)
     XCTAssertEqual(try count("git_refs", "ts=\(now + 300)"), 0)
@@ -243,6 +251,7 @@ extension GitCollectionTests {
       self.store.beforeGitFrontierPublication = nil
       try self.store.ownLogSources().registerSession("invented-session", tool: .claude)
     }
+    try forgetReadDigest()
     try scan(now + 1200)
     XCTAssertEqual(try count("git_repositories", "last_read=\(now + 1200)"), 0)
     XCTAssertEqual(try count("git_refs", "ts=\(now + 1200)"), 0)

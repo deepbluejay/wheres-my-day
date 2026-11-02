@@ -180,6 +180,10 @@ extension ActivityStorage {
 extension SQLiteConnection {
   func createGitTextSchema() throws {
     try run("CREATE TABLE IF NOT EXISTS git_retention_progress(id INTEGER PRIMARY KEY CHECK(id=1),maintained_at INTEGER NOT NULL)")
+    // Hashes and counts only. A row says the frontier `frontier` holds the refs Git would give
+    // under `fingerprint`. Losing or spoiling one costs a full read, nothing else.
+    try run("CREATE TABLE IF NOT EXISTS git_read_fingerprints(repo_id INTEGER PRIMARY KEY,fingerprint TEXT NOT NULL,frontier TEXT NOT NULL,ref_count INTEGER NOT NULL,read_at INTEGER NOT NULL)")
+    try run("CREATE TRIGGER IF NOT EXISTS git_read_fingerprint_cleanup AFTER DELETE ON git_repositories BEGIN DELETE FROM git_read_fingerprints WHERE repo_id=OLD.id; END")
     // A mark says every retained occurrence up to event_id was offered to discovery.
     // Event ids are reusable rowids, so deleting the largest id lowers every larger
     // mark with it; a reused id can never fall behind a mark. Deleting older rows,
@@ -870,6 +874,41 @@ extension ActivityStorage {
       return parts.joined(separator: "|")
     }
   }
+  /// How long an unchanged repository goes without a full read. The read also refreshes the
+  /// refs' observation time, and retention removes refs not seen for a day at the shortest,
+  /// so this stays well under that. It is also the limit on anything the stat data cannot see.
+  static let gitUnchangedReadLifetime = 6 * 3600
+  /// Everything other than the repository's own files that a read with unchanged refs
+  /// consults: what discovery consults (ownership receipts, recording settings and history,
+  /// forgotten ranges, retention days and cutoff day, tombstones), the masking build, and the
+  /// ownership authority of this repository's folders, which each publication reconciles.
+  /// One-way. `shared` is `gitDiscoveryRevision`, taken once per run by the caller; it is nil,
+  /// and there is no fingerprint, when ownership cannot be fingerprinted.
+  public func gitReadInputs(repo: Int, shared: String) throws -> String {
+    try gitLocked {
+      var hash = SHA256()
+      for part in [shared, gitMaskRevision, String(repo)] { hash.update(data: Data((part + "|").utf8)) }
+      try connection.namedRows("SELECT id,ownership_authority FROM git_working_folders WHERE repo_id=? ORDER BY id", [.integer(repo)]) {
+        hash.update(data: Data("\(try $0.int("id")):\(try $0.text("ownership_authority"))|".utf8))
+      }
+      return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+  }
+  /// Read-only. Whether a read of this repository would find what the last one found and
+  /// could only refresh the observation time. False for any doubt, and the read then runs
+  /// as usual: its own checks refuse, recover or rewrite exactly as without this.
+  public func gitReadUnchanged(repo: Int, fingerprint: String, now: Int) throws -> Bool {
+    try gitLocked {
+      guard try gitRecordingAllowed(at: now), try gitAllowed(now), try gitRepositoryPermitted(repo) else { return false }
+      return try connection.integer("""
+        SELECT count(*) FROM git_read_fingerprints f JOIN git_repositories r ON r.id=f.repo_id
+        WHERE f.repo_id=? AND f.fingerprint=? AND f.frontier=r.frontier AND r.frontier!='' AND r.pending_frontier=''
+          AND r.reopen_blocked=0 AND f.read_at<=? AND ?-f.read_at<?
+          AND f.ref_count=(SELECT count(*) FROM git_refs x WHERE x.repo_id=r.id AND x.frontier=r.frontier)
+          AND NOT EXISTS(SELECT 1 FROM git_commits c WHERE c.repo_id=r.id AND c.complete!=1)
+        """, [.integer(repo), .key(fingerprint), .integer(now), .integer(now), .integer(Self.gitUnchangedReadLifetime)]) == 1
+    }
+  }
   /// A one-way digest of a folder row, every column, and of its source's checkpoint row.
   /// It holds no content. Nil when the row is gone.
   public func gitDiscoveryVisitDigest(id: Int, folder: GitWorkingFolder) throws -> String? {
@@ -1105,7 +1144,10 @@ extension ActivityStorage {
   public func finishGitRead(repo: Int, now: Int, succeeded: Bool, readFailure: Bool = false) throws {
     try finishGitRead(repo: repo, now: now, outcome: succeeded ? .accounted : readFailure ? .nativeFailure : .interrupted)
   }
-  public func finishGitRead(repo: Int, now: Int, outcome finish: GitReadFinish) throws {
+  /// `fingerprint` was taken before this read looked at anything. It is saved in the same
+  /// transaction that certifies or refreshes the frontier, so a crash leaves both or neither,
+  /// and a change during the read makes the next digest differ.
+  public func finishGitRead(repo: Int, now: Int, outcome finish: GitReadFinish, fingerprint: String? = nil) throws {
     var outcome = finish
     defer { try? gitLocked {
       _ = gitReads.removeValue(forKey: repo)
@@ -1138,6 +1180,10 @@ extension ActivityStorage {
       _ = try publishGit(.frontier(.refresh(repo, active.token, active.count)), now: now) {
         try connection.run("UPDATE git_refs SET ts=? WHERE repo_id=? AND frontier=?", [.integer(now), .integer(repo), .key(active.token)])
         try connection.run("UPDATE git_repositories SET last_read=? WHERE id=?", [.integer(now), .integer(repo)])
+        if let fingerprint {
+          try connection.run("INSERT OR REPLACE INTO git_read_fingerprints VALUES(?,?,?,?,?)",
+            [.integer(repo), .key(fingerprint), .key(active.token), .integer(active.count), .integer(now)])
+        }
       }
       return
     }
@@ -1191,6 +1237,10 @@ extension ActivityStorage {
     if state == .admitted {
       let result = try publishGit(.frontier(.certify(repo, frontier, published)), now: now) {
         try connection.run("UPDATE git_repositories SET last_read=?,frontier=?,pending_frontier='',pending_ref_count=0 WHERE id=?", [.integer(now), .key(frontier), .integer(repo)])
+        if let fingerprint {
+          try connection.run("INSERT OR REPLACE INTO git_read_fingerprints VALUES(?,?,?,?,?)",
+            [.integer(repo), .key(fingerprint), .key(frontier), .integer(published), .integer(now)])
+        }
       }
       state = result.value != nil ? .complete : .interrupted
     } else if outcome == .nativeFailure {

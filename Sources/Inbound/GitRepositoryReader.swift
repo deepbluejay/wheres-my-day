@@ -39,6 +39,8 @@ public final class GitRepositoryReader {
   var beforePreparedChunk: ((Int) throws -> Void)?
   var afterPreparedUnit: ((String) throws -> Void)?
   var beforeIgnoreCheck: (() throws -> Void)?
+  // Test seam: Git children started.
+  var launches = 0
   public init(timeout: TimeInterval = 30) { self.timeout = timeout }
   var activeProcessIDs: [Int32] {
     processLock.lock(); defer { processLock.unlock() }; return Array(processes.keys)
@@ -119,6 +121,7 @@ public final class GitRepositoryReader {
     do {
       guard generation == cancellationGeneration else { throw GitReadError.cancelled }
       try process.run()
+      launches += 1
       processes[process.processIdentifier] = process
       processLock.unlock()
     } catch { processLock.unlock(); throw error }

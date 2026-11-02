@@ -180,6 +180,7 @@ extension GitCollectionTests {
     store.beforeGitFrontierPublication = {
       try self.store.ownLogSources().registerPath(source, tool: .claude)
     }
+    try forgetReadDigest()
     try scan(now + 300)
     XCTAssertEqual(try count("git_working_folders"), 0)
     XCTAssertEqual(try count("git_commits"), 0)

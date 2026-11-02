@@ -102,7 +102,7 @@ In the code:
   changes its walk, so the next tick finds it. One discovery tick shares one read-only
   database connection.
 - **Git history** (`finishGitRead`). A repository whose refs equal its active frontier
-  is not rewritten. One gated refresh moves the refs' observation time and `last_read`,
+  is not rewritten when a read does run. One gated refresh moves the refs' observation time and `last_read`,
   as a rewrite would have.
   - "Equal" is every ref's identity, masked name and tip, compared whole. Any ref added,
     removed, renamed, moved or force-moved back, or a worktree HEAD on another commit,
@@ -118,6 +118,44 @@ In the code:
     historical), Secure Input, forget, retention, revocation and own sources. It also
     needs the same frontier active, nothing pending, and the same ref count, so a forget
     or retention that removed refs meanwhile makes the next read rewrite.
+- **Git history, no read at all** (`GitCollectionTask.readFingerprint`, `GitRefState`,
+  `gitReadInputs`, `gitReadUnchanged`). Before any preparation, a repository's fingerprint
+  is compared with the one saved by its last finished read. The same fingerprint skips the
+  read: no Git child, no scratch folder, no lock past a short read, no database write.
+  - On disk: the stat data (type, inode, size, mtime and ctime in nanoseconds) of `HEAD`,
+    `packed-refs`, `config`, `config.worktree`, `shallow`, everything under `refs/` and
+    `reftable/`, the `worktrees/` folder, and each worktree's `HEAD`, `gitdir`, `commondir`,
+    `locked`, `config.worktree`, `refs/` and `reftable/` (under reftable a linked worktree's
+    `HEAD` lives there, not in its `HEAD` file). A `config` whose `extensions.refStorage` is
+    neither `files` nor `reftable` gets no fingerprint, since its refs could be anywhere, and
+    is read as usual. Git replaces a ref through a lock file and a
+    rename, so a new commit, force-push, deleted ref, rebase, fetch that moved a ref, new
+    worktree or `pack-refs` differs, even a ref moved away and back. `index`, logs and
+    `FETCH_HEAD` are not read, so `git status` or a fetch that brought nothing costs no read.
+  - In policy: `gitDiscoveryRevision` (ownership receipts, recording settings and history,
+    forgotten ranges, retention days, the retention cutoff's day, discovery tombstones), the
+    build (masks are code), and this repository's folders with their ownership authority.
+    The revision is taken once per history run. A change during a run is in the next run's
+    value, so a repository skipped meanwhile is read at the next run.
+  - The ownership part of that revision is the one discovery uses, with its limit: the receipt
+    folder's stat is used whatever its volume, while the publication's own ownership memo
+    (`gitOwnershipState`) trusts it only on APFS. With app data off APFS, a receipt added and
+    another removed within one time tick could leave it equal, and a skip would miss that for
+    up to the 6-hour lifetime. Discovery already had this limit.
+  - Stored state: the saved frontier token is still active with its ref count, nothing is
+    pending, no commit is incomplete, the repository is not blocked on a raw path, and it is
+    still permitted. The copy check runs first, as it always did.
+  - The fingerprint is taken before the read looks at anything, and saved in the transaction
+    that certifies or refreshes the frontier (`git_read_fingerprints`, hashes and counts only).
+    A change during a read, a crash or a refused publication therefore costs one more read.
+    A lost or spoiled row costs one read, and it survives a restart otherwise.
+  - Any doubt reads as usual: not APFS, a symlink in the walk, another volume inside the walk,
+    an unreadable file, or ownership that cannot be fingerprinted.
+  - A full read still runs at least every 6 hours (`gitUnchangedReadLifetime`). It refreshes
+    the refs' observation time, since retention removes refs not seen for a day at the
+    shortest, and limits anything stat data cannot see. So `git_last_read` in `status` and a
+    ref's `ts` can be up to that old on an unchanged repository, and a forget of a recent
+    range no longer catches refs last observed before it.
 - **Git ownership** (`reconcileGitOwnership`, inside every Git publication). Candidates
   found absent from the receipt registry are not looked up again while the registry
   state is unchanged. That state is the registry folder's stat (device, inode, link
@@ -146,7 +184,7 @@ In the code:
   | Stage | Items |
   |---|---|
   | `agent_logs_claude`, `agent_logs_codex` | `listed`, `reads`, `skipped`, `recovery_reads` |
-  | `git_discovery`, `git_backfill`, `git_history` | `visited`, `skipped`; `rows`, `checkpoints`, `offers`; `commits` |
+  | `git_discovery`, `git_backfill`, `git_history` | `visited`, `skipped`; `rows`, `checkpoints`, `offers`; `commits`, `skipped` |
   | `retention`, `summaries` | `removed`; runs only |
   | `screen_collection`, `sample_collection` | `ocr`, `writes`; `writes` |
 

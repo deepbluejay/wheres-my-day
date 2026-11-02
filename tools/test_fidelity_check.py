@@ -24,6 +24,7 @@ import unittest
 from unittest.mock import patch
 
 import fidelity_check as fc
+SWIFTPM = str(Path(__file__).with_name("swiftpm"))  # names the build system; see that file
 
 
 START = 1969660800  # Invented aligned UTC day in 2032.
@@ -192,9 +193,9 @@ def current_schema_database():
     repository = Path(__file__).resolve().parents[1]
     _schema_folder = tempfile.TemporaryDirectory(prefix="fidelity-schema-")
     folder = Path(_schema_folder.name)
-    subprocess.run(["swift", "build", "--jobs", "1", "--target", "Storage"], cwd=repository, check=True,
+    subprocess.run([SWIFTPM, "build", "--jobs", "1", "--target", "Storage"], cwd=repository, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1200)
-    debug = Path(subprocess.check_output(["swift", "build", "--jobs", "1", "--show-bin-path"], cwd=repository, text=True).strip())
+    debug = Path(subprocess.check_output([SWIFTPM, "build", "--jobs", "1", "--show-bin-path"], cwd=repository, text=True).strip())
     objects = sorted((debug / "Core.build").glob("*.o")) + sorted((debug / "Storage.build").glob("*.o"))
     subprocess.run(["swiftc", "-I", str(debug / "Modules"), str(repository / "tools/fidelity_schema_fixture.swift"),
                     *map(str, objects), "-lsqlite3", "-o", str(folder / "fixture")], check=True,

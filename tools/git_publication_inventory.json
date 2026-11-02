@@ -1,6 +1,6 @@
 {
-  "notes": "Reviewed nonpublication mutations: schema/adoption, irreversible privacy erasure/markers, bounded debt invalidation/disposal, and masked TEMP deletion selection. Gate-internal refusal/abandonment writes are part of authorization, not caller bypasses. Any change requires reviewing this inventory. CollectionFileCursor owns a private empty-filename SQLite manifest; its complete source digest pins the isolated adapter. Collection proof copies are restricted to SQLiteConnection temporary proof databases. Backfill progress marks (git_backfill_progress) only skip occurrences already offered to discovery; they never authorize a publication, and deleting the largest agent-log event id lowers them. Forget narrows its TEMP selection in the final unit so rows published in a batch gap are not cascaded. Finished-source receipts and the checkpoint-pass mark keep their value in the git_backfill_progress key (event_id 0) and likewise only skip work already offered. After narrowing, the final unit takes back only tombstones this forget added for rows that stay and are not in the range by themselves. Concatenated literals are joined before matching, and a non-literal operand is marked \\\\(+). A literal after a non-literal + operand, or one that starts with an interpolation, is marked \\\\(+) or kept as is when it still shows a statement tail (FROM, INTO, SET or git_); the reads this lists are rows/integer executions. A checkpoint pass saves its start as a write floor (a checkpoints:floor: key, event_id 0) before its first page, so later checkpoint writes stay above the mark it saves; saving the mark removes the floor.",
-  "gated_sites": 22,
+  "notes": "Reviewed nonpublication mutations: schema/adoption, irreversible privacy erasure/markers, bounded debt invalidation/disposal, and masked TEMP deletion selection. Gate-internal refusal/abandonment writes are part of authorization, not caller bypasses. Any change requires reviewing this inventory. CollectionFileCursor owns a private empty-filename SQLite manifest; its complete source digest pins the isolated adapter. Collection proof copies are restricted to SQLiteConnection temporary proof databases. Backfill progress marks (git_backfill_progress) only skip occurrences already offered to discovery; they never authorize a publication, and deleting the largest agent-log event id lowers them. Forget narrows its TEMP selection in the final unit so rows published in a batch gap are not cascaded. Finished-source receipts and the checkpoint-pass mark keep their value in the git_backfill_progress key (event_id 0) and likewise only skip work already offered. After narrowing, the final unit takes back only tombstones this forget added for rows that stay and are not in the range by themselves. Concatenated literals are joined before matching, and a non-literal operand is marked \\\\(+). A literal after a non-literal + operand, or one that starts with an interpolation, is marked \\\\(+) or kept as is when it still shows a statement tail (FROM, INTO, SET or git_); the reads this lists are rows/integer executions. A checkpoint pass saves its start as a write floor (a checkpoints:floor: key, event_id 0) before its first page, so later checkpoint writes stay above the mark it saves; saving the mark removes the floor. A read fingerprint row (git_read_fingerprints) is saved only inside the publication that certifies or refreshes a frontier. It holds hashes and counts, only says a later read would find nothing new, and never authorizes a publication. TimelineRevision rowsHash is private and only hashes rows: its three callers pass fixed SELECT literals on model_calls, intervals and forgotten_ranges.",
+  "gated_sites": 24,
   "nonpublication": [
     {
       "file": "Sources/Storage/AXProbeStorage.swift",
@@ -562,6 +562,10 @@
     {
       "file": "Sources/Storage/ScreenMetadata.swift",
       "call": "rows(sql, values)"
+    },
+    {
+      "file": "Sources/Storage/TimelineRevision.swift",
+      "call": "rows(sql, values)"
     }
   ],
   "publications": [
@@ -645,6 +649,13 @@
     {
       "file": "Sources/Storage/GitCollection.swift",
       "function": "finishGitRead",
+      "sql": "INSERT OR REPLACE INTO git_read_fingerprints VALUES(?,?,?,?,?)",
+      "gated": true,
+      "operation": "publishGit(.frontier(.refresh(repo, active.token, active.count)), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "finishGitRead",
       "sql": "UPDATE git_repositories SET pending_frontier=?,pending_ref_count=0 WHERE id=?",
       "gated": true,
       "operation": "publishGit(.frontier(.begin(repo)), now: now)"
@@ -667,6 +678,13 @@
       "file": "Sources/Storage/GitCollection.swift",
       "function": "finishGitRead",
       "sql": "UPDATE git_repositories SET last_read=?,frontier=?,pending_frontier='',pending_ref_count=0 WHERE id=?",
+      "gated": true,
+      "operation": "publishGit(.frontier(.certify(repo, frontier, published)), now: now)"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "function": "finishGitRead",
+      "sql": "INSERT OR REPLACE INTO git_read_fingerprints VALUES(?,?,?,?,?)",
       "gated": true,
       "operation": "publishGit(.frontier(.certify(repo, frontier, published)), now: now)"
     },
@@ -816,6 +834,10 @@
     {
       "file": "Sources/Storage/CollectionObservations.swift",
       "sql": "CREATE TRIGGER IF NOT EXISTS collection_unref AFTER DELETE ON screen_payloads BEGIN DELETE FROM collection_blobs WHERE hash IN (OLD.text_hash,OLD.payload_hash) AND NOT EXISTS(SELECT 1 FROM screen_payloads WHERE text_hash=hash OR payload_hash=hash); END"
+    },
+    {
+      "file": "Sources/Storage/GitCollection.swift",
+      "sql": "CREATE TRIGGER IF NOT EXISTS git_read_fingerprint_cleanup AFTER DELETE ON git_repositories BEGIN DELETE FROM git_read_fingerprints WHERE repo_id=OLD.id; END"
     },
     {
       "file": "Sources/Storage/GitCollection.swift",

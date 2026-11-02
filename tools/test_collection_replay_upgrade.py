@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import tarfile
 import tempfile
+SWIFTPM = str(Path(__file__).with_name("swiftpm"))  # names the build system; see that file
 
 REPO = Path(__file__).resolve().parent.parent
 PREVIOUS = "8a575902e45808c96d2a25190820af66c0451ac6"
@@ -32,9 +33,9 @@ def export(revision, target):
 def build(source, target, scratch):
     log = scratch / (target.name + "-build.log")
     with log.open("w") as output:
-        subprocess.run(["swift", "build", "--jobs", "1", "--target", "Storage", "--scratch-path", str(target)],
+        subprocess.run([SWIFTPM, "build", "--jobs", "1", "--target", "Storage", "--scratch-path", str(target)],
                        cwd=source, stdout=output, stderr=subprocess.STDOUT, check=True)
-    debug = Path(run(["swift", "build", "--show-bin-path", "--scratch-path", target], source).strip())
+    debug = Path(run([SWIFTPM, "build", "--show-bin-path", "--scratch-path", target], source).strip())
     objects = sorted((debug / "Core.build").glob("*.o")) + sorted((debug / "Storage.build").glob("*.o"))
     binary = scratch / (target.name + "-fixture")
     subprocess.run(["swiftc", "-g", "-I", str(debug / "Modules"), str(REPO / "tools/collection_replay_fixture.swift"),

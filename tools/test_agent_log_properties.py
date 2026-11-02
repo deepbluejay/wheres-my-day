@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+SWIFTPM = str(Path(__file__).with_name("swiftpm"))  # names the build system; see that file
 
 REPO = Path(__file__).resolve().parent.parent
 MUTATIONS = [
@@ -58,7 +59,7 @@ def main():
             try:
                 path.write_text(original.replace(before, after))
                 test_filter = test if test.startswith("OutboundOwnershipInvariantTests.") else "AgentLogTests." + test
-                run = subprocess.run(["swift", "test", "--jobs", "1", "--scratch-path", str(base / "build"),
+                run = subprocess.run([SWIFTPM, "test", "--jobs", "1", "--scratch-path", str(base / "build"),
                                       "--filter", test_filter], cwd=copy,
                                      capture_output=True, text=True)
                 output = run.stdout + run.stderr
@@ -71,7 +72,7 @@ def main():
                 print(f"{name}: caught, {len(witnesses)} failing assertions", flush=True)
             finally:
                 path.write_text(original)
-        run = subprocess.run(["swift", "test", "--jobs", "1", "--scratch-path", str(base / "build"),
+        run = subprocess.run([SWIFTPM, "test", "--jobs", "1", "--scratch-path", str(base / "build"),
                               "--filter", "AgentLogTests.testGenerated|AgentLogTests.testLegacyOccurrenceCleanup|OutboundOwnershipInvariantTests"],
                              cwd=copy, capture_output=True, text=True)
         if run.returncode:

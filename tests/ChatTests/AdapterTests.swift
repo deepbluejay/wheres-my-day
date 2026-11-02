@@ -41,7 +41,7 @@ final class AdapterTests: XCTestCase {
     let storage = try ActivityStorage(url: database, appDataDirectory: home, databaseScope: .directory(root))
     try storage.appendIntervals([NamedInterval(range: TimeRange(14400, 14580), name: "Invented task", kind: .work)])
     return ConversationConfiguration(executable: executable, userHome: home,
-      toolServer: repo.appendingPathComponent(".build/debug/ActivityQueryServer"), database: database,
+      toolServer: BuiltProducts.queryServer, database: database,
       environment: ["HOME": home.path, "PATH": "/usr/bin:/bin", "INVENTED_ROOT": home.path, "INVENTED_PROVIDER": provider.rawValue, "INVENTED_MODE": mode, "PYTHONPATH": home.path, "PYTHONDONTWRITEBYTECODE": "1",
         "CODEX_HOME": home.appendingPathComponent(".codex").path, "CODEX_SQLITE_HOME": home.appendingPathComponent(".codex").path, "CLAUDE_CONFIG_DIR": home.appendingPathComponent(".claude").path,
         // A terminal may export these; none may reach a conversation, and the app's own ceiling replaces this one.

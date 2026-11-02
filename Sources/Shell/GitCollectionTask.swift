@@ -66,6 +66,12 @@ public final class GitCollectionTask {
   var discoveryVisits = 0
   var discoverySkips = 0
   var commitReads = 0
+  // Test seams: reads started, and reads not needed because nothing changed.
+  var historyReads = 0
+  var historySkips = 0
+  var duringFingerprint: (() throws -> Void)?
+  // Test seam: history runs on its own queue after discovery, so a receipt can land in between.
+  var beforeHistoryRun: (() throws -> Void)?
   /// Discovery, backfill and history are measured as stages; usage is only recorded.
   var usage = StageUsage.shared
   // Where the stage's current run began, for its checkpoints: CPU on its thread, and counters.
@@ -681,9 +687,9 @@ public final class GitCollectionTask {
   private func scanHistory(at now: Int) throws {
     guard !isStopped else { return }
     try usage.measure("git_history") { items in
-      let reads = commitReads
+      let reads = commitReads, skips = historySkips
       historyRun = (StageUsage.threadCPU(), reads)
-      defer { items["commits"] = commitReads - reads }
+      defer { items["commits"] = commitReads - reads; items["skipped"] = historySkips - skips }
       try storage.withGitCancellation(cancellation) {
         try reader.withCancellation(cancellation: cancellation, shouldContinue: { self.readAllowed(at: now) }) { try scanHistoryAllowed(at: now) }
       }
@@ -691,6 +697,10 @@ public final class GitCollectionTask {
   }
   private func scanHistoryAllowed(at now: Int) throws {
     var completed = Set<Int>()
+    try beforeHistoryRun?()
+    // Once per run, not per repository. A policy change during this run is in the next run's
+    // value, so a repository skipped meanwhile is read then; a read saves its own fingerprint.
+    let shared = try? storage.gitDiscoveryRevision(now: now)
     while !isStopped, try storage.gitRecordingAllowed(at: now) {
       var cursor = 0, advanced = false
       while !isStopped, let repo = try storage.nextGitRepository(after: cursor) {
@@ -706,9 +716,19 @@ public final class GitCollectionTask {
           }
           let read: PendingGitRead
           if let existing = pending[repo.id] { read = existing }
-          else { read = try prepare(repo, now: now); pending[repo.id] = read }
+          else {
+            // Before anything is read, so a change during the read makes the next digest differ.
+            let fingerprint = readFingerprint(repo, shared: shared)
+            if let fingerprint, (try? storage.gitReadUnchanged(repo: repo.id, fingerprint: fingerprint, now: now)) == true {
+              historySkips += 1
+              completed.insert(repo.id)
+              continue
+            }
+            historyReads += 1
+            read = try prepare(repo, now: now); read.fingerprint = fingerprint; pending[repo.id] = read
+          }
           if try readSlice(read, repo: repo.id, now: now) {
-            try storage.finishGitRead(repo: repo.id, now: now, outcome: .accounted)
+            try storage.finishGitRead(repo: repo.id, now: now, outcome: .accounted, fingerprint: read.fingerprint)
             pending.removeValue(forKey: repo.id); completed.insert(repo.id)
           }
           usage.checkpoint("git_history", cpuNanoseconds: StageUsage.threadCPU() &- historyRun.cpu, items: ["commits": commitReads - historyRun.reads])
@@ -724,6 +744,22 @@ public final class GitCollectionTask {
       pending = try pending.filter { try cancellation.check(); return try storage.gitRepositoryExists($0.key) }
       if !advanced { return }
     }
+  }
+  /// What this repository's read depends on, on disk and in policy (`shared` is this run's
+  /// `gitDiscoveryRevision`). Nil for any doubt, and the read then runs as usual. Runs on the
+  /// Git queue with no lock held and starts no Git child.
+  private func readFingerprint(_ repo: StoredGitRepository, shared: String?) -> String? {
+    guard let shared else { return nil }
+    discoveryLock.lock()
+    let raw = rawDirectories[repo.id]
+    discoveryLock.unlock()
+    guard raw != nil || !repo.needsRawDirectory else { return nil }
+    let directory = raw ?? repo.directory
+    guard let refs = try? GitRefState.digest(commonDirectory: directory, check: {
+      try self.cancellation.check()
+      try self.duringFingerprint?()
+    }), let inputs = try? storage.gitReadInputs(repo: repo.id, shared: shared) else { return nil }
+    return ActivityStorage.gitDigest([directory, refs, inputs].joined(separator: "|"))
   }
   /// Whether a repository's read must stop: every working tree that still exists is a tool's
   /// copy, or none could be cleared and the check failed, which retries with the usual backoff.
@@ -867,6 +903,7 @@ private final class PendingGitRead {
   let directory: String
   let hashes: URL
   var offset: UInt64 = 0
+  var fingerprint: String?
   let cancellation: GitTaskCancellation
   init(scratch: URL, directory: String, hashes: URL, cancellation: GitTaskCancellation) throws {
     self.cancellation = cancellation

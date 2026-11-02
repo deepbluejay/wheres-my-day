@@ -9,9 +9,17 @@ from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
+SWIFTPM = str(Path(__file__).with_name("swiftpm"))  # names the build system; see that file
 
 REPO = Path(__file__).resolve().parent.parent
 HELPERS = REPO / "tools" / "agent-log-adoption"
+
+
+def built_debug():
+    """The debug folder, its objects built now: a plain swift build leaves this folder alone."""
+    subprocess.run([SWIFTPM, "build", "--jobs", "1", "--target", "Inbound"], cwd=REPO, check=True, capture_output=True)
+    subprocess.run([SWIFTPM, "build", "--jobs", "1", "--target", "Storage"], cwd=REPO, check=True, capture_output=True)
+    return Path(subprocess.check_output([SWIFTPM, "build", "--show-bin-path"], cwd=REPO, text=True, stderr=subprocess.DEVNULL).strip())
 
 
 def run(args, **kwargs):
@@ -138,7 +146,7 @@ def check_origin(revision, version, debug=None):
                      "-I", old, "-L", old, "-lCore", "-o", old / "libInbound.dylib", *sorted((old / "Sources/Inbound").glob("*.swift"))], stdout=log, stderr=log)
                 run(["swiftc", "-I", old, "-L", old, "-lCore", "-lStorage", "-lInbound", "-lsqlite3", "-Xlinker", "-rpath", "-Xlinker", old,
                      HELPERS / "verify.swift", "-o", base / "verify-control"], stdout=log, stderr=log)
-            debug = debug or Path(subprocess.check_output(["swift", "build", "--show-bin-path"], cwd=REPO, text=True).strip())
+            debug = debug or built_debug()
             objects = [p for module in ("Core", "Storage", "Inbound") for p in sorted((debug / f"{module}.build").glob("*.swift.o"))]
             run(["swiftc", "-I", debug / "Modules", HELPERS / "verify.swift", *objects, "-lsqlite3", "-o", base / "verify"], stdout=log, stderr=log)
             run(["swiftc", "-I", debug / "Modules", HELPERS / "verify-cursors.swift", *objects, "-lsqlite3", "-o", base / "verify-cursors"], stdout=log, stderr=log)
@@ -206,7 +214,7 @@ def check_rejected_branch_origin(debug=None):
                 run(args + sorted((old / "Sources" / module).glob("*.swift")), stdout=log, stderr=log)
             run(["swiftc", "-I", old, "-L", old, "-lCore", "-lStorage", "-lsqlite3", "-Xlinker", "-rpath", "-Xlinker", old,
                  HELPERS / "seed.swift", "-o", base / "seed"], stdout=log, stderr=log)
-            debug = debug or Path(subprocess.check_output(["swift", "build", "--show-bin-path"], cwd=REPO, text=True).strip())
+            debug = debug or built_debug()
             objects = [p for module in ("Core", "Storage") for p in sorted((debug / f"{module}.build").glob("*.swift.o"))]
             run(["swiftc", "-I", debug / "Modules", HELPERS / "open-only.swift", *objects, "-lsqlite3", "-o", base / "open-only"], stdout=log, stderr=log)
         (base / "cases.json").write_text("[]")

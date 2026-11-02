@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -75,6 +76,8 @@ class PackagingTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         shutil.copy2(ROOT / 'probe.sh', self.root)
         shutil.copy2(ROOT / 'Info.plist', self.root)
+        (self.root / 'tools').mkdir()
+        shutil.copy2(ROOT / 'tools/swiftpm', self.root / 'tools')
         self.bin = self.root / 'fake-bin'
         self.bin.mkdir()
         dispatcher = self.bin / 'dispatch'
@@ -291,9 +294,9 @@ class PackagingTests(unittest.TestCase):
         calls = self.events()
         builds = [call for call in calls if call[0] == 'swift']
         self.assertEqual(builds, [['swift', 'package', 'resolve'],
-                                 ['swift', 'build', '--jobs', '1', '--product', 'ActivityProbe'],
-                                 ['swift', 'build', '--jobs', '1', '--product', 'ActivityQueryServer'],
-                                 ['swift', 'build', '--jobs', '1', '--show-bin-path']])
+                                 ['swift', 'build', '--build-system', 'native', '--jobs', '1', '--product', 'ActivityProbe'],
+                                 ['swift', 'build', '--build-system', 'native', '--jobs', '1', '--product', 'ActivityQueryServer'],
+                                 ['swift', 'build', '--build-system', 'native', '--jobs', '1', '--show-bin-path']])
         signs = [call for call in calls if call[0] == 'codesign']
         self.assertEqual([call[1:-1] for call in signs],
                          [['--force', '--sign', '-'], ['--force', '--sign', '-'],
@@ -302,6 +305,49 @@ class PackagingTests(unittest.TestCase):
                          ['ActivityQueryServer', 'ActivityProbe.app', 'ActivityQueryServer', 'ActivityProbe.app'])
         self.assertFalse((self.root / 'ran').exists())
 
+
+    # Ideal: one file names the build system, so no check or test reads objects another build system made. Prose may say
+    # `plain swift build`; any other swift build, test or run, bare, with options or as an argument list, is a command.
+    BUILD_RULE = re.compile(r"""['"]swift['"]\s*,\s*['"](build|test|run)['"]|(?<!plain )(?<!plain `)(?<!그냥 `)\bswift (build|test|run)\b"""
+                            r"""|\.build/debug\b|arm64-apple""")
+
+    def test_every_build_goes_through_the_one_build_system_rule(self):
+        names = [ROOT / 'probe.sh', ROOT / 'AGENTS.md']
+        for folder in ('tools', 'tests', 'Plugins'):
+            for pattern in ('*.py', '*.md', '*.swift', '*.sh'):
+                names.extend(path for path in (ROOT / folder).rglob(pattern) if '.build' not in path.parts)
+        self.assertGreater(len([name for name in names if 'tests' in name.parts]), 30, 'the rule must read the real tests')
+        self.assertGreater(len([name for name in names if 'Plugins' in name.parts]), 1, 'the rule must read the plugins')
+        found = [f'{path.relative_to(ROOT)}: {match.group()}' for path in names if path != Path(__file__).resolve()
+                 for match in self.BUILD_RULE.finditer(path.read_text(errors='replace'))]
+        self.assertEqual(found, [])
+
+    def test_the_build_rule_sees_every_spelling_of_a_command(self):
+        commands = ['swift build --jobs 1', 'swift build', 'run(["swift", "build", "--product", "X"])', "('swift', 'test')",
+                    'subprocess.run(["swift","run", "X"])', '$(swift build --show-bin-path)', '.build/debug/ActivityQueryServer',
+                    '.build/arm64-apple-macosx/debug', 'cd repo && swift test']
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertTrue(self.BUILD_RULE.search(command))
+        for prose in ('a plain swift build writes elsewhere', 'A plain `swift build` repoints it', '그냥 `swift build` 는',
+                      'tools/swiftpm build --show-bin-path', 'swift package dump-package', 'a swift builder'):
+            with self.subTest(prose=prose):
+                self.assertIsNone(self.BUILD_RULE.search(prose))
+
+    # Ideal: the rule names one build system, and refuses a use that would not pass it on.
+    def test_the_build_system_rule_adds_native_and_refuses_what_it_cannot_pass_on(self):
+        wrapper = str(self.root / 'tools/swiftpm')
+        for arguments in (['build', '--show-bin-path'], ['test', '--jobs', '1'], ['run', 'Invented']):
+            (self.root / 'events').unlink(missing_ok=True)
+            done = subprocess.run([wrapper, *arguments], env=dict(self.environment, FAILURE='', PATH=self.environment['PATH']),
+                                  capture_output=True, text=True, timeout=30)
+            self.assertEqual(self.events()[0][:3], ['swift', arguments[0], '--build-system'], done.stderr)
+            self.assertEqual(self.events()[0][3:], ['native', *arguments[1:]])
+        for arguments in ([], ['package', 'resolve']):
+            (self.root / 'events').unlink(missing_ok=True)
+            done = subprocess.run([wrapper, *arguments], env=self.environment, capture_output=True, text=True, timeout=30)
+            self.assertEqual(done.returncode, 2)
+            self.assertEqual(self.events(), [])
 
     def test_explicit_identity_is_passed_without_discovery(self):
         result = self.run_wrapper('build', identity='Invented signing identity')

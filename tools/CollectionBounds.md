@@ -310,7 +310,7 @@ quota or automatic collection stop.
 
 `tools/measure_collection_maintenance.swift` keeps that exact-reuse scenario beside
 a changing-payload/high-event-rate scenario. Compile with the debug Core/Storage
-objects, `-I .build/debug/Modules -lsqlite3`, then pass an owned temporary directory
+objects from `tools/swiftpm`, `-I "$(tools/swiftpm build --show-bin-path)/Modules" -lsqlite3`, then pass an owned temporary directory
 and `seed`, `noop`, `forget`, `forget-day`, `day`, `capture`, `tick`, `repair`, `growth`,
 `validate` or `variant`. The 30-day seed preserves
 the same event/occurrence dimensions and adds 192 distinct scenes each day. It

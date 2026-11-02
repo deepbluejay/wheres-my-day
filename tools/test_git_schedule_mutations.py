@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+SWIFTPM = str(pathlib.Path(__file__).with_name('swiftpm'))  # names the build system; see that file
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 GATE = 'Sources/Storage/GitPublication.swift'
@@ -80,7 +81,7 @@ def verify_original_trace(copy, logs, name, trace):
               "  }\n}\n")
     try:
         path.write_text(original + replay)
-        code, output = run(['swift', 'test', '--jobs', '1', '--filter',
+        code, output = run([SWIFTPM, 'test', '--jobs', '1', '--filter',
                             'GitPublicationScheduleTests.testCounterexampleOnUnmodifiedSource'],
                            copy, logs / (name + '-original-trace.log'))
         if code or not re.search(r'Executed 1 test, with 0 failures', output):
@@ -102,7 +103,7 @@ def main():
         shutil.copy2(ROOT / 'Package.swift', copy / 'Package.swift')
         logs = args.report_dir or work / 'logs'
         logs.mkdir(parents=True, exist_ok=True)
-        command = ['swift', 'test', '--jobs', '1', '--filter', 'GitPublicationScheduleTests']
+        command = [SWIFTPM, 'test', '--jobs', '1', '--filter', 'GitPublicationScheduleTests']
         code, output = run(command, copy, logs / 'baseline.log')
         if code or not re.search(r'Executed 7 tests, with 0 failures', output):
             raise AssertionError('Unmodified copied-source baseline did not pass; see ' + str(logs / 'baseline.log'))
@@ -114,7 +115,7 @@ def main():
                 raise AssertionError(name + ': mutation anchor is not unique')
             try:
                 path.write_text(original.replace(before, after))
-                code, output = run(['swift', 'test', '--jobs', '1', '--filter', 'GitPublicationScheduleTests.' + method], copy, logs / (name + '.log'))
+                code, output = run([SWIFTPM, 'test', '--jobs', '1', '--filter', 'GitPublicationScheduleTests.' + method], copy, logs / (name + '.log'))
                 marker = 'MODEL ' + name
                 if not code or 'Build complete!' not in output or marker not in output or '1-minimal=' not in output:
                     raise AssertionError(name + ': mutant survived or failed for an unrelated reason')

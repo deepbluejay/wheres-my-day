@@ -3,6 +3,7 @@
 import pathlib
 import subprocess
 import sys
+SWIFTPM = str(pathlib.Path(__file__).with_name('swiftpm'))  # names the build system; see that file
 
 LAUNCH = 'AdapterTests/testEveryCodexChildUsesPlanTokenAndEphemeralCredentialStore'
 ERRORS = 'AdapterTests/testPlanFailuresUpdateTheTokenPortWithoutReplayingTools|AdapterTests/testPlanTokenRefresh|AdapterTests/testNativePlanFailures|CodexPlanFailureTests'
@@ -64,7 +65,7 @@ def main():
     if pathlib.Path('/tmp').resolve() not in repo.parents or (repo / '.git').exists():
         raise SystemExit('An expendable temporary copy without .git is required.')
     chosen = set(sys.argv[2:])
-    baseline = subprocess.run(['swift', 'test', '--jobs', '1', '--filter', LAUNCH + '|' + ERRORS + '|' + SCOPED + '|AdapterTests/testHostSIGKILL|CodexHomeTests|ChatGPTModelsTests|AdapterTests/testAccountCatalog|ConversationScreenTests/testAccountSwitch'],
+    baseline = subprocess.run([SWIFTPM, 'test', '--jobs', '1', '--filter', LAUNCH + '|' + ERRORS + '|' + SCOPED + '|AdapterTests/testHostSIGKILL|CodexHomeTests|ChatGPTModelsTests|AdapterTests/testAccountCatalog|ConversationScreenTests/testAccountSwitch'],
                               cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     (repo.parent / 'codex-mutation-baseline.log').write_text(baseline.stdout)
     if baseline.returncode != 0:
@@ -80,7 +81,7 @@ def main():
             raise SystemExit(f'{name}: mutation anchor must occur exactly once')
         try:
             path.write_text(text.replace(before, after))
-            result = subprocess.run(['swift', 'test', '--jobs', '1', '--filter', selected],
+            result = subprocess.run([SWIFTPM, 'test', '--jobs', '1', '--filter', selected],
                                     cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             (repo.parent / f'codex-mutation-{name}.log').write_text(result.stdout)
             if result.returncode == 0 or 'Build complete!' not in result.stdout or 'Test Suite' not in result.stdout or 'failed' not in result.stdout:

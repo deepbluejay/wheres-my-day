@@ -7,6 +7,7 @@ import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
+SWIFTPM = str(Path(__file__).with_name('swiftpm'))  # names the build system; see that file
 TEMP = Path(os.environ.get('ACTIVITYPROBE_TEST_ROOT', '/tmp/ap-mask-fix'))
 
 
@@ -52,7 +53,7 @@ let package = Package(name: "ShapeMutation", platforms: [.macOS(.v14)], targets:
             assert source.count(before) == 1, name
         changed = source.replace(before, after, 1) if before else source
         (package / 'Sources/Core/Redaction.swift').write_text(changed)
-        command = ['swift', 'test', '--jobs', '1', '--scratch-path', str(TEMP/'mutation-build'),
+        command = [SWIFTPM, 'test', '--jobs', '1', '--scratch-path', str(TEMP/'mutation-build'),
                    '--package-path', str(package), '--filter', 'RedactionShapeTests']
         run = subprocess.run(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         (TEMP / ('mutation-' + name.replace(' ', '-') + '.log')).write_text(run.stdout)

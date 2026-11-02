@@ -52,6 +52,9 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
   /// Repositories the Git task found to be a tool's copy, or could not yet tell apart from
   /// one. In memory only: the task decides again in each process.
   var gitCopyRepositories = Set<Int>()
+  /// Stands for the masking rules, which are code: a new build reads every repository once,
+  /// so stored ref names take the new masks at its first run.
+  var gitMaskRevision = ActivityStorage.gitBuildRevision
   var gitStageConnection: SQLiteConnection?
   var gitStageCancellation: GitTaskCancellation?
   let gitStageLock = NSRecursiveLock()
@@ -782,4 +785,14 @@ public final class ActivityStorage: SampleWriter, ObservationWriter, SampleReade
       }
     }
   }
+}
+
+extension ActivityStorage {
+  /// The running executable's identity by stat data. Empty when it cannot be read, in which
+  /// case a new build waits for the unchanged-read lifetime instead.
+  static let gitBuildRevision: String = {
+    var info = stat()
+    guard let path = Bundle.main.executablePath, stat(path, &info) == 0 else { return "" }
+    return "\(info.st_dev):\(info.st_ino):\(info.st_size):\(info.st_mtimespec.tv_sec):\(info.st_mtimespec.tv_nsec)"
+  }()
 }

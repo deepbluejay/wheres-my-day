@@ -7,6 +7,7 @@ Each mutation is applied alone, its tests are built and run, and the source is r
 import pathlib
 import subprocess
 import sys
+SWIFTPM = str(pathlib.Path(__file__).with_name('swiftpm'))  # names the build system; see that file
 
 DENY = 'AdapterTests/testBothEnginesDenyLoginFilesWithAndWithoutApprovals'
 LAUNCH = 'AdapterTests/testBothAdaptersAndOwnSessions|AdapterTests/testSkipSettingChangesOnlyPermissionPolicy'
@@ -168,7 +169,7 @@ def main():
             raise SystemExit(f'{name}: mutation anchor must occur exactly once')
         try:
             path.write_text(text.replace(before, after))
-            result = subprocess.run(['swift', 'test', '--jobs', '1', '--filter', selected],
+            result = subprocess.run([SWIFTPM, 'test', '--jobs', '1', '--filter', selected],
                                     cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             (repo.parent / f'mutation-{name}.log').write_text(result.stdout)
             if result.returncode == 0 or 'error:' not in result.stdout or 'Build complete!' not in result.stdout:
