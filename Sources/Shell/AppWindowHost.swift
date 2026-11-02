@@ -42,6 +42,8 @@ final class AppWindowHealthSource {
   private let strings: AppWindowStrings
   /// Runs once when the Dock's Quit ends the process, since `terminate` never returns to the caller.
   var terminating: (() -> Void)?
+  /// The optional Settings section this build adds, if any.
+  var extraSection: (SettingsStrings) -> AnyView? = { _ in nil }
   init(strings: AppWindowStrings, makeModel: @escaping () throws -> (AppWindowModel, ActivityStorage)) {
     self.strings = strings; self.makeModel = makeModel
   }
@@ -51,16 +53,18 @@ final class AppWindowHealthSource {
         let (model, backup) = try makeModel()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 780),
           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        self.model = model; self.window = window
+        self.window = window
+        adopt(model) { [weak window] in window?.occlusionState.contains(.visible) ?? true }
         window.isReleasedWhenClosed = false; window.delegate = self
         window.title = "ActivityProbe"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.minSize = NSSize(width: AppWindowLayout.minimumWidth, height: 480)
-        window.contentView = NSHostingView(rootView: AppWindowView(model: model, strings: strings, backup: backup))
+        window.contentView = NSHostingView(rootView: AppWindowView(model: model, strings: strings, backup: backup, extraSection: extraSection))
         window.center()
       } catch { return false }
     }
     guard let model, let window else { return false }
-    model.navigate(target); model.startConversationObservation()
+    // The view's task starts the loop too, but a window that opens covered must not depend on that.
+    model.navigate(target); model.start(); model.startConversationObservation()
     bringForward(window)
     return true
   }
@@ -75,6 +79,17 @@ final class AppWindowHealthSource {
     window.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
   }
+  /// The model reads occlusion only through this closure, so a test can drive it with no window.
+  func adopt(_ model: AppWindowModel, windowIsVisible: @escaping () -> Bool) {
+    self.model = model
+    model.readWindowVisible = windowIsVisible
+  }
+  /// Miniaturized, behind other windows, on another Space, a hidden app, a locked or sleeping display.
+  func windowDidChangeOcclusionState(_ notification: Notification) { model?.windowOcclusionChanged() }
+  /// A window becoming key is in use, whatever occlusion said. This is no safety net on its own: a window in use
+  /// is often already key, or beside the key window of another app. What bounds a wrong report is the hidden tick:
+  /// it re-reads occlusion, so a missed notification ends there, and it reads, so a wrong value costs at most 5 s.
+  func windowDidBecomeKey(_ notification: Notification) { model?.setWindowVisible(true) }
   func windowWillClose(_ notification: Notification) {
     model?.close(); model = nil
     window?.contentView = nil; window = nil

@@ -153,13 +153,17 @@ public struct TimelineDay: Equatable {
     health: TimelineHealth = TimelineHealth()) throws -> Self {
     let settings = try storage.settings()
     let day = try range(containing: time, dayStartHour: settings.dayStartHour, calendar: calendar)
-    let end = min(day.end, max(day.start, floorMinute(now)))
-    let visible = TimeRange(day.start, end)
+    let visible = visibleRange(of: day, now: now)
     let minutes = try SummaryTimeline.minutes(in: visible, storage: storage)
     let intervals = visible.start < visible.end ? try storage.intervals(in: visible) : []
     var result = make(range: day, minutes: minutes, intervals: intervals, now: now, calendar: calendar)
     result.notices = TimelineNotices.make(settings: settings, health: health)
     return result
+  }
+
+  /// The finished minutes of a day. The unfinished current minute waits for the next read.
+  public static func visibleRange(of day: TimeRange, now: Int) -> TimeRange {
+    TimeRange(day.start, min(day.end, max(day.start, floorMinute(now))))
   }
 
   /// Range boundaries must be minute aligned. The unfinished current minute waits for the next read.
@@ -239,5 +243,5 @@ public struct TimelineDay: Equatable {
     return groups
   }
 
-  private static func floorMinute(_ time: Int) -> Int { time - ((time % 60 + 60) % 60) }
+  public static func floorMinute(_ time: Int) -> Int { time - ((time % 60 + 60) % 60) }
 }

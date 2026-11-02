@@ -198,7 +198,7 @@ public struct SettingsPage: View {
         VStack(alignment: .leading, spacing: 4) {
           let label: SettingsLabel = permission == .accessibility ? .accessibility : permission == .inputMonitoring ? .inputMonitoring : .screenRecording
           text(label).fontWeight(.medium)
-          text(model.health.missingPermissions.contains(permission) ? .missing : .granted)
+          text(model.permissionLabel(permission))
           if model.health.missingPermissions.contains(permission) {
             systemButton(SettingsSystemTarget(rawValue: permission.rawValue)!)
           }
@@ -305,11 +305,13 @@ public struct SettingsView: View {
   private let backupActions: SettingsBackupActions
   /// Opens ChatGPT's usage settings in the person's browser; only ever on their click.
   private let manageUsage: () -> Void
+  /// A section this build adds to the page, if any.
+  private let extraSection: AnyView?
   /// Pass the host's retained forDatabase controller after updating its health and notice destination.
   public init(controller: SettingsController, strings: SettingsStrings, system: SettingsSystemActions, appCatalog: SettingsAppCatalog,
     appChooser: SettingsAppChooser = MacSettingsAppChooser(), backupActions: SettingsBackupActions,
-    manageUsage: @escaping () -> Void = { NSWorkspace.shared.open(AppPaths.chatGPTUsageSettings) }) {
-    self.manageUsage = manageUsage
+    manageUsage: @escaping () -> Void = { NSWorkspace.shared.open(AppPaths.chatGPTUsageSettings) }, extraSection: AnyView? = nil) {
+    self.manageUsage = manageUsage; self.extraSection = extraSection
     self.controller = controller; self.appChooser = appChooser; self.backupActions = backupActions; self.strings = strings; self.system = system; self.appCatalog = appCatalog
   }
   public var body: some View {

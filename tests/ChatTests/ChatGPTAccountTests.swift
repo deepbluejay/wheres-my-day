@@ -602,13 +602,18 @@ extension ChatGPTSignInTests {
       func overview() -> ChatGPTAccountOverview { reads += 1; return inner.overview() }
     }
     let counting = Counting(account)
-    let reader = ChatGPTStatusReader(account: counting, clock: { now })
-    XCTAssertEqual(reader.status(), .usageLimited)
+    let reader = ChatGPTStatusReader(account: counting, clock: { now }, run: { $0() })
+    func status() -> ChatGPTConnectionStatus? {
+      var answer: ChatGPTConnectionStatus?
+      reader.check { answer = $0 }
+      return answer
+    }
+    XCTAssertEqual(status(), .usageLimited)
     account.current = .connected
     now += ChatGPTStatusReader.interval - 1
-    XCTAssertEqual(reader.status(), .usageLimited); XCTAssertEqual(counting.reads, 1)
+    XCTAssertEqual(status(), .usageLimited); XCTAssertEqual(counting.reads, 1)
     now += 1
-    XCTAssertEqual(reader.status(), .connected); XCTAssertEqual(counting.reads, 2)
+    XCTAssertEqual(status(), .connected); XCTAssertEqual(counting.reads, 2)
   }
 }
 

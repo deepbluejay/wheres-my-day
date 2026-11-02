@@ -132,8 +132,10 @@ public struct AppWindowView: View {
   @ObservedObject private var model: AppWindowModel
   private let strings: AppWindowStrings
   private let backup: SettingsBackupActions
-  public init(model: AppWindowModel, strings: AppWindowStrings, backup: SettingsBackupActions) {
-    self.model = model; self.strings = strings; self.backup = backup
+  private let extraSection: (SettingsStrings) -> AnyView?
+  public init(model: AppWindowModel, strings: AppWindowStrings, backup: SettingsBackupActions,
+    extraSection: @escaping (SettingsStrings) -> AnyView? = { _ in nil }) {
+    self.model = model; self.strings = strings; self.backup = backup; self.extraSection = extraSection
   }
   public var body: some View {
     AppWindowFrame(strings: strings, settingsVisible: model.settingsVisible, panelOpen: model.panelOpen, layout: model.layout,
@@ -141,8 +143,10 @@ public struct AppWindowView: View {
       new: { model.conversation?.newConversation() }, close: model.closePanel, resize: model.choosePanelWidth) { width in
         Group {
           if model.settingsVisible {
-            SettingsView(controller: model.settings, strings: SettingsStrings(language: strings.language, resources: strings.resources),
-              system: MacSettingsSystemActions(), appCatalog: MacSettingsAppCatalog(), backupActions: backup)
+            let settingsStrings = SettingsStrings(language: strings.language, resources: strings.resources)
+            SettingsView(controller: model.settings, strings: settingsStrings,
+              system: MacSettingsSystemActions(), appCatalog: MacSettingsAppCatalog(), backupActions: backup,
+              extraSection: extraSection(settingsStrings))
           } else {
             VStack(alignment: .leading, spacing: 0) {
               if model.readFailed { Text(verbatim: strings.text(.readFailed)).padding(20) }

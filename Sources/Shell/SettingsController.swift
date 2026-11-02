@@ -72,7 +72,7 @@ public typealias SettingsDeadlineSchedule = @MainActor (Int, @escaping @MainActo
   private var cancelled = false
   private static var sessions: [String: WeakSettingsController] = [:]
   init(store: SettingsEditingStore, connector: SubscriptionConnector, ownBundleID: String, claudeConnector: SubscriptionConnector? = nil,
-    claudeLogin: ClaudeLoginSource? = nil, health: TimelineHealth = TimelineHealth(), section: SettingsSection = .recording,
+    claudeLogin: ClaudeLoginSource? = nil, health: TimelineHealth = .unread, section: SettingsSection = .recording,
     clock: @escaping () -> Int = { Int(Date().timeIntervalSince1970) },
     schedule: @escaping SettingsDeadlineSchedule = SettingsController.scheduleDeadline,
     pollSchedule: @escaping SettingsDeadlineSchedule = SettingsController.scheduleDeadline, chatGPT: ChatGPTAccount? = nil) throws {

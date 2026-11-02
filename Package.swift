@@ -21,6 +21,8 @@ let package = Package(
     .executableTarget(name: "MenuRender", dependencies: ["Core", "Shell"], path: "tools/menu-render"),
     .executableTarget(name: "WindowRender", dependencies: ["Core", "Shell"], path: "tools/window-render"),
     .executableTarget(name: "TimelineRender", dependencies: ["Core", "Shell"], path: "tools/timeline-render"),
+    .executableTarget(name: "WindowRefreshCPU", dependencies: ["Core", "Storage", "Outbound", "Shell"], path: "tools/window-refresh-cpu",
+      linkerSettings: [.linkedLibrary("sqlite3")]),
     .executableTarget(name: "ActivityQueryServer", dependencies: ["Core", "Storage", "Query"], path: "tools/activity-query-server",
       plugins: ["ImportBoundary"]),
     .testTarget(name: "ChatTests", dependencies: ["Core", "Storage", "Inbound", "Outbound", "Shell", "Query"], path: "tests/ChatTests", exclude: ["Fixtures"]),

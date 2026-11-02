@@ -139,6 +139,8 @@ final class AppWindowTests: XCTestCase {
     XCTAssertFalse(model.snapshot?.day.notices.contains { $0.kind == .summaryFailure } == true)
     model.showToday(); await model.refresh()
     XCTAssertEqual(model.snapshot?.health.summary?.failedRanges, [unresolved])
+    // Health is checked beside the read and asks for another read when it answers.
+    for _ in 0..<1000 where model.snapshot?.health.chatGPT != .notConnected { try await Task.sleep(for: .milliseconds(2)) }
     XCTAssertEqual(model.snapshot?.health.chatGPT, .notConnected)
     XCTAssertFalse(model.snapshot?.day.notices.contains { $0.kind == .summaryPaused } == true)
     model.openConversation(); XCTAssertEqual(events, ["connectors"])
@@ -365,10 +367,16 @@ private final class WindowChannelResult {
 
 extension AppWindowTests {
   @MainActor func testUnavailableHealthAndStatusCacheSurviveWindowReopening() async throws {
+    // Both read on the Keychain's thread and on this one, so both are behind a lock.
     final class Account: ChatGPTAccount {
-      var reads = 0
+      private let lock = NSLock()
+      private var count = 0
+      var reads: Int { lock.lock(); defer { lock.unlock() }; return count }
       func status() -> ChatGPTConnectionStatus { .connected }
-      func overview() -> ChatGPTAccountOverview { reads += 1; return ChatGPTAccountOverview(status: .connected, registered: true) }
+      func overview() -> ChatGPTAccountOverview {
+        lock.lock(); count += 1; lock.unlock()
+        return ChatGPTAccountOverview(status: .connected, registered: true)
+      }
       func connect() throws {}
       func connectDifferentAccount() throws {}
       func revokeUnusedGrants() -> Bool { true }
@@ -387,20 +395,33 @@ extension AppWindowTests {
     factories.claudeConnector = { _, _ in WindowConnector() }
     factories.chatGPT = { _ in ChatGPTSession(store: InMemoryChatGPTCredentialStore(), lock: ChatGPTCredentialLock(file: nil), openBrowser: { _ in false }) }
     let composition = AppComposition(paths: paths, factories: factories)
-    var now: TimeInterval = 100
-    let reader = ChatGPTStatusReader(account: account, clock: { now })
+    final class Clock {
+      private let lock = NSLock()
+      private var value: TimeInterval = 100
+      var now: TimeInterval { lock.lock(); defer { lock.unlock() }; return value }
+      func advance(_ seconds: TimeInterval) { lock.lock(); value += seconds; lock.unlock() }
+    }
+    let clock = Clock()
+    let reader = ChatGPTStatusReader(account: account, clock: { clock.now })
     func make() throws -> AppWindowModel {
       let pair = try composition.windowModel(codex: .fixed(root.appendingPathComponent("absent-a")),
         claude: .fixed(root.appendingPathComponent("absent-b")), health: { TimelineHealth() }, statusReader: reader)
       return pair.0
     }
-    let first = try make(); await first.refresh(); XCTAssertEqual(account.reads, 1)
+    let first = try make(); await first.refresh()
+    // Health is checked beside the read, so its answer is the moment to count.
+    func answered(_ model: AppWindowModel) async throws {
+      for _ in 0..<1000 where model.snapshot?.health.chatGPT != .connected { try await Task.sleep(for: .milliseconds(2)) }
+      XCTAssertEqual(model.snapshot?.health.chatGPT, .connected)
+    }
+    try await answered(first); XCTAssertEqual(account.reads, 1)
     XCTAssertFalse(first.snapshot?.day.notices.contains { $0.kind == .summaryPaused } == true)
     first.close()
     // The recorder publishes only a time/reason; window health and settings consume that same value.
     let until = Date().timeIntervalSince1970 + 300
     try database.saveSummaryUnavailableUntil(until)
     let second = try make(); await second.refresh()
+    try await answered(second)
     XCTAssertEqual(account.reads, 1)
     XCTAssertEqual(second.snapshot?.health.summary?.serviceUnavailableUntil, until)
     XCTAssertTrue(second.snapshot?.day.notices.contains { $0.kind == .summaryPaused } == true)
@@ -412,7 +433,9 @@ extension AppWindowTests {
     let summaries = ClaudeSummaryRow(model: second.settings.model)
     XCTAssertTrue(summaries.notes.contains(.serviceUnavailableNote)); XCTAssertTrue(summaries.showsProblem)
     let before = account.reads
-    now += 30; await second.refresh(); XCTAssertEqual(account.reads, before + 1)
+    clock.advance(30); await second.refresh()
+    for _ in 0..<1000 where account.reads != before + 1 { try await Task.sleep(for: .milliseconds(2)) }
+    XCTAssertEqual(account.reads, before + 1)
     XCTAssertTrue(second.snapshot?.day.notices.contains { $0.kind == .summaryPaused } == true)
     try database.saveSummaryUnavailableUntil(Date().timeIntervalSince1970 - 1)
     await second.refresh()

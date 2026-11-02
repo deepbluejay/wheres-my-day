@@ -2,15 +2,12 @@ import Foundation
 
 public protocol SummaryStorage: SummaryTimelineReader, SampleReader, EvidenceReader, IntervalReader, IntervalWriter,
   ModelCallStore, SettingsStore, ForgottenRangeReader {
-  /// The samples a plan reads, with what it uses: time, input counts, keeping awake, exclusion.
-  func planningSamples(in range: TimeRange) throws -> [TimeSample]
   /// The ranges of the intervals `intervals(in:)` returns, without their text.
   func intervalRanges(in range: TimeRange) throws -> [TimeRange]
   /// Sample rows stored after `mark`; nil when the store cannot tell, and then every plan reads in full.
   func sampleChanges(since mark: SampleMark?) throws -> SampleChanges?
 }
 extension SummaryStorage {
-  public func planningSamples(in range: TimeRange) throws -> [TimeSample] { try samples(in: range) }
   public func intervalRanges(in range: TimeRange) throws -> [TimeRange] { try intervals(in: range).map(\.range) }
   public func sampleChanges(since mark: SampleMark?) throws -> SampleChanges? { nil }
 }
@@ -362,7 +359,7 @@ public struct SummaryFormat {
   """
 }
 
-public struct SummaryHealth {
+public struct SummaryHealth: Equatable {
   public init() {}
   /// Attempt rows remain for accounting; an exact-range success resolves earlier failures.
   public static func unresolvedFailedRanges(in calls: [ModelCall]) -> [TimeRange] {

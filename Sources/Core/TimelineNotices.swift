@@ -12,7 +12,7 @@ public struct TimelineNotice: Equatable {
   public let line: String
   public let target: TimelineNoticeTarget
 }
-public struct TimelineHealth {
+public struct TimelineHealth: Equatable {
   public var missingPermissions: Set<TimelinePermission>
   public var security: DeviceSecurityHealth
   /// nil means no summary health snapshot yet; the persisted connection setting still applies.
@@ -21,10 +21,16 @@ public struct TimelineHealth {
   /// The ChatGPT sign-in as the window last read it; nil when not read. Summaries use Claude, so it no
   /// longer pauses them.
   public var chatGPT: ChatGPTConnectionStatus?
+  /// False until a check has answered: `missingPermissions` is then empty because nothing was read,
+  /// which is not the same as every permission being allowed.
+  public var permissionsRead: Bool
   public init(missingPermissions: Set<TimelinePermission> = [], security: DeviceSecurityHealth = DeviceSecurityHealth(),
-    summary: SummaryHealth? = nil, chatGPT: ChatGPTConnectionStatus? = nil) {
+    summary: SummaryHealth? = nil, chatGPT: ChatGPTConnectionStatus? = nil, permissionsRead: Bool = true) {
     self.missingPermissions = missingPermissions; self.security = security; self.summary = summary; self.chatGPT = chatGPT
+    self.permissionsRead = permissionsRead
   }
+  /// What a window knows before its first check answers.
+  public static let unread = TimelineHealth(permissionsRead: false)
 }
 
 public enum TimelineNotices {

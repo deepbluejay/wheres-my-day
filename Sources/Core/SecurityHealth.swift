@@ -24,7 +24,7 @@ public struct StorageSecurityHealth {
     self.backupExclusionFailure = backupExclusionFailure
   }
 }
-public struct DeviceSecurityHealth {
+public struct DeviceSecurityHealth: Equatable {
   public var fileVault: FileVaultStatus = .unknown
   public var backupExclusionFailure: StorageSecurityFailure?
   public init() {}

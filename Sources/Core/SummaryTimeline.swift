@@ -1,6 +1,12 @@
 import Foundation
 
-public protocol SummaryTimelineReader: SampleReader, IntervalReader, ModelCallReader, ForgottenRangeReader {}
+public protocol SummaryTimelineReader: SampleReader, IntervalReader, ModelCallReader, ForgottenRangeReader {
+  /// The samples a plan or the grid reads, with what they use: time, input counts, keeping awake, exclusion.
+  func planningSamples(in range: TimeRange) throws -> [TimeSample]
+}
+extension SummaryTimelineReader {
+  public func planningSamples(in range: TimeRange) throws -> [TimeSample] { try samples(in: range) }
+}
 
 public enum SummaryMinuteKind: String, CaseIterable {
   // Pending input is unsummarized; pending quiet/display-on minutes are blank.
@@ -48,7 +54,7 @@ public enum SummaryTimeline {
     let completed = try storage.modelCalls(overlapping: range).filter { !$0.pending && $0.succeeded }
     let facts = TimeRange(min(range.start, completed.map(\.range.start).min() ?? range.start) - (RestPolicy.inputAgeSeconds + 1),
       max(range.end, completed.map(\.range.end).max() ?? range.end) + 60)
-    let samples = try storage.samples(in: facts)
+    let samples = try storage.planningSamples(in: facts)
     let intervals = try storage.intervals(in: facts)
     let forgotten = try storage.forgottenRanges(in: facts)
     let inputs = Set(samples.filter(\.hasInput).map { floorMinute($0.ts) })

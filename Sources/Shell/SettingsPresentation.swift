@@ -208,6 +208,14 @@ public struct ChatGPTRow: Equatable {
   }
 }
 
+public extension SettingsViewModel {
+  /// Before any health check has answered nothing is known, and the row must not read as allowed.
+  func permissionLabel(_ permission: TimelinePermission) -> SettingsLabel {
+    if health.missingPermissions.contains(permission) { return .missing }
+    return health.permissionsRead ? .granted : .unknown
+  }
+}
+
 /// What the Claude row says about summaries, which use the person's Claude Code login.
 public struct ClaudeSummaryRow: Equatable {
   public let showsProblem: Bool
